@@ -1,7 +1,8 @@
-# Projection Mapping Pipeline Configuration
-# -----------------------------------------
+# WZRD Default Configuration
+# --------------------------
+# Copy this file to your project directory as 'config.yaml' to customize settings.
 
-# === Resolution normalization settings ===
+# Resolution normalization settings
 resolution:
   # Default aspect ratio for surface images
   # Common options: "16:9", "9:16", "4:3", "3:4", "1:1", "21:9"
@@ -15,7 +16,7 @@ resolution:
   # Images within this tolerance won't be re-cropped
   aspect_tolerance: 0.02
 
-# === 01_darken_image.py settings ===
+# Image darkening settings (darken module)
 darken:
   # Maximum output intensity (0.0-1.0)
   # Lower = darker/more invisible projection
@@ -27,7 +28,7 @@ darken:
   # Higher values = less compression, preserves contrast
   gamma: 1.5
 
-# === 02_subtract_background.py settings ===
+# Background subtraction settings (subtract module)
 subtract:
   # Threshold for difference detection (0-255)
   # Pixels with difference below this are considered background
@@ -47,7 +48,7 @@ subtract:
   # Color space for difference calculation
   # Options: "rgb", "lab", "luminance"
   # - rgb: Simple per-channel difference
-  # - lab: Perceptually uniform color difference
+  # - lab: Perceptually uniform color difference (requires scikit-image)
   # - luminance: Brightness-based difference only
   diff_mode: "luminance"
 

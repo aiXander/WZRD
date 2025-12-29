@@ -1,0 +1,38 @@
+[project]
+name = "wzrd"
+version = "0.1.0"
+description = "VJ projection mapping utilities - image/video processing for creature extraction"
+authors = [{ name = "Xander Steenbrugge" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pillow>=10.0.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# For LAB color space processing
+lab = ["scikit-image>=0.21.0"]
+# For histogram plotting
+plotting = ["matplotlib>=3.7.0"]
+# All optional dependencies
+all = ["scikit-image>=0.21.0", "matplotlib>=3.7.0"]
+
+[project.scripts]
+# CLI entry points (optional - you can run these from command line after install)
+wzrd-darken = "wzrd.cli:darken_cli"
+wzrd-subtract = "wzrd.cli:subtract_cli"
+wzrd-subtract-video = "wzrd.cli:subtract_video_cli"
+wzrd-crop-islands = "wzrd.cli:crop_islands_cli"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["wzrd*"]
+
+[tool.setuptools.package-data]
+wzrd = ["default_config.yaml"]

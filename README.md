@@ -1,6 +1,19 @@
-# Projection Mapping Pipeline
+# WZRD - Projection Mapping Pipeline
 
-A workflow for creating projection-mapped animations where AI-generated characters appear to inhabit real-world surfaces. The pipeline generates content optimized for additive projection by isolating animated elements from static backgrounds.
+A Python toolkit for creating projection-mapped animations where AI-generated characters appear to inhabit real-world surfaces. The pipeline generates content optimized for additive projection by isolating animated elements from static backgrounds.
+
+## Installation
+
+```bash
+# Install from local directory
+pip install -e .
+
+# Install with optional dependencies (LAB color mode, histogram plots)
+pip install -e ".[all]"
+
+# Install from GitHub (for use in other projects)
+pip install "wzrd @ git+https://github.com/xandersteenbrugge/WZRD.git"
+```
 
 ## Overview
 
@@ -21,8 +34,8 @@ This pipeline creates projection content where a luminous character (or any anim
    │ surface      │         │ guidance     │         │ character    │
    │              │         │ image        │         │ poses        │
    └──────────────┘         └──────────────┘         └──────────────┘
-                                                            │
-                                                            ▼
+                                                           │
+                                                           ▼
    ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
    │ 5. SUBTRACT  │         │ 4. GENERATE  │         │   KEYFRAME   │
    │   BACKGROUND │  ◄────  │    VIDEO     │  ◄────  │   SEQUENCE   │
@@ -42,140 +55,136 @@ This pipeline creates projection content where a luminous character (or any anim
    └──────────────┘
 ```
 
-### Step 1: Capture Projection Surface
+## Python API
 
-Photograph the physical surface where you will project (building facade, wall, sculpture, etc.). This image serves as the spatial reference for all generated content.
+### Darken Images
 
-**Requirements:**
-- High resolution capture
-- Stable camera position (matching your projector's perspective)
-- Ambient lighting conditions similar to projection time
+```python
+from wzrd import darken_image, darken_image_file
+from PIL import Image
 
-### Step 2: Darken the Background Image
+# Darken an image in memory
+img = Image.open("surface.jpg")
+darkened = darken_image(img, gamma=1.5, max_brightness=0.15)
 
-**Script:** `01_darken_image.py`
+# Or process a file directly
+darkened_img, info = darken_image_file(
+    "surface.jpg",
+    output_path="surface_dark.jpg",
+    gamma=1.5,
+    max_brightness=0.15,
+    target_aspect="16:9",
+    base_resolution=1920,
+)
+```
 
-Transforms the surface photograph into a subtle, darkened guidance image. This becomes the static background that AI models will use as context for generating characters.
+### Background Subtraction (Images)
+
+```python
+from wzrd import subtract_background, subtract_background_file
+
+# Process images in memory
+creature, mask, info = subtract_background(
+    generated_frame,      # PIL Image or numpy array
+    background_frame,     # PIL Image or numpy array
+    threshold=10,
+    boost=1.1,
+    feather_radius=4,
+    diff_mode='luminance',  # 'rgb', 'lab', or 'luminance'
+    output_mode='additive', # 'additive' or 'alpha'
+)
+
+# Or process files
+creature_img, info = subtract_background_file(
+    "generated.png",
+    "background.png",
+    output_path="creature.png",
+    preview=True,  # Also save composite preview
+)
+```
+
+### Background Subtraction (Video)
+
+```python
+from wzrd import subtract_background_video
+
+info = subtract_background_video(
+    "animation.mp4",
+    "background.png",
+    output_path="creature_video.mp4",
+    threshold=10,
+    boost=1.1,
+    preview=True,
+    progress_callback=lambda frame, total: print(f"Frame {frame}/{total}"),
+)
+```
+
+### Island Extraction
+
+Extract connected components from binary segmentation maps:
+
+```python
+from wzrd import find_islands, crop_islands_file
+
+# Find islands in memory
+islands, labels, binary = find_islands(segmentation_image, min_area=100)
+
+# Process file and save crops
+islands, output_dir = crop_islands_file(
+    "segmentation.png",
+    output_dir="islands_output",
+    min_area=100,
+    connectivity=8,
+)
+```
+
+### Utility Functions
+
+```python
+from wzrd import (
+    parse_aspect_ratio,
+    normalize_image,
+    align_to_reference,
+    center_crop_to_aspect,
+)
+
+# Parse aspect ratio strings
+aspect = parse_aspect_ratio("16:9")  # Returns 1.7778
+
+# Normalize image to aspect ratio and resolution
+normalized = normalize_image(img, target_aspect=1.7778, base_resolution=1920)
+
+# Align generated frame to match reference dimensions
+aligned, info = align_to_reference(generated, reference, tolerance=0.02)
+```
+
+## CLI Commands
+
+The package installs these command-line tools:
 
 ```bash
-python 01_darken_image.py input_photo.jpg --gamma 1.5 --max-brightness 0.15
+# Darken an image
+wzrd-darken image.jpg --gamma 1.5 --max-brightness 0.15 --aspect 16:9
+
+# Subtract background from image
+wzrd-subtract generated.png background.png --threshold 10 --boost 1.1 --preview
+
+# Subtract background from video
+wzrd-subtract-video video.mp4 background.png --threshold 10 --preview
+
+# Extract islands from segmentation map
+wzrd-crop-islands segmentation.png --min-area 100
 ```
-
-**Parameters:**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--gamma` | 1.5 | Dynamic range compression. Lower = more shadow detail |
-| `--max-brightness` | 0.15 | Maximum output intensity (0.0-1.0). 0.15 = 15% of full white |
-| `--aspect` | None | Target aspect ratio for center crop (e.g., 16:9) |
-| `--plot` | False | Save RGB histogram of output |
-
-**Output:** `{input}_darkened_{gamma}.jpg`
-
-### Step 3: Generate AI Keyframes
-
-Use an AI image generator (DALL-E, Midjourney, Stable Diffusion, etc.) to create keyframes featuring your character at various positions on the darkened background.
-
-**Key requirements for prompting:**
-- Keep the background fixed and nearly invisible
-- Position character at different locations for animation
-- Maintain exact aspect ratio and framing
-- Character should emit/reflect light onto immediate surroundings
-
-Example prompt structure:
-```
-Generate an image of [character description] positioned at [location] on this building.
-Keep the building incredibly dark and faint. Let the character illuminate its
-immediate surroundings. The output must have exactly the same aspect ratio and
-framing as the input—they must match 1-to-1 for overlay.
-```
-
-### Step 4: Generate Video Transitions
-
-Use an AI img2img video generator to create smooth transitions between keyframes.
-
-**Requirements:**
-- Fixed camera (no panning, zooming, or movement)
-- Static background throughout
-- Only the character should animate
-- Consistent lighting and style across transitions
-
-### Step 5: Subtract Background from Video
-
-**Script:** `03_subtract_background_video.py`
-
-Processes the AI-generated video to isolate only the animated character, removing all unchanged background regions. This creates projection-ready content where black pixels = no light projected.
-
-```bash
-python 03_subtract_background_video.py video.mp4 background_darkened.jpg
-```
-
-**Parameters:**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--threshold` | 10 | Difference threshold (0-255). Higher = more aggressive background removal |
-| `--boost` | 1.1 | Brightness multiplier for extracted content |
-| `--feather` | 4 | Edge feather radius in pixels for soft edges |
-| `--mode` | luminance | Difference calculation: `rgb`, `lab`, or `luminance` |
-| `--output` | additive | Output format: `additive` (black bg) or `alpha` (transparency) |
-| `--preview` | False | Also save preview composite |
-| `--crf` | 18 | FFmpeg quality (0-51, lower = better) |
-
-**Output:** `{input}_creature_{params}.mp4` (or `.mov` for alpha)
-
-### Step 6: Project
-
-Play the processed video through your projector, aligned to the physical surface. The additive blending means:
-- Black pixels (unchanged regions) → No light projected
-- Bright pixels (character/changes) → Light projected
-
-## Single Frame Processing
-
-For testing or still images, use `02_subtract_background.py`:
-
-```bash
-python 02_subtract_background.py keyframe.png background_darkened.jpg --preview
-```
-
-## Resolution Handling
-
-The pipeline is designed to handle resolution and aspect ratio mismatches that commonly occur when using different AI tools.
-
-### How It Works
-
-1. **Step 2 (Darken)** establishes the canonical resolution:
-   - Crops input to target aspect ratio (default: 16:9)
-   - Resizes to base resolution (default: max dimension = 1920px)
-   - This becomes the reference that all subsequent steps align to
-
-2. **Steps 3-4 (AI Generation)** may produce slightly different resolutions:
-   - AI image generators often output at their native resolutions
-   - AI video generators may change dimensions slightly
-
-3. **Step 5 (Subtraction)** automatically aligns frames:
-   - Detects resolution mismatches between video and background
-   - Center-crops frames if aspect ratios differ
-   - Resizes frames to match background dimensions
-   - Ensures consistent subtraction across all frames
-
-### Strict Mode
-
-Use `--strict` to fail on aspect ratio mismatches instead of auto-cropping:
-
-```bash
-python 03_subtract_background_video.py video.mp4 bg.jpg --strict
-```
-
-This is useful when you need to verify AI tools are respecting your aspect ratio.
 
 ## Configuration
 
-All default parameters are stored in `config.yaml`:
+Default parameters are stored in `wzrd/default_config.yaml`. You can override by placing a `config.yaml` in your working directory:
 
 ```yaml
 resolution:
-  default_aspect: "16:9"      # Default aspect ratio for normalization
-  base_resolution: 1920       # Max dimension in pixels
-  aspect_tolerance: 0.02      # 2% tolerance for aspect matching
+  default_aspect: "16:9"
+  base_resolution: 1920
+  aspect_tolerance: 0.02
 
 darken:
   max_brightness: 0.15
@@ -185,36 +194,32 @@ subtract:
   threshold: 10
   boost: 1.1
   feather_radius: 4
-  diff_mode: "luminance"
+  diff_mode: "luminance"  # rgb, lab, or luminance
   min_alpha: 0.0
-  output_mode: "additive"
+  output_mode: "additive"  # additive or alpha
+```
+
+Load custom config programmatically:
+
+```python
+from wzrd import load_config
+
+config = load_config("my_config.yaml")
 ```
 
 ## Dependencies
 
-- Python 3.8+
-- PIL/Pillow
+**Required:**
+- Python 3.10+
+- Pillow
 - NumPy
+- OpenCV
 - PyYAML
-- FFmpeg (for video processing)
-- scikit-image (optional, for LAB color mode)
-- matplotlib (optional, for histogram plots)
+- FFmpeg (system install, for video processing)
 
-Install Python dependencies:
-```bash
-pip install pillow numpy pyyaml scikit-image matplotlib
-```
-
-## File Structure
-
-```
-├── config.yaml                       # Pipeline configuration
-├── utils.py                          # Resolution/alignment utilities
-├── 01_darken_image.py               # Step 2: Darken background
-├── 02_subtract_background.py        # Single-frame background subtraction
-├── 03_subtract_background_video.py  # Step 5: Video background subtraction
-└── pipeline.py                      # Prompt templates/examples
-```
+**Optional:**
+- scikit-image (for LAB color mode)
+- matplotlib (for histogram plots)
 
 ## Tips
 
