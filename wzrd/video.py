@@ -8,11 +8,11 @@ subtraction to extract creatures/elements across all frames.
 from PIL import Image
 import numpy as np
 import subprocess
-import tempfile
-import shutil
 from pathlib import Path
-from typing import Union, Optional, Tuple, Literal, Callable, Iterator
+from typing import Union, Optional, Tuple, Literal, Callable, Iterator, List
 import cv2
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import cpu_count
 
 from .utils import align_to_reference, get_aspect_ratio, aspect_ratios_match
 from .subtract import compute_difference_mask, extract_creature
@@ -181,6 +181,32 @@ def iter_video_frames(
         process.wait()
 
 
+def iter_video_frames_batched(
+    video_path: Union[str, Path],
+    batch_size: int = 16,
+    target_size: Optional[Tuple[int, int]] = None,
+) -> Iterator[List[Tuple[int, np.ndarray]]]:
+    """
+    Iterate over video frames in batches.
+
+    Args:
+        video_path: Path to video file
+        batch_size: Number of frames per batch
+        target_size: Optional (width, height) to resize frames
+
+    Yields:
+        List of (frame_number, frame_array) tuples
+    """
+    batch = []
+    for frame_num, frame_arr in iter_video_frames(video_path, target_size):
+        batch.append((frame_num, frame_arr))
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def subtract_background_video(
     video_path: Union[str, Path],
     background_path: Union[str, Path],
@@ -327,38 +353,57 @@ def subtract_background_video(
     output_process = subprocess.Popen(output_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     preview_process = subprocess.Popen(preview_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE) if preview_cmd else None
 
+    # Use ThreadPoolExecutor - numpy/OpenCV release the GIL so threads work well
+    # Less overhead than ProcessPoolExecutor (no pickling)
+    num_workers = min(cpu_count(), 8)
+    batch_size = num_workers * 2
+
+    def process_single_frame(args):
+        """Process a single frame (thread worker)."""
+        fn, frame_arr = args
+        gen_arr = frame_arr.astype(np.float32)
+        creature, mask = process_frame(
+            gen_arr, bg_arr, threshold, boost, feather_radius,
+            diff_mode, min_alpha, use_opencv_blur=True
+        )
+        return fn, creature, mask
+
     frame_num = 0
     try:
-        for frame_num, frame_arr in iter_video_frames(video_path):
-            if progress_callback:
-                progress_callback(frame_num, frame_count or 0)
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            for batch in iter_video_frames_batched(video_path, batch_size=batch_size):
+                # Pre-process batch: align frames if needed (sequential, uses PIL)
+                aligned_batch = []
+                for fn, frame_arr in batch:
+                    if needs_alignment:
+                        frame_pil = Image.fromarray(frame_arr)
+                        frame_pil, _ = align_to_reference(frame_pil, background, aspect_tolerance)
+                        frame_arr = np.array(frame_pil)
+                    aligned_batch.append((fn, frame_arr))
 
-            # Align if needed
-            if needs_alignment:
-                frame_pil = Image.fromarray(frame_arr)
-                frame_pil, _ = align_to_reference(frame_pil, background, aspect_tolerance)
-                frame_arr = np.array(frame_pil)
+                # Process batch in parallel using threads
+                results = list(executor.map(process_single_frame, aligned_batch))
 
-            gen_arr = frame_arr.astype(np.float32)
+                # Sort results by frame number to maintain order
+                results.sort(key=lambda x: x[0])
 
-            # Process frame
-            creature, mask = process_frame(
-                gen_arr, bg_arr, threshold, boost, feather_radius,
-                diff_mode, min_alpha, use_opencv_blur=True
-            )
+                # Write results to output
+                for fn, creature, mask in results:
+                    frame_num = fn
+                    if progress_callback:
+                        progress_callback(frame_num, frame_count or 0)
 
-            # Write to output
-            if output_mode == 'alpha':
-                alpha_channel = (mask * 255).astype(np.uint8)
-                rgba = np.dstack([creature, alpha_channel])
-                output_process.stdin.write(rgba.tobytes())
-            else:
-                output_process.stdin.write(creature.tobytes())
+                    if output_mode == 'alpha':
+                        alpha_channel = (mask * 255).astype(np.uint8)
+                        rgba = np.dstack([creature, alpha_channel])
+                        output_process.stdin.write(rgba.tobytes())
+                    else:
+                        output_process.stdin.write(creature.tobytes())
 
-            # Write preview
-            if preview_process:
-                composite = np.clip(bg_arr + creature.astype(np.float32), 0, 255).astype(np.uint8)
-                preview_process.stdin.write(composite.tobytes())
+                    # Write preview
+                    if preview_process:
+                        composite = np.clip(bg_arr + creature.astype(np.float32), 0, 255).astype(np.uint8)
+                        preview_process.stdin.write(composite.tobytes())
 
         info['frames_processed'] = frame_num
 

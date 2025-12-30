@@ -1,15 +1,14 @@
 {
   "tool": "subtract_video",
-  "input": "animation.mp4",
-  "background": "background.png",
-  "output": "creature.mp4",
+  "input": "/Users/xandersteenbrugge/Documents/GitHub/VJ/WZRD/stories/story_01/output.mp4",
+  "background": "/Users/xandersteenbrugge/Documents/GitHub/VJ/WZRD/stories/story_01/building.jpg",
   "settings": {
     "threshold": 10,
     "boost": 1.1,
     "feather_radius": 4,
     "diff_mode": "luminance",
     "output_mode": "additive",
-    "preview": true,
+    "preview": false,
     "crf": 18,
     "codec": "libx264"
   }
