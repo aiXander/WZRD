@@ -161,6 +161,7 @@ def normalize_image(
     Normalize image to standard aspect ratio and base resolution.
 
     This is the main function for preparing the initial surface image.
+    Output guarantees: max(w,h) = base_resolution and exact target aspect ratio.
 
     Args:
         image: PIL Image to normalize
@@ -170,11 +171,14 @@ def normalize_image(
     Returns:
         Normalized PIL Image
     """
-    # First crop to aspect ratio
+    # Compute exact target dimensions for precise aspect ratio with max(w,h) = base_resolution
+    target_width, target_height = compute_target_dimensions(target_aspect, base_resolution)
+
+    # Center crop to target aspect ratio (minimal crop)
     cropped = center_crop_to_aspect(image, target_aspect)
 
-    # Then resize to base resolution
-    resized = resize_to_base_resolution(cropped, base_resolution)
+    # Resize to exact target dimensions to guarantee both aspect ratio and max dimension
+    resized = cropped.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
     return resized
 
@@ -328,11 +332,11 @@ def compute_target_dimensions(
     if target_aspect >= 1.0:
         # Landscape or square: width is the max dimension
         width = base_resolution
-        height = int(base_resolution / target_aspect)
+        height = round(base_resolution / target_aspect)
     else:
         # Portrait: height is the max dimension
         height = base_resolution
-        width = int(base_resolution * target_aspect)
+        width = round(base_resolution * target_aspect)
 
     return width, height
 

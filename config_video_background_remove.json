@@ -1,0 +1,16 @@
+{
+  "tool": "subtract_video",
+  "input": "animation.mp4",
+  "background": "background.png",
+  "output": "creature.mp4",
+  "settings": {
+    "threshold": 10,
+    "boost": 1.1,
+    "feather_radius": 4,
+    "diff_mode": "luminance",
+    "output_mode": "additive",
+    "preview": true,
+    "crf": 18,
+    "codec": "libx264"
+  }
+}

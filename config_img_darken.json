@@ -1,0 +1,11 @@
+{
+  "tool": "darken",
+  "input": "/Users/xandersteenbrugge/Documents/GitHub/VJ/WZRD/stories/joo/Eden_creation_aixanderAn-abstract-artistic-rendering-of-Jo-running-side-view-low-po6953c3a9a16281ff5aa5dbdf.png",
+  "settings": {
+    "gamma": 1.5,
+    "max_brightness": 0.25,
+    "target_aspect": "16:9",
+    "base_resolution": 1920,
+    "normalize": true
+  }
+}
