@@ -26,6 +26,7 @@ wzrd-darken = "wzrd.cli:darken_cli"
 wzrd-subtract = "wzrd.cli:subtract_cli"
 wzrd-subtract-video = "wzrd.cli:subtract_video_cli"
 wzrd-crop-islands = "wzrd.cli:crop_islands_cli"
+wzrd-reproject = "wzrd.cli:reproject_cli"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

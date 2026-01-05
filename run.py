@@ -20,6 +20,8 @@ from wzrd import (
     subtract_background_file,
     subtract_background_video,
     crop_islands_file,
+    reproject_video,
+    reproject_videos_batch,
 )
 
 
@@ -133,6 +135,71 @@ def run_crop_islands(config: dict) -> dict:
     }
 
 
+def run_reproject(config: dict) -> dict:
+    """Run video reprojection tool."""
+    settings = config.get("settings", {})
+
+    def progress_callback(frame: int, total: int):
+        if total > 0:
+            pct = frame / total * 100
+            print(f"\rProcessing: {frame}/{total} ({pct:.1f}%)", end="", flush=True)
+        else:
+            print(f"\rProcessing frame {frame}...", end="", flush=True)
+
+    def batch_progress_callback(video_num: int, total_videos: int, frame: int, total: int):
+        if total > 0:
+            pct = frame / total * 100
+            print(f"\r[{video_num}/{total_videos}] Processing: {frame}/{total} ({pct:.1f}%)", end="", flush=True)
+        else:
+            print(f"\r[{video_num}/{total_videos}] Processing frame {frame}...", end="", flush=True)
+
+    # Check if we have a list of videos (batch mode) or single video
+    if "videos" in config:
+        # Batch mode: list of {video, metadata, output} dicts
+        video_json_pairs = []
+        for item in config["videos"]:
+            video_path = item["video"]
+            metadata_path = item["metadata"]
+            video_json_pairs.append((video_path, metadata_path))
+
+        results = reproject_videos_batch(
+            video_json_pairs=video_json_pairs,
+            output_dir=config.get("output_dir"),
+            canvas_width=settings.get("canvas_width", 1920),
+            canvas_height=settings.get("canvas_height", 1080),
+            crf=settings.get("crf", 18),
+            codec=settings.get("codec", "libx264"),
+            progress_callback=batch_progress_callback,
+        )
+
+        print()  # newline after progress
+        return {
+            "videos_processed": len(results),
+            "outputs": [r["output_video"] for r in results],
+            "results": results,
+        }
+
+    else:
+        # Single video mode
+        input_path = config["input"]
+        metadata_path = config["metadata"]
+        output_path = config.get("output")
+
+        info = reproject_video(
+            video_path=input_path,
+            island_metadata=metadata_path,
+            output_path=output_path,
+            canvas_width=settings.get("canvas_width", 1920),
+            canvas_height=settings.get("canvas_height", 1080),
+            crf=settings.get("crf", 18),
+            codec=settings.get("codec", "libx264"),
+            progress_callback=progress_callback,
+        )
+
+        print()  # newline after progress
+        return info
+
+
 # Tool registry mapping tool names to functions
 TOOLS = {
     "darken": run_darken,
@@ -145,6 +212,9 @@ TOOLS = {
     "video_subtract": run_subtract_video,
     "crop_islands": run_crop_islands,
     "islands": run_crop_islands,
+    "reproject": run_reproject,
+    "reproject_video": run_reproject,
+    "reproject_videos": run_reproject,
 }
 
 
@@ -180,11 +250,26 @@ Example config files:
     }
   }
 
+  config_reproject.json:
+  {
+    "tool": "reproject",
+    "videos": [
+      {"video": "island_1.mp4", "metadata": "island_1.json"},
+      {"video": "island_2.mp4", "metadata": "island_2.json"}
+    ],
+    "output_dir": "reprojected/",
+    "settings": {
+      "canvas_width": 1920,
+      "canvas_height": 1080
+    }
+  }
+
 Available tools:
   - darken, darken_image
   - subtract, subtract_image, subtract_background
   - subtract_video, subtract_background_video, video_subtract
   - crop_islands, islands
+  - reproject, reproject_video, reproject_videos
 """,
     )
     parser.add_argument(

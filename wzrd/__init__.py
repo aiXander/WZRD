@@ -48,6 +48,15 @@ from .islands import (
     crop_islands_file,
 )
 
+# Reprojection (islands back to full canvas)
+from .reproject import (
+    reproject_video,
+    reproject_videos_batch,
+    reproject_from_islands_dir,
+    reproject_video_with_aspect,
+    load_island_metadata,
+)
+
 # Utilities
 from .utils import (
     # Aspect ratio handling
@@ -101,6 +110,12 @@ __all__ = [
     'crop_islands',
     'save_islands',
     'crop_islands_file',
+    # Reproject
+    'reproject_video',
+    'reproject_videos_batch',
+    'reproject_from_islands_dir',
+    'reproject_video_with_aspect',
+    'load_island_metadata',
     # Utils
     'parse_aspect_ratio',
     'get_aspect_ratio',
