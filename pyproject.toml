@@ -9,7 +9,7 @@ dependencies = [
     "pillow>=10.0.0",
     "numpy>=2.2.0",
     "pyyaml>=6.0",
-    # opencv-python or opencv-python-headless assumed to be installed separately
+    "opencv-python>=4.8.0,<4.11.0",  # 4.11+ lacks wheels for newer macOS
 ]
 
 [project.optional-dependencies]
