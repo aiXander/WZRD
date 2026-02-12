@@ -1,9 +1,0 @@
-{
-  "tool": "crop_islands",
-  "input": "segmentation.png",
-  "output": "islands_output",
-  "settings": {
-    "min_area": 100,
-    "connectivity": 8
-  }
-}

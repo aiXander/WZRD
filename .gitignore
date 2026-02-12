@@ -39,3 +39,5 @@ ENV/
 # Project specific
 stories/
 creatures/
+test_results/
+test_imgs/

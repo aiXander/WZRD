@@ -1,0 +1,21 @@
+segmentation_prompt: |-
+  Act as a professional Projection Mapping specialist. I am providing a reference photo of a target surface. Your task is to generate a precise technical segmentation mask for this surface, strictly aligned with the input geometry.
+
+Output Requirements:
+
+Visual Style: The output must consist ONLY of flat, solid regions of color. There must be zero shading, zero gradients, zero texture, and zero anti-aliasing. The look should be that of a vector file or a hard-edged segmentation map.
+
+Color Palette: Use exactly 4 distinct, high-contrast colors (e.g., Pure Red, Pure Blue, Pure Green, Pure Yellow) to define the active projection zones.
+
+Background: Identify the sky or any non-target background elements and render them as Pure Black (#000000). These areas will be masked out and not receive any light.
+
+Segmentation Logic (VJ Strategy):
+
+1. Analyze the architectural, natural or structural lines, zones and objects of the target.
+2. Divide the target into 4 logical, spatially distinct zones that would be interesting to animate separately (e.g., distinct depth planes, specific columns, roof sections vs. walls, naturally salient objects or regions, ...). Each zone will receive a different projected texture animation. Avoid zones that are too small.
+3. Connectivity: Prioritize colors that define single, continuous regions. Avoid "noise": small isolated islands of color, or thin, spider-web lines. Sometimes repeating, separated islands of the same color are allowed if it makes sense in the target context (eg repeating architectural structures).
+
+Strict Constraints:
+- Do not change the perspective, lens distortion, or aspect ratio of the input. The output must overlay perfectly.
+- Do not generate new objects. Only segment what is there.
+- Do not leave small holes or gaps inside a colored region.

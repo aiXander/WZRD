@@ -13,9 +13,8 @@ from typing import Union, Optional, Tuple, Callable, List, Dict
 import numpy as np
 from PIL import Image
 
-from .video import get_video_info, iter_video_frames
+from .subtract_video import get_video_info, iter_video_frames
 from .utils import parse_aspect_ratio, compute_target_dimensions, ASPECT_RATIOS
-from .config import get_resolution_config
 
 
 def load_island_metadata(json_path: Union[str, Path]) -> Dict:
@@ -424,3 +423,122 @@ def reproject_video_with_aspect(
         codec=codec,
         progress_callback=progress_callback,
     )
+
+
+def _cli():
+    """CLI entry point for ``python -m wzrd.reproject``."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description='Reproject island videos onto full canvas for layer compositing'
+    )
+    parser.add_argument('input', nargs='+',
+                        help='Video file(s) with JSON, or directory containing islands')
+    parser.add_argument('-o', '--output', help='Output path/directory')
+    parser.add_argument('--width', type=int, default=1920,
+                        help='Canvas width in pixels. Default: 1920')
+    parser.add_argument('--height', type=int, default=1080,
+                        help='Canvas height in pixels. Default: 1080')
+    parser.add_argument('--aspect', type=str, default=None,
+                        help='Target aspect ratio (e.g., 16:9). Overrides width/height.')
+    parser.add_argument('--base-resolution', type=int, default=1920,
+                        help='Base resolution when using --aspect. Default: 1920')
+    parser.add_argument('--crf', type=int, default=18,
+                        help='FFmpeg CRF quality. Default: 18')
+    parser.add_argument('--codec', type=str, default='libx264',
+                        help='Video codec. Default: libx264')
+    args = parser.parse_args()
+
+    # Compute canvas size from aspect ratio if provided
+    if args.aspect:
+        aspect = parse_aspect_ratio(args.aspect)
+        args.width, args.height = compute_target_dimensions(aspect, args.base_resolution)
+        print(f"Using aspect {args.aspect} -> {args.width}x{args.height}")
+
+    def progress(video_num, total_videos, frame_num, total_frames):
+        total_str = str(total_frames) if total_frames else '?'
+        if frame_num % 30 == 0 or frame_num == 1:
+            print(f"  [{video_num}/{total_videos}] Frame {frame_num}/{total_str}")
+
+    def single_progress(frame_num, total_frames):
+        total_str = str(total_frames) if total_frames else '?'
+        if frame_num % 30 == 0 or frame_num == 1:
+            print(f"  Frame {frame_num}/{total_str}")
+
+    # Check if input is a directory with islands
+    input_path = Path(args.input[0])
+
+    if input_path.is_dir():
+        print(f"Processing islands directory: {input_path}")
+        results = reproject_from_islands_dir(
+            islands_dir=input_path,
+            output_dir=args.output,
+            canvas_width=args.width,
+            canvas_height=args.height,
+            crf=args.crf,
+            codec=args.codec,
+            progress_callback=progress,
+        )
+        print(f"\nComplete! Processed {len(results)} videos")
+        for info in results:
+            print(f"  {info['output_video']}")
+
+    elif len(args.input) == 1:
+        video_path = input_path
+        json_path = video_path.with_suffix('.json')
+        if not json_path.exists():
+            json_path = video_path.parent / 'islands.json'
+
+        if not json_path.exists():
+            print(f"Error: Could not find JSON metadata for {video_path}")
+            print(f"  Tried: {video_path.with_suffix('.json')}")
+            print(f"  Tried: {video_path.parent / 'islands.json'}")
+            sys.exit(1)
+
+        print(f"Processing: {video_path}")
+        print(f"  Metadata: {json_path}")
+        info = reproject_video(
+            video_path=video_path,
+            island_metadata=json_path,
+            output_path=args.output,
+            canvas_width=args.width,
+            canvas_height=args.height,
+            crf=args.crf,
+            codec=args.codec,
+            progress_callback=single_progress,
+        )
+        print(f"\nComplete!")
+        print(f"  Output: {info['output_video']}")
+        print(f"  Canvas: {info['canvas_size'][0]}x{info['canvas_size'][1]}")
+        print(f"  Island position: {info['island_position']}")
+
+    else:
+        if len(args.input) % 2 != 0:
+            print("Error: When providing multiple files, provide video/json pairs")
+            print("  Example: python -m wzrd.reproject video1.mp4 video1.json video2.mp4 video2.json")
+            sys.exit(1)
+
+        pairs = []
+        for i in range(0, len(args.input), 2):
+            video_path = Path(args.input[i])
+            json_path = Path(args.input[i + 1])
+            pairs.append((video_path, json_path))
+
+        print(f"Processing {len(pairs)} video/json pairs")
+        results = reproject_videos_batch(
+            video_json_pairs=pairs,
+            output_dir=args.output,
+            canvas_width=args.width,
+            canvas_height=args.height,
+            crf=args.crf,
+            codec=args.codec,
+            progress_callback=progress,
+        )
+        print(f"\nComplete! Processed {len(results)} videos")
+        for info in results:
+            print(f"  {info['output_video']}")
+
+
+if __name__ == '__main__':
+    _cli()
