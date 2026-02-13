@@ -494,6 +494,37 @@ def guided_filter(
 
 
 # ---------------------------------------------------------------------------
+# Multi-resolution helpers
+# ---------------------------------------------------------------------------
+
+def downscale_arr(arr: np.ndarray, factor: int) -> np.ndarray:
+    """Downscale array by integer factor using area interpolation.
+
+    Args:
+        arr: Input array (HW or HWC, any dtype).
+        factor: Integer downscale factor (2 = half, 4 = quarter).
+
+    Returns:
+        Downscaled array.
+    """
+    h, w = arr.shape[:2]
+    return cv2.resize(arr, (w // factor, h // factor), interpolation=cv2.INTER_AREA)
+
+
+def upscale_arr(arr: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
+    """Upscale array to target (height, width) using bilinear interpolation.
+
+    Args:
+        arr: Input array (HW or HWC, any dtype).
+        target_hw: Target (height, width).
+
+    Returns:
+        Upscaled array.
+    """
+    return cv2.resize(arr, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_LINEAR)
+
+
+# ---------------------------------------------------------------------------
 # Color shift correction
 # ---------------------------------------------------------------------------
 
@@ -549,6 +580,39 @@ def correct_color_shift(
     corrected_lab[:, :, 2] -= shift[2]
 
     return lab_to_rgb(corrected_lab), shift, corrected_lab
+
+
+def compute_color_shift(
+    gen_lab: np.ndarray,
+    bg_lab: np.ndarray,
+    percentile: float = 50,
+) -> np.ndarray:
+    """Compute global LAB color shift between generated and background.
+
+    Estimates the systematic color offset using confident background pixels
+    (those with the smallest per-pixel LAB difference).  Designed to run on
+    downscaled inputs for speed — only the 3-element shift vector is needed.
+
+    Args:
+        gen_lab: Generated frame in LAB (HWC, float32).
+        bg_lab: Background frame in LAB (HWC, float32).
+        percentile: Use lowest N% of difference pixels as reference.
+
+    Returns:
+        3-element float32 shift vector (L, a, b).
+    """
+    diff = np.sqrt(np.sum((gen_lab - bg_lab) ** 2, axis=2))
+    cutoff = np.percentile(diff, percentile)
+    bg_mask = diff <= cutoff
+
+    if np.sum(bg_mask) < 100:
+        return np.zeros(3, dtype=np.float32)
+
+    return np.array([
+        np.mean(gen_lab[bg_mask, 0] - bg_lab[bg_mask, 0]),
+        np.mean(gen_lab[bg_mask, 1] - bg_lab[bg_mask, 1]),
+        np.mean(gen_lab[bg_mask, 2] - bg_lab[bg_mask, 2]),
+    ], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------

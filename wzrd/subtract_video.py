@@ -5,6 +5,7 @@ Functions to process video files frame-by-frame, applying background
 subtraction to extract creatures/elements across all frames.
 """
 
+import time
 from PIL import Image
 import numpy as np
 import subprocess
@@ -19,22 +20,27 @@ from threading import Thread
 from .utils import (
     get_aspect_ratio, aspect_ratios_match,
     correct_color_shift, compute_difference_mask, extract_creature,
-    rgb_to_lab,
+    rgb_to_lab, lab_to_rgb,
+    downscale_arr, upscale_arr, compute_color_shift, guided_filter,
 )
-# Module-level defaults (previously loaded from config.yaml)
+
+# Module-level defaults
 DEFAULT_THRESHOLD = 10
 DEFAULT_RAMP = 20
 DEFAULT_GAMMA = 0.85
-DEFAULT_FEATHER_RADIUS = 4
+#DEFAULT_FEATHER_RADIUS = 4
+DEFAULT_FEATHER_RADIUS = 0
+
 DEFAULT_DIFF_MODE = 'lab'
 DEFAULT_OUTPUT_MODE = 'additive'
 DEFAULT_MIN_ALPHA = 0.0
 DEFAULT_MORPH_SIZE = 5
 DEFAULT_GUIDED_FILTER_EPS = 0.02
-DEFAULT_COLOR_CORRECTION_PERCENTILE = 50
-DEFAULT_TEMPORAL_SMOOTHING = 0.4
-DEFAULT_ASPECT_TOLERANCE = 0.02
+#DEFAULT_COLOR_CORRECTION_PERCENTILE = 50
+DEFAULT_COLOR_CORRECTION_PERCENTILE = 0
 
+DEFAULT_TEMPORAL_SMOOTHING = 0.3
+DEFAULT_ASPECT_TOLERANCE = 0.02
 
 DiffMode = Literal['rgb', 'lab', 'luminance']
 OutputMode = Literal['additive', 'alpha']
@@ -279,6 +285,11 @@ def subtract_background_video(
     bg_arr = np.array(background, dtype=np.float32)
     bg_lab = rgb_to_lab(bg_arr)
 
+    # Precompute downscaled backgrounds (computed once, used every frame)
+    bg_lab_half = downscale_arr(bg_lab, 2)
+    bg_lab_quarter = downscale_arr(bg_lab, 4)
+    bg_arr_half = downscale_arr(bg_arr, 2)
+
     # Get video info
     width, height, fps, frame_count = get_video_info(video_path)
     needs_alignment = (width, height) != bg_size
@@ -398,7 +409,12 @@ def subtract_background_video(
     batch_size = num_workers * 2
 
     def _compute_frame_data(args):
-        """Thread worker: align, color-correct and compute raw mask."""
+        """Thread worker: multi-resolution align, color-correct & mask.
+
+        - Color shift estimation at 1/4 res  (16x fewer pixels)
+        - Diff mask + morph at 1/2 res        (4x fewer pixels)
+        - Guided filter at full res           (re-snaps edges)
+        """
         fn, frame_arr = args
 
         # Alignment via cv2 (no PIL overhead)
@@ -411,28 +427,72 @@ def subtract_background_video(
             )
 
         gen_arr = frame_arr.astype(np.float32)
+        H, W = gen_arr.shape[:2]
 
-        # Color correction (returns corrected LAB to avoid reconversion)
+        # --- Color correction: shift at 1/4 res, apply at full res ----------
         gen_lab = None
         if color_correction_percentile > 0:
-            gen_arr, _, gen_lab = correct_color_shift(
-                gen_arr, bg_arr, color_correction_percentile,
-                bg_lab=bg_lab,
+            gen_lab = rgb_to_lab(gen_arr)
+            gen_lab_q = downscale_arr(gen_lab, 4)
+            shift = compute_color_shift(
+                gen_lab_q, bg_lab_quarter, color_correction_percentile,
             )
+            if np.any(shift != 0):
+                gen_lab -= shift                    # broadcast (3,) over (H,W,3)
+                gen_arr = lab_to_rgb(gen_lab)
 
-        # Compute raw mask (reuse precomputed LAB)
-        mask = compute_difference_mask(
-            gen_arr, bg_arr,
-            threshold=threshold,
-            ramp=ramp,
-            feather_radius=feather_radius,
-            diff_mode=diff_mode,
-            min_alpha=0.0,          # applied after temporal smoothing
-            morph_size=morph_size,
-            guided_filter_eps=guided_filter_eps,
-            gen_lab=gen_lab,
-            bg_lab=bg_lab,
-        )
+        # --- Diff mask at 1/2 res -------------------------------------------
+        if diff_mode == 'lab':
+            if gen_lab is not None:
+                gen_lab_half = downscale_arr(gen_lab, 2)
+            else:
+                gen_half = downscale_arr(gen_arr, 2)
+                gen_lab_half = rgb_to_lab(gen_half)
+            diff_mag = np.sqrt(
+                np.sum((gen_lab_half - bg_lab_half) ** 2, axis=2)
+            )
+            diff_mag = np.clip(diff_mag * 2.55, 0, 255)
+
+        elif diff_mode == 'rgb':
+            gen_half = downscale_arr(gen_arr, 2)
+            diff_mag = np.max(np.abs(gen_half - bg_arr_half), axis=2)
+
+        elif diff_mode == 'luminance':
+            gen_half = downscale_arr(gen_arr, 2)
+            gen_lum = (0.299 * gen_half[:, :, 0]
+                       + 0.587 * gen_half[:, :, 1]
+                       + 0.114 * gen_half[:, :, 2])
+            bg_lum = (0.299 * bg_arr_half[:, :, 0]
+                      + 0.587 * bg_arr_half[:, :, 1]
+                      + 0.114 * bg_arr_half[:, :, 2])
+            diff_mag = np.abs(gen_lum - bg_lum)
+
+        else:
+            raise ValueError(f"Unknown diff_mode: {diff_mode}")
+
+        # Soft ramp threshold at 1/2 res
+        ramp_width = max(float(ramp), 1e-6)
+        mask_half = np.clip(
+            (diff_mag - threshold) / ramp_width, 0, 1,
+        ).astype(np.float32)
+
+        # Morphological opening at 1/2 res (kernel scaled down)
+        if morph_size > 0:
+            ms = max(morph_size // 2 | 1, 3)   # halve, round up to odd, min 3
+            kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ms, ms))
+            mask_u8 = (mask_half * 255).astype(np.uint8)
+            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kern)
+            mask_half = mask_u8.astype(np.float32) / 255.0
+
+        # --- Upscale mask → full res, then guided filter --------------------
+        mask = upscale_arr(mask_half, (H, W))
+
+        if feather_radius > 0:
+            guide = cv2.cvtColor(
+                gen_arr.astype(np.uint8), cv2.COLOR_RGB2GRAY,
+            ).astype(np.float32) / 255.0
+            mask = guided_filter(guide, mask, feather_radius, guided_filter_eps)
+            mask = np.clip(mask, 0, 1)
 
         return fn, gen_arr, mask
 
@@ -568,11 +628,14 @@ def _cli():
     parser.add_argument('--codec', default='libx264',
                         help='Video codec (default: libx264)')
     args = parser.parse_args()
+    
+    start_time = time.time()
 
     def progress(frame_num, total):
         if frame_num % 30 == 0 or frame_num == 1:
             total_str = str(total) if total else '?'
-            print(f'  Frame {frame_num}/{total_str}', flush=True)
+            total_time = time.time() - start_time
+            print(f'  Frame {frame_num}/{total_str}, time elapsed: {total_time}', flush=True)
 
     print(f'Processing: {args.input_video}')
     print(f'Background: {args.background}')
