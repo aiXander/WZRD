@@ -108,7 +108,7 @@ def subtract_background(
 
     # Color correction
     if color_correction_percentile > 0:
-        gen_arr, color_shift = correct_color_shift(
+        gen_arr, color_shift, _ = correct_color_shift(
             gen_arr, bg_arr, color_correction_percentile
         )
         info['color_shift_lab'] = color_shift.tolist()

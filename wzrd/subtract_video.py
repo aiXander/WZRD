@@ -13,10 +13,13 @@ from typing import Union, Optional, Tuple, Literal, Callable, Iterator, List
 import cv2
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
+from queue import Queue
+from threading import Thread
 
 from .utils import (
-    align_to_reference, get_aspect_ratio, aspect_ratios_match,
+    get_aspect_ratio, aspect_ratios_match,
     correct_color_shift, compute_difference_mask, extract_creature,
+    rgb_to_lab,
 )
 # Module-level defaults (previously loaded from config.yaml)
 DEFAULT_THRESHOLD = 10
@@ -81,6 +84,8 @@ def process_frame(
     morph_size: int = 5,
     guided_filter_eps: float = 0.02,
     color_correction_percentile: float = 50,
+    *,
+    bg_lab: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Process a single frame: color-correct, compute mask, extract creature.
@@ -97,13 +102,16 @@ def process_frame(
         morph_size: Morphological kernel size (0 = disable).
         guided_filter_eps: Guided-filter regularization.
         color_correction_percentile: Color correction strength (0 = disable).
+        bg_lab:     Precomputed background LAB (optional, avoids recomputation).
 
     Returns:
         Tuple of (creature uint8 array, mask float32 array).
     """
+    gen_lab = None
     if color_correction_percentile > 0:
-        gen_arr, _ = correct_color_shift(
-            gen_arr, bg_arr, color_correction_percentile
+        gen_arr, _, gen_lab = correct_color_shift(
+            gen_arr, bg_arr, color_correction_percentile,
+            bg_lab=bg_lab,
         )
 
     mask = compute_difference_mask(
@@ -115,6 +123,8 @@ def process_frame(
         min_alpha=min_alpha,
         morph_size=morph_size,
         guided_filter_eps=guided_filter_eps,
+        gen_lab=gen_lab,
+        bg_lab=bg_lab,
     )
 
     creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma)
@@ -163,11 +173,10 @@ def iter_video_frames(
             ).reshape((height, width, 3))
 
             if target_size and (width, height) != target_size:
-                frame_pil = Image.fromarray(frame_arr)
-                frame_pil = frame_pil.resize(
-                    target_size, Image.Resampling.LANCZOS
+                frame_arr = cv2.resize(
+                    frame_arr, target_size,
+                    interpolation=cv2.INTER_LANCZOS4,
                 )
-                frame_arr = np.array(frame_pil)
 
             yield frame_num, frame_arr
     finally:
@@ -268,10 +277,26 @@ def subtract_background_video(
         bg_size = (output_width, output_height)
 
     bg_arr = np.array(background, dtype=np.float32)
+    bg_lab = rgb_to_lab(bg_arr)
 
     # Get video info
     width, height, fps, frame_count = get_video_info(video_path)
     needs_alignment = (width, height) != bg_size
+
+    # Precompute alignment crop box (all video frames share dimensions)
+    _align_crop = None
+    if needs_alignment:
+        vid_ar = width / height
+        bg_ar = bg_size[0] / bg_size[1]
+        if not aspect_ratios_match(vid_ar, bg_ar, aspect_tolerance):
+            if vid_ar > bg_ar:
+                new_w = int(height * bg_ar)
+                x_off = (width - new_w) // 2
+                _align_crop = (0, height, x_off, x_off + new_w)
+            else:
+                new_h = int(width / bg_ar)
+                y_off = (height - new_h) // 2
+                _align_crop = (y_off, y_off + new_h, 0, width)
 
     # Setup output paths
     if output_path is None:
@@ -373,17 +398,29 @@ def subtract_background_video(
     batch_size = num_workers * 2
 
     def _compute_frame_data(args):
-        """Thread worker: color-correct and compute raw mask."""
+        """Thread worker: align, color-correct and compute raw mask."""
         fn, frame_arr = args
-        gen_arr = frame_arr.astype(np.float32)
 
-        # Color correction
-        if color_correction_percentile > 0:
-            gen_arr, _ = correct_color_shift(
-                gen_arr, bg_arr, color_correction_percentile
+        # Alignment via cv2 (no PIL overhead)
+        if needs_alignment:
+            if _align_crop:
+                y1, y2, x1, x2 = _align_crop
+                frame_arr = frame_arr[y1:y2, x1:x2]
+            frame_arr = cv2.resize(
+                frame_arr, bg_size, interpolation=cv2.INTER_LANCZOS4,
             )
 
-        # Compute raw mask (temporal smoothing applied sequentially later)
+        gen_arr = frame_arr.astype(np.float32)
+
+        # Color correction (returns corrected LAB to avoid reconversion)
+        gen_lab = None
+        if color_correction_percentile > 0:
+            gen_arr, _, gen_lab = correct_color_shift(
+                gen_arr, bg_arr, color_correction_percentile,
+                bg_lab=bg_lab,
+            )
+
+        # Compute raw mask (reuse precomputed LAB)
         mask = compute_difference_mask(
             gen_arr, bg_arr,
             threshold=threshold,
@@ -393,32 +430,38 @@ def subtract_background_video(
             min_alpha=0.0,          # applied after temporal smoothing
             morph_size=morph_size,
             guided_filter_eps=guided_filter_eps,
+            gen_lab=gen_lab,
+            bg_lab=bg_lab,
         )
 
         return fn, gen_arr, mask
+
+    # Prefetch frames in a background thread to overlap I/O with compute
+    frame_queue = Queue(maxsize=2)
+
+    def _read_frames():
+        for batch in iter_video_frames_batched(
+            video_path, batch_size=batch_size
+        ):
+            frame_queue.put(batch)
+        frame_queue.put(None)
+
+    reader = Thread(target=_read_frames, daemon=True)
+    reader.start()
 
     prev_mask = None
     frame_num = 0
 
     try:
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            for batch in iter_video_frames_batched(
-                video_path, batch_size=batch_size
-            ):
-                # Align frames (sequential — uses PIL)
-                aligned_batch = []
-                for fn, frame_arr in batch:
-                    if needs_alignment:
-                        frame_pil = Image.fromarray(frame_arr)
-                        frame_pil, _ = align_to_reference(
-                            frame_pil, background, aspect_tolerance
-                        )
-                        frame_arr = np.array(frame_pil)
-                    aligned_batch.append((fn, frame_arr))
+            while True:
+                batch = frame_queue.get()
+                if batch is None:
+                    break
 
-                # Parallel: color correction + mask computation
+                # Parallel: alignment + color correction + mask computation
                 results = list(
-                    executor.map(_compute_frame_data, aligned_batch)
+                    executor.map(_compute_frame_data, batch)
                 )
                 results.sort(key=lambda x: x[0])
 
@@ -434,7 +477,7 @@ def subtract_background_video(
                         )
                     else:
                         mask = raw_mask
-                    prev_mask = mask.copy()
+                    prev_mask = mask
 
                     # Apply min_alpha after temporal smoothing
                     if min_alpha > 0:

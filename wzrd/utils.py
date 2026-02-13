@@ -501,7 +501,10 @@ def correct_color_shift(
     generated: np.ndarray,
     background: np.ndarray,
     percentile: float = 50,
-) -> Tuple[np.ndarray, np.ndarray]:
+    *,
+    gen_lab: Optional[np.ndarray] = None,
+    bg_lab: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Correct global color/brightness shift in perceptual CIELab space.
 
     AI video models often introduce a systematic color offset from the
@@ -514,10 +517,12 @@ def correct_color_shift(
         percentile: Use lowest N% of difference pixels as reference.
 
     Returns:
-        Tuple of (corrected_rgb_float32, lab_shift_vector).
+        Tuple of (corrected_rgb_float32, lab_shift_vector, corrected_lab).
     """
-    gen_lab = rgb_to_lab(generated)
-    bg_lab = rgb_to_lab(background)
+    if gen_lab is None:
+        gen_lab = rgb_to_lab(generated)
+    if bg_lab is None:
+        bg_lab = rgb_to_lab(background)
 
     # Per-pixel LAB Euclidean distance (first-pass rough difference)
     diff = np.sqrt(np.sum((gen_lab - bg_lab) ** 2, axis=2))
@@ -528,7 +533,7 @@ def correct_color_shift(
 
     if np.sum(bg_mask) < 100:
         # Not enough background pixels — skip correction
-        return generated.copy(), np.zeros(3, dtype=np.float32)
+        return generated.copy(), np.zeros(3, dtype=np.float32), gen_lab
 
     # Average LAB shift across background pixels
     shift = np.array([
@@ -543,7 +548,7 @@ def correct_color_shift(
     corrected_lab[:, :, 1] -= shift[1]
     corrected_lab[:, :, 2] -= shift[2]
 
-    return lab_to_rgb(corrected_lab), shift
+    return lab_to_rgb(corrected_lab), shift, corrected_lab
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +565,9 @@ def compute_difference_mask(
     min_alpha: float = 0.0,
     morph_size: int = 5,
     guided_filter_eps: float = 0.02,
+    *,
+    gen_lab: Optional[np.ndarray] = None,
+    bg_lab: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Compute a soft difference mask between generated and background.
 
@@ -585,8 +593,10 @@ def compute_difference_mask(
         diff_magnitude = np.max(diff, axis=2)
 
     elif diff_mode == 'lab':
-        gen_lab = rgb_to_lab(generated)
-        bg_lab = rgb_to_lab(background)
+        if gen_lab is None:
+            gen_lab = rgb_to_lab(generated)
+        if bg_lab is None:
+            bg_lab = rgb_to_lab(background)
         diff_magnitude = np.sqrt(np.sum((gen_lab - bg_lab) ** 2, axis=2))
         # Scale to ~0-255 so threshold values are consistent across modes
         diff_magnitude = np.clip(diff_magnitude * 2.55, 0, 255)

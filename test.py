@@ -12,8 +12,8 @@ import traceback
 TEST_IMAGE = "test_imgs/day.jpg"
 TEST_BACKGROUND = "test_imgs/background.jpg"
 TEST_GENERATED = "test_imgs/generated.jpg"
-TEST_VIDEO = "test_imgs/input.mp4"
-TEST_SURFACE_PHOTO = "test_imgs/surface_photo.jpg"
+TEST_VIDEO = "test_imgs/test_video/video.mp4"
+TEST_SURFACE_PHOTO = "test_imgs/input_raw.png"
 TEST_TARGET_CROP = "test_imgs/test_video/target_crop.jpg"
 
 RESULTS_ROOT = "test_results"
