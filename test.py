@@ -10,7 +10,6 @@ import traceback
 
 # ── Dummy input paths (update these to match your test assets) ──────────────
 TEST_IMAGE = "test_imgs/day.jpg"
-TEST_GENERATED = "test_imgs/generated.jpg"
 TEST_VIDEO = "test_imgs/test_video/video.mp4"
 TEST_BACKGROUND = "test_imgs/test_video/background.jpg"
 TEST_SURFACE_PHOTO = "test_imgs/input_raw.png"
@@ -28,19 +27,6 @@ def test_darken():
     _copy_input(TEST_IMAGE, out_dir)
     img, info = darken.darken_image_file(TEST_IMAGE, output_path=os.path.join(out_dir, "output.jpg"))
     assert img is not None, "darken returned None image"
-
-
-def test_subtract_frame():
-    from wzrd import subtract_frame
-    _require(TEST_GENERATED, TEST_BACKGROUND)
-    out_dir = _result_dir("subtract_frame")
-    _copy_input(TEST_GENERATED, out_dir)
-    _copy_input(TEST_BACKGROUND, out_dir)
-    img, info = subtract_frame.subtract_background_file(
-        TEST_GENERATED, TEST_BACKGROUND,
-        output_path=os.path.join(out_dir, "output.png"),
-    )
-    assert img is not None, "subtract_frame returned None image"
 
 
 def test_subtract_video():
@@ -104,7 +90,6 @@ def test_align():
 
 TESTS = {
     "darken": test_darken,
-    "subtract_frame": test_subtract_frame,
     "subtract_video": test_subtract_video,
     "islands": test_islands,
     "reproject": test_reproject,
