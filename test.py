@@ -8,12 +8,12 @@ import sys
 import time
 import traceback
 
-# ── Dummy input paths (update these to match your test assets) ──────────────
-TEST_IMAGE = "test_imgs/day.jpg"
+# ── Test asset input paths ──────────────
+TEST_DAY_IMAGE = "test_imgs/day.jpg"
+TEST_NIGHT_IMAGE = "test_imgs/night.jpg"
+
 TEST_VIDEO = "test_imgs/test_video/video.mp4"
 TEST_BACKGROUND = "test_imgs/test_video/background.jpg"
-TEST_SURFACE_PHOTO = "test_imgs/input_raw.png"
-TEST_TARGET_CROP = "test_imgs/test_video/target_crop.jpg"
 
 RESULTS_ROOT = "test_results"
 
@@ -22,10 +22,10 @@ RESULTS_ROOT = "test_results"
 
 def test_darken():
     from wzrd import darken
-    _require(TEST_IMAGE)
+    _require(TEST_DAY_IMAGE)
     out_dir = _result_dir("darken")
-    _copy_input(TEST_IMAGE, out_dir)
-    img, info = darken.darken_image_file(TEST_IMAGE, output_path=os.path.join(out_dir, "output.jpg"))
+    _copy_input(TEST_DAY_IMAGE, out_dir)
+    img, info = darken.darken_image_file(TEST_DAY_IMAGE, output_path=os.path.join(out_dir, "output.jpg"))
     assert img is not None, "darken returned None image"
 
 
@@ -42,11 +42,11 @@ def test_subtract_video():
 
 def test_islands():
     from wzrd import islands
-    _require(TEST_IMAGE)
+    _require(TEST_DAY_IMAGE)
     out_dir = _result_dir("islands")
-    _copy_input(TEST_IMAGE, out_dir)
+    _copy_input(TEST_DAY_IMAGE, out_dir)
     regions_dir = os.path.join(out_dir, "regions")
-    regions, _ = islands.extract_color_regions(TEST_IMAGE, regions_dir)
+    regions, _ = islands.extract_color_regions(TEST_DAY_IMAGE, regions_dir)
     assert isinstance(regions, list), "islands did not return a list"
 
 
@@ -63,38 +63,80 @@ def test_reproject():
 
 def test_detect():
     from wzrd import detect
-    _require(TEST_SURFACE_PHOTO)
+    _require(TEST_NIGHT_IMAGE)
     out_dir = _result_dir("detect")
-    _copy_input(TEST_SURFACE_PHOTO, out_dir)
+    _copy_input(TEST_NIGHT_IMAGE, out_dir)
     cropped, info = detect.detect_projection_area(
-        TEST_SURFACE_PHOTO,
+        TEST_NIGHT_IMAGE,
         output_path=os.path.join(out_dir, "output.jpg"),
     )
     assert cropped is not None, "detect returned None image"
 
 
 def test_align():
-    from wzrd import align
-    _require(TEST_SURFACE_PHOTO, TEST_TARGET_CROP)
+    from wzrd import detect, align
+    _require(TEST_DAY_IMAGE, TEST_NIGHT_IMAGE)
     out_dir = _result_dir("align")
-    _copy_input(TEST_SURFACE_PHOTO, out_dir)
-    _copy_input(TEST_TARGET_CROP, out_dir)
+    _copy_input(TEST_DAY_IMAGE, out_dir)
+    _copy_input(TEST_NIGHT_IMAGE, out_dir)
+    # First detect the projection crop from the night image
+    cropped, _ = detect.detect_projection_area(
+        TEST_NIGHT_IMAGE,
+        output_path=os.path.join(out_dir, "detected_crop.jpg"),
+    )
+    # Then align the day image to match the detected crop
     warped, info = align.align_images_file(
-        TEST_SURFACE_PHOTO, TEST_TARGET_CROP,
+        TEST_DAY_IMAGE, os.path.join(out_dir, "detected_crop.jpg"),
         output_path=os.path.join(out_dir, "output.jpg"),
     )
     assert warped is not None, "align returned None image"
+
+
+def test_prepare_surface_darken_only():
+    from wzrd.prepare_surface import prepare_surface
+    _require(TEST_DAY_IMAGE)
+    out_dir = _result_dir("prepare_surface_darken_only")
+    _copy_input(TEST_DAY_IMAGE, out_dir)
+    result, info = prepare_surface(
+        TEST_DAY_IMAGE,
+        output_path=os.path.join(out_dir, "output.jpg"),
+        verbose=True,
+    )
+    assert result is not None, "prepare_surface returned None"
+    assert info['mode'] == 'darken_only'
+    assert os.path.isfile(os.path.join(out_dir, "output.jpg"))
+
+
+def test_prepare_surface_full():
+    from wzrd.prepare_surface import prepare_surface
+    _require(TEST_DAY_IMAGE, TEST_NIGHT_IMAGE)
+    out_dir = _result_dir("prepare_surface_full")
+    _copy_input(TEST_DAY_IMAGE, out_dir)
+    _copy_input(TEST_NIGHT_IMAGE, out_dir)
+    result, info = prepare_surface(
+        TEST_NIGHT_IMAGE,
+        day_image_path=TEST_DAY_IMAGE,
+        output_path=os.path.join(out_dir, "output.jpg"),
+        verbose=True,
+    )
+    assert result is not None, "prepare_surface returned None"
+    assert info['mode'] == 'full'
+    assert 'detect' in info
+    assert 'align' in info
+    assert os.path.isfile(os.path.join(out_dir, "output.jpg"))
 
 
 # ── Test registry ───────────────────────────────────────────────────────────
 
 TESTS = {
     "darken": test_darken,
+    "detect": test_detect,
+    "align": test_align,
+    "prepare_surface_darken_only": test_prepare_surface_darken_only,
+    "prepare_surface_full": test_prepare_surface_full,
     "subtract_video": test_subtract_video,
     "islands": test_islands,
     "reproject": test_reproject,
-    "detect": test_detect,
-    "align": test_align,
 }
 
 

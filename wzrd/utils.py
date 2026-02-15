@@ -7,6 +7,7 @@ to ensure consistency across AI-generated content.
 
 from PIL import Image
 import numpy as np
+import subprocess
 from typing import Tuple, Optional, Union
 from pathlib import Path
 import cv2
@@ -738,3 +739,81 @@ def extract_creature(
     creature = boosted * mask[:, :, np.newaxis]
 
     return np.clip(creature, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# FFmpeg video writer
+# ---------------------------------------------------------------------------
+
+class VideoWriter:
+    """Context-managed FFmpeg video writer.
+
+    Streams raw frames to an FFmpeg subprocess that encodes to H.264/mp4
+    with settings optimised for broad device compatibility.
+
+    Usage::
+
+        with VideoWriter(path, width, height, fps) as w:
+            w.write(frame_uint8)  # HWC uint8, rgb24 or rgba
+    """
+
+    def __init__(
+        self,
+        output_path: Union[str, Path],
+        width: int,
+        height: int,
+        fps: float,
+        *,
+        alpha: bool = False,
+        crf: int = 18,
+        codec: str = 'libx264',
+    ):
+        self.output_path = Path(output_path)
+        # Ensure even dimensions (required by most codecs / pixel formats)
+        self.width = width - (width % 2)
+        self.height = height - (height % 2)
+        self._crop = (self.width != width or self.height != height)
+
+        if alpha:
+            input_pix_fmt = 'rgba'
+            output_pix_fmt = 'yuva444p10le'
+            output_codec = 'prores_ks'
+            extra_args = ['-profile:v', '4444']
+        else:
+            input_pix_fmt = 'rgb24'
+            output_pix_fmt = 'yuv420p'
+            output_codec = codec
+            extra_args = ['-crf', str(crf), '-movflags', '+faststart']
+
+        self._cmd = [
+            'ffmpeg', '-y',
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-s', f'{self.width}x{self.height}',
+            '-pix_fmt', input_pix_fmt,
+            '-r', str(fps),
+            '-i', '-',
+            '-c:v', output_codec,
+            *extra_args,
+            '-pix_fmt', output_pix_fmt,
+            '-v', 'error',
+            str(self.output_path),
+        ]
+        self._process: Optional[subprocess.Popen] = None
+
+    def __enter__(self):
+        self._process = subprocess.Popen(
+            self._cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        return self
+
+    def write(self, frame: np.ndarray) -> None:
+        """Write a single frame (uint8 HWC array)."""
+        if self._crop:
+            frame = frame[:self.height, :self.width]
+        self._process.stdin.write(frame.tobytes())
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._process.stdin.close()
+        self._process.wait()
+        return False

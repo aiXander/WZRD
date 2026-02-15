@@ -22,6 +22,7 @@ from .utils import (
     correct_color_shift, compute_difference_mask, extract_creature,
     rgb_to_lab, lab_to_rgb,
     downscale_arr, upscale_arr, compute_color_shift, guided_filter,
+    VideoWriter,
 )
 
 # Module-level defaults
@@ -349,59 +350,15 @@ def subtract_background_video(
         'needs_alignment': needs_alignment,
     }
 
-    # ---- FFmpeg output setup ------------------------------------------------
-    if output_mode == 'alpha':
-        output_pix_fmt_in = 'rgba'
-        pix_fmt_out = 'yuva444p10le'
-        output_codec = 'prores_ks'
-        extra_args = ['-profile:v', '4444']
-    else:
-        output_pix_fmt_in = 'rgb24'
-        pix_fmt_out = 'yuv420p'
-        output_codec = codec
-        extra_args = ['-crf', str(crf)]
-
-    output_cmd = [
-        'ffmpeg', '-y',
-        '-f', 'rawvideo',
-        '-vcodec', 'rawvideo',
-        '-s', f'{bg_size[0]}x{bg_size[1]}',
-        '-pix_fmt', output_pix_fmt_in,
-        '-r', str(fps),
-        '-i', '-',
-        '-c:v', output_codec,
-        *extra_args,
-        '-pix_fmt', pix_fmt_out,
-        '-v', 'error',
-        str(output_path),
-    ]
-
-    preview_cmd = None
-    if preview:
-        preview_cmd = [
-            'ffmpeg', '-y',
-            '-f', 'rawvideo',
-            '-vcodec', 'rawvideo',
-            '-s', f'{bg_size[0]}x{bg_size[1]}',
-            '-pix_fmt', 'rgb24',
-            '-r', str(fps),
-            '-i', '-',
-            '-c:v', codec,
-            '-crf', str(crf),
-            '-pix_fmt', 'yuv420p',
-            '-v', 'error',
-            str(preview_path),
-        ]
-
-    # Start output processes
-    output_process = subprocess.Popen(
-        output_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE
+    # ---- Video writers -------------------------------------------------------
+    is_alpha = output_mode == 'alpha'
+    output_writer = VideoWriter(
+        output_path, bg_size[0], bg_size[1], fps,
+        alpha=is_alpha, crf=crf, codec=codec,
     )
-    preview_process = (
-        subprocess.Popen(
-            preview_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        if preview_cmd else None
+    preview_writer = (
+        VideoWriter(preview_path, bg_size[0], bg_size[1], fps, crf=crf, codec=codec)
+        if preview else None
     )
 
     # ---- Parallel batch processing ------------------------------------------
@@ -512,6 +469,14 @@ def subtract_background_video(
     prev_mask = None
     frame_num = 0
 
+    writers = [output_writer]
+    if preview_writer:
+        writers.append(preview_writer)
+
+    # Enter all writer context managers
+    for w in writers:
+        w.__enter__()
+
     try:
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             while True:
@@ -551,29 +516,26 @@ def subtract_background_video(
                     if progress_callback:
                         progress_callback(frame_num, frame_count or 0)
 
-                    # Write to output pipe
+                    # Write to output
                     if output_mode == 'alpha':
                         alpha_channel = (mask * 255).astype(np.uint8)
                         rgba = np.dstack([creature, alpha_channel])
-                        output_process.stdin.write(rgba.tobytes())
+                        output_writer.write(rgba)
                     else:
-                        output_process.stdin.write(creature.tobytes())
+                        output_writer.write(creature)
 
                     # Write preview
-                    if preview_process:
+                    if preview_writer:
                         composite = np.clip(
                             bg_arr + creature.astype(np.float32), 0, 255
                         ).astype(np.uint8)
-                        preview_process.stdin.write(composite.tobytes())
+                        preview_writer.write(composite)
 
         info['frames_processed'] = frame_num
 
     finally:
-        output_process.stdin.close()
-        output_process.wait()
-        if preview_process:
-            preview_process.stdin.close()
-            preview_process.wait()
+        for w in writers:
+            w.__exit__(None, None, None)
 
     if preview_path:
         info['preview_video'] = str(preview_path)

@@ -6,7 +6,6 @@ them onto a full-resolution canvas, positioned at their original locations.
 This enables layer-based compositing in tools like Resolume using additive blending.
 """
 
-import subprocess
 import json
 from pathlib import Path
 from typing import Union, Optional, Tuple, Callable, List, Dict
@@ -14,7 +13,7 @@ import numpy as np
 from PIL import Image
 
 from .subtract_video import get_video_info, iter_video_frames
-from .utils import parse_aspect_ratio, compute_target_dimensions, ASPECT_RATIOS
+from .utils import parse_aspect_ratio, compute_target_dimensions, ASPECT_RATIOS, VideoWriter
 
 
 def load_island_metadata(json_path: Union[str, Path]) -> Dict:
@@ -113,31 +112,11 @@ def reproject_video(
             f"{canvas_width}x{canvas_height}. Island will be clipped."
         )
 
-    # Setup FFmpeg output pipe
-    output_cmd = [
-        'ffmpeg', '-y',
-        '-f', 'rawvideo',
-        '-vcodec', 'rawvideo',
-        '-s', f'{canvas_width}x{canvas_height}',
-        '-pix_fmt', 'rgb24',
-        '-r', str(fps),
-        '-i', '-',
-        '-c:v', codec,
-        '-crf', str(crf),
-        '-pix_fmt', 'yuv420p',
-        '-v', 'error',
-        str(output_path)
-    ]
-
-    output_process = subprocess.Popen(
-        output_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-
     # Create black canvas template
     canvas_template = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
 
     frame_num = 0
-    try:
+    with VideoWriter(output_path, canvas_width, canvas_height, fps, crf=crf, codec=codec) as writer:
         for fn, frame_arr in iter_video_frames(video_path):
             frame_num = fn
 
@@ -177,14 +156,9 @@ def reproject_video(
                 canvas[dst_y_start:dst_y_end, dst_x_start:dst_x_end] = \
                     frame_arr[src_y_start:src_y_end, src_x_start:src_x_end]
 
-            # Write to output
-            output_process.stdin.write(canvas.tobytes())
+            writer.write(canvas)
 
         info['frames_processed'] = frame_num
-
-    finally:
-        output_process.stdin.close()
-        output_process.wait()
 
     return info
 

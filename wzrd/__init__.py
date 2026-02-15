@@ -98,6 +98,8 @@ __all__ = [
     'align_images',
     'align_images_file',
     'AlignmentResult',
+    # Surface preparation (use: from wzrd.prepare_surface import prepare_surface)
+    'prepare_surface',
     # Utils
     'parse_aspect_ratio',
     'get_aspect_ratio',
