@@ -18,6 +18,7 @@ from .utils import (
     parse_aspect_ratio,
     normalize_image,
     compute_target_dimensions,
+    _generate_alignment_aids,
     DebugContext,
 )
 
@@ -414,6 +415,14 @@ def darken_image_file(
 
     info['final_size'] = img.size
 
+    # Run surface analysis on the un-darkened, normalized image
+    surface_rgb = np.array(img)
+    aids_output_dir = str(Path(output_path).parent) if output_path is not None else None
+    aids_stem = Path(output_path).stem if output_path is not None else "surface"
+    analysis = _generate_alignment_aids(
+        surface_rgb, output_dir=aids_output_dir, stem=aids_stem,
+    )
+
     debug = DebugContext(debug_dir)
     darkened_arr = darken_image(
         img,
@@ -429,8 +438,12 @@ def darken_image_file(
     darkened_img = Image.fromarray(darkened_arr)
 
     if output_path is not None:
-        darkened_img.save(output_path, quality=95)
+        output_path = Path(output_path)
+        darkened_img.save(str(output_path), quality=95)
         info['output_path'] = str(output_path)
+
+        if 'video_path' in analysis:
+            info['alignment_video_path'] = analysis['video_path']
 
     return darkened_img, info
 

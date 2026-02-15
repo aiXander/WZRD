@@ -1,232 +1,125 @@
-# WZRD - Projection Mapping Pipeline
+# WZRD - Projection Mapping Toolkit
 
-A Python toolkit for creating projection-mapped animations where AI-generated characters appear to inhabit real-world surfaces. The pipeline generates content optimized for additive projection by isolating animated elements from static backgrounds.
+A Python toolkit for additive projection mapping. Extracts animated elements from static backgrounds so only the changing regions get projected — unchanged areas stay invisible, making characters appear to inhabit real surfaces.
 
 ## Installation
 
 ```bash
-# Install from local directory
 pip install -e .
 
-# Install with optional dependencies (LAB color mode, histogram plots)
-pip install -e ".[all]"
+# With island extraction support (requires scikit-learn for KMeans)
+pip install -e ".[islands]"
 
-# Install from GitHub (for use in other projects)
+# From GitHub
 pip install "wzrd @ git+https://github.com/xandersteenbrugge/WZRD.git"
 ```
 
-## Overview
+**Requirements:** Python 3.10+, FFmpeg (for video processing)
 
-This pipeline creates projection content where a luminous character (or any animated element) appears on a physical surface. By subtracting the static background, only the regions with visual change get projected—making unchanged areas invisible and creating the illusion that the character truly exists on the surface.
+## Modules
 
-## Pipeline Steps
+Every module runs standalone via `python -m wzrd.<module>`. All processing parameters have sensible defaults.
 
+### detect — Projection Surface Detection
+
+Automatically finds the projection area in a photo of the lit surface. Uses color proximity mapping, Otsu thresholding, and convex hull fitting.
+
+```bash
+python -m wzrd.detect photo.jpg -o cropped.png --margin 0.02 --aspect-ratio 16:9
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         PROJECTION MAPPING PIPELINE                         │
-└─────────────────────────────────────────────────────────────────────────────┘
 
-   ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
-   │  1. CAPTURE  │         │  2. DARKEN   │         │ 3. GENERATE  │
-   │              │  ────►  │              │  ────►  │   KEYFRAMES  │
-   │ Photograph   │         │ Create faint │         │              │
-   │ projection   │         │ background   │         │ AI creates   │
-   │ surface      │         │ guidance     │         │ character    │
-   │              │         │ image        │         │ poses        │
-   └──────────────┘         └──────────────┘         └──────────────┘
-                                                           │
-                                                           ▼
-   ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
-   │ 5. SUBTRACT  │         │ 4. GENERATE  │         │   KEYFRAME   │
-   │   BACKGROUND │  ◄────  │    VIDEO     │  ◄────  │   SEQUENCE   │
-   │              │         │              │         │              │
-   │ Isolate only │         │ AI img2img   │         │ Multiple     │
-   │ changed      │         │ video creates│         │ character    │
-   │ regions      │         │ transitions  │         │ positions    │
-   └──────────────┘         └──────────────┘         └──────────────┘
-         │
-         ▼
-   ┌──────────────┐
-   │  6. PROJECT  │
-   │              │
-   │ Additive     │
-   │ projection   │
-   │ onto surface │
-   └──────────────┘
+### darken — Gradient-Weighted Darkening
+
+Darkens well-lit surface photos into faint guidance images for AI generation. Uses gradient-weighted histogram equalization in CIELAB space to preserve texture detail while reducing overall brightness.
+
+```bash
+python -m wzrd.darken surface.jpg -o dark.png --max-brightness 0.25 --aspect 16:9
+```
+
+### align — Image Alignment
+
+Aligns a source image to a target via feature matching (SIFT/AKAZE + RANSAC) with template matching fallback and ECC sub-pixel refinement.
+
+```bash
+python -m wzrd.align source.png target.png -o aligned.png
+```
+
+### subtract_frame — Single-Frame Background Subtraction
+
+Isolates the "creature" (changed regions) from a generated frame against its background. Pipeline: color correction → LAB difference → soft ramp threshold → morphological cleanup → guided filter feathering → gamma-corrected extraction.
+
+```bash
+python -m wzrd.subtract_frame generated.png background.png -o creature.png --preview
+```
+
+### subtract_video — Video Background Subtraction
+
+Processes entire videos frame-by-frame with multi-resolution acceleration and temporal EMA smoothing. Color correction runs at 1/4 res, masks at 1/2 res, guided filter at full res.
+
+```bash
+python -m wzrd.subtract_video animation.mp4 background.png -o output.mp4 --temporal-smoothing 0.3
+```
+
+### islands — Color Region Extraction
+
+Segments images into distinct color regions via K-means clustering, extracts connected components, and saves per-region crops with JSON metadata for reconstruction.
+
+```bash
+python -m wzrd.islands input.png -o regions/ --max-colors 6 --surface surface.png
+```
+
+### reproject — Layer Compositing
+
+Reprojects cropped island videos back onto a full-size canvas at their original positions, for layer-based compositing in tools like Resolume.
+
+```bash
+python -m wzrd.reproject regions_dir/ -o output.mp4 --aspect 16:9
 ```
 
 ## Python API
 
-### Darken Images
-
 ```python
-from wzrd import darken_image, darken_image_file
-from PIL import Image
+import wzrd
 
-# Darken an image in memory
-img = Image.open("surface.jpg")
-darkened = darken_image(img, gamma=1.5, max_brightness=0.15)
+# Background subtraction (single frame)
+creature, mask, info = wzrd.subtract_background(generated, background,
+    threshold=10, ramp=20, gamma=0.85, diff_mode='lab')
 
-# Or process a file directly
-darkened_img, info = darken_image_file(
-    "surface.jpg",
-    output_path="surface_dark.jpg",
-    gamma=1.5,
-    max_brightness=0.15,
-    target_aspect="16:9",
-    base_resolution=1920,
-)
-```
+# Background subtraction (video)
+wzrd.subtract_background_video("video.mp4", "background.png",
+    output_path="output.mp4", temporal_smoothing=0.3)
 
-### Background Subtraction (Images)
+# Darken image
+from wzrd import darken_image
+darkened = darken_image(image, max_brightness=0.25)
 
-```python
-from wzrd import subtract_background, subtract_background_file
+# Detect projection surface
+from wzrd import detect_projection_area
+detect_projection_area("photo.jpg", margin=0.02, target_aspect_ratio=16/9)
 
-# Process images in memory
-creature, mask, info = subtract_background(
-    generated_frame,      # PIL Image or numpy array
-    background_frame,     # PIL Image or numpy array
-    threshold=10,
-    boost=1.1,
-    feather_radius=4,
-    diff_mode='luminance',  # 'rgb', 'lab', or 'luminance'
-    output_mode='additive', # 'additive' or 'alpha'
-)
+# Align images
+from wzrd import align_images
+warped, result = align_images(source, target)
 
-# Or process files
-creature_img, info = subtract_background_file(
-    "generated.png",
-    "background.png",
-    output_path="creature.png",
-    preview=True,  # Also save composite preview
-)
-```
+# Extract color regions
+from wzrd import extract_color_regions
+extract_color_regions(image, output_dir="regions/", max_colors=6)
 
-### Background Subtraction (Video)
-
-```python
-from wzrd import subtract_background_video
-
-info = subtract_background_video(
-    "animation.mp4",
-    "background.png",
-    output_path="creature_video.mp4",
-    threshold=10,
-    boost=1.1,
-    preview=True,
-    progress_callback=lambda frame, total: print(f"Frame {frame}/{total}"),
-)
-```
-
-### Island Extraction
-
-Extract connected components from binary segmentation maps:
-
-```python
-from wzrd import find_islands, crop_islands_file
-
-# Find islands in memory
-islands, labels, binary = find_islands(segmentation_image, min_area=100)
-
-# Process file and save crops
-islands, output_dir = crop_islands_file(
-    "segmentation.png",
-    output_dir="islands_output",
-    min_area=100,
-    connectivity=8,
-)
-```
-
-### Utility Functions
-
-```python
-from wzrd import (
-    parse_aspect_ratio,
-    normalize_image,
-    align_to_reference,
-    center_crop_to_aspect,
-)
-
-# Parse aspect ratio strings
-aspect = parse_aspect_ratio("16:9")  # Returns 1.7778
-
-# Normalize image to aspect ratio and resolution
-normalized = normalize_image(img, target_aspect=1.7778, base_resolution=1920)
-
-# Align generated frame to match reference dimensions
-aligned, info = align_to_reference(generated, reference, tolerance=0.02)
-```
-
-## CLI Commands
-
-The package installs these command-line tools:
-
-```bash
-# Darken an image
-wzrd-darken image.jpg --gamma 1.5 --max-brightness 0.15 --aspect 16:9
-
-# Subtract background from image
-wzrd-subtract generated.png background.png --threshold 10 --boost 1.1 --preview
-
-# Subtract background from video
-wzrd-subtract-video video.mp4 background.png --threshold 10 --preview
-
-# Extract islands from segmentation map
-wzrd-crop-islands segmentation.png --min-area 100
-```
-
-## Configuration
-
-Default parameters are stored in `wzrd/default_config.yaml`. You can override by placing a `config.yaml` in your working directory:
-
-```yaml
-resolution:
-  default_aspect: "16:9"
-  base_resolution: 1920
-  aspect_tolerance: 0.02
-
-darken:
-  max_brightness: 0.15
-  gamma: 1.5
-
-subtract:
-  threshold: 10
-  boost: 1.1
-  feather_radius: 4
-  diff_mode: "luminance"  # rgb, lab, or luminance
-  min_alpha: 0.0
-  output_mode: "additive"  # additive or alpha
-```
-
-Load custom config programmatically:
-
-```python
-from wzrd import load_config
-
-config = load_config("my_config.yaml")
+# Reproject layers
+from wzrd import reproject_videos_batch
+reproject_videos_batch(video_json_pairs, canvas_width=1920, canvas_height=1080)
 ```
 
 ## Dependencies
 
-**Required:**
-- Python 3.10+
-- Pillow
-- NumPy
-- OpenCV
-- PyYAML
-- FFmpeg (system install, for video processing)
-
-**Optional:**
-- scikit-image (for LAB color mode)
-- matplotlib (for histogram plots)
+- **Pillow**, **NumPy**, **OpenCV** (core)
+- **FFmpeg** (system install, for video I/O)
+- **scikit-learn** (optional, for `islands` color clustering)
 
 ## Tips
 
-- **Threshold tuning:** Start low (5-10) and increase if background artifacts appear
-- **Boost values:** Use 1.0-1.5 for natural brightness, higher for more dramatic effect
-- **Feathering:** Higher values (8-16) give softer edges but may lose fine detail
-- **Mode selection:**
-  - `luminance` - Fast, good for bright characters on dark backgrounds
-  - `lab` - More perceptually accurate, catches subtle color differences
-  - `rgb` - Simple per-channel difference
+- **Threshold tuning:** Start low (5–10) and increase if background bleeds through
+- **Diff mode:** `lab` is most perceptually accurate; `luminance` is faster; `rgb` is simplest
+- **Temporal smoothing:** 0.3 gives moderate stability; 0 disables for per-frame independence
+- **Gamma < 1.0** brightens extracted creatures (default 0.85), useful for projection
+- **Feathering:** Higher radius gives softer edges but costs performance in video mode

@@ -106,6 +106,149 @@ class DebugContext:
 
 
 
+def _normalize_to_full_range(img: np.ndarray) -> np.ndarray:
+    """Stretch a single-channel image to use the full 0-255 dynamic range."""
+    lo, hi = float(img.min()), float(img.max())
+    if hi - lo < 1e-6:
+        return np.zeros_like(img, dtype=np.uint8)
+    return ((img.astype(np.float32) - lo) / (hi - lo) * 255.0).astype(np.uint8)
+
+
+def _apply_colormap(gray: np.ndarray, colormap: int) -> np.ndarray:
+    """Apply an OpenCV colormap to a grayscale image, ensuring full range.
+
+    Returns a BGR uint8 image with full 0-255 dynamic range.
+    """
+    stretched = _normalize_to_full_range(gray)
+    return cv2.applyColorMap(stretched, colormap)
+
+
+def _generate_alignment_aids(
+    image: np.ndarray,
+    *,
+    output_dir: Optional[Union[str, Path]] = None,
+    stem: str = "surface",
+    video_fps: float = 24.0,
+    hold_seconds: float = 6.0,
+    crossfade_seconds: float = 3.0,
+) -> dict:
+    """Generate a false-color alignment video for beamer calibration.
+
+    Produces a seamlessly looping MP4 that slowly cycles through
+    complementary colour visualisations.  Each aid is held for several
+    seconds with gentle cross-fades, giving the operator time to study
+    the projected image and make fine physical adjustments to the beamer.
+
+    False-colour palettes exploit the human eye's superior sensitivity to
+    colour differences — even tiny alignment errors become immediately
+    visible as colour shifts.
+
+    Args:
+        image: Surface image (BGR or RGB uint8 HWC, 0-255).
+        output_dir: Directory for the output MP4.
+        stem: Filename prefix for the video.
+        video_fps: Playback frame rate (higher = smoother fades).
+        hold_seconds: Seconds each aid is shown before transitioning.
+        crossfade_seconds: Seconds for each cross-fade transition.
+
+    Returns:
+        Dict with ``'video_path'`` key (str) when *output_dir* is set,
+        otherwise empty dict.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    aids: list = []  # list of BGR uint8 arrays
+
+    # 1. Edges — directional Sobel mapped to HSV colour wheel
+    blurred = cv2.GaussianBlur(enhanced, (7, 7), 2.0)
+    sobel_x = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
+    angle = np.arctan2(sobel_y, sobel_x)  # -pi..pi
+    hsv = np.zeros((*gray.shape, 3), dtype=np.uint8)
+    hsv[:, :, 0] = ((angle + np.pi) / (2 * np.pi) * 179).astype(np.uint8)
+    hsv[:, :, 1] = 255
+    hsv[:, :, 2] = _normalize_to_full_range(magnitude)
+    aids.append(cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR))
+
+    # 2. Adaptive texture — turbo colormap on CLAHE-enhanced luminance
+    aids.append(_apply_colormap(enhanced, cv2.COLORMAP_TURBO))
+
+    # 3. Difference of Gaussians — diverging hot/cold colormap
+    sigma_lo, sigma_hi = 1.0, 6.0
+    blur_lo = cv2.GaussianBlur(enhanced, (0, 0), sigma_lo)
+    blur_hi = cv2.GaussianBlur(enhanced, (0, 0), sigma_hi)
+    dog = blur_lo.astype(np.float32) - blur_hi.astype(np.float32)
+    dog_norm = _normalize_to_full_range(dog)
+    aids.append(_apply_colormap(dog_norm, cv2.COLORMAP_TWILIGHT_SHIFTED))
+
+    # 4. Contours — luminance quantised into colour-coded elevation bands
+    num_bands = 8
+    quantised = np.clip(
+        (gray.astype(np.float32) / 255.0 * num_bands).astype(np.int32),
+        0, num_bands - 1,
+    )
+    band_hue = (quantised.astype(np.float32) / num_bands * 179).astype(np.uint8)
+    band_val = _normalize_to_full_range(gray)
+    hsv_bands = np.zeros((*gray.shape, 3), dtype=np.uint8)
+    hsv_bands[:, :, 0] = band_hue
+    hsv_bands[:, :, 1] = 200
+    hsv_bands[:, :, 2] = np.clip(band_val.astype(np.int32) + 80, 0, 255).astype(np.uint8)
+    contour_bgr = cv2.cvtColor(hsv_bands, cv2.COLOR_HSV2BGR)
+    for band in range(1, num_bands):
+        boundary = (quantised == band).astype(np.uint8) * 255
+        edges_band = cv2.Canny(boundary, 50, 150)
+        edges_band = cv2.dilate(edges_band, np.ones((2, 2), np.uint8), iterations=1)
+        contour_bgr[edges_band > 0] = 255
+    aids.append(contour_bgr)
+
+    # Generate seamlessly looping video
+    if output_dir is not None:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
+        # Dimmed original as a rest frame between aids
+        dimmed_gray = _normalize_to_full_range((gray * 0.3).astype(np.uint8))
+        dimmed_color = _apply_colormap(dimmed_gray, cv2.COLORMAP_BONE)
+
+        # Convert all key frames to RGB for the video writer
+        key_frames_bgr = [dimmed_color] + aids
+        key_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in key_frames_bgr]
+
+        h, w = gray.shape[:2]
+        video_path = out / f"{stem}_alignment_cycle.mp4"
+
+        # Frame counts from real-time durations
+        hold_frames = max(int(video_fps * hold_seconds), 1)
+        crossfade_frames = max(int(video_fps * crossfade_seconds), 1)
+
+        # Build seamless sequence: hold → cross-fade → hold → ...
+        # Wraps around so last aid fades back into first for perfect loop.
+        n = len(key_frames)
+        all_frames = []
+        for i in range(n):
+            src = key_frames[i].astype(np.float32)
+            dst = key_frames[(i + 1) % n].astype(np.float32)
+            # Hold
+            for _ in range(hold_frames):
+                all_frames.append(key_frames[i])
+            # Cross-fade
+            for t in range(crossfade_frames):
+                alpha = (t + 1) / (crossfade_frames + 1)
+                blended = ((1 - alpha) * src + alpha * dst).astype(np.uint8)
+                all_frames.append(blended)
+
+        with VideoWriter(video_path, w, h, video_fps) as writer:
+            for frame in all_frames:
+                writer.write(frame)
+
+        return {'video_path': str(video_path)}
+
+    return {}
+
+
 def parse_aspect_ratio(aspect_str: str) -> float:
     """
     Parse aspect ratio string to float.

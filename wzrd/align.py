@@ -350,38 +350,6 @@ def _refine_with_ecc(
         return initial_warp, 0.0
 
 
-def _generate_alignment_overlay(warped: np.ndarray) -> np.ndarray:
-    """Generate a high-contrast edge image for projector alignment verification.
-
-    Produces prominent edges blended with a faint version of the original image.
-    Only major structural edges are kept (walls, doors, large objects) while
-    small texture noise is suppressed.
-    """
-    gray = _to_grayscale(warped)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    # Moderate blur to suppress small texture while keeping structural edges
-    blurred = cv2.GaussianBlur(enhanced, (7, 7), 2.0)
-
-    # Canny with raised thresholds to favor strong edges
-    edges = cv2.Canny(blurred, 50, 150)
-
-    # Remove small isolated edge fragments
-    kernel_clean = np.ones((2, 2), np.uint8)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel_clean, iterations=1)
-
-    # Dilate edges for visibility when projected
-    kernel_dilate = np.ones((3, 3), np.uint8)
-    edges = cv2.dilate(edges, kernel_dilate, iterations=1)
-
-    # Blend: bright edges over a faint version of the original for context
-    base = (gray * 0.2).astype(np.uint8)
-    overlay = cv2.max(base, edges)
-
-    return overlay
-
-
 def _warp_image(
     src: np.ndarray,
     homography: np.ndarray,
@@ -576,16 +544,6 @@ def align_images_file(
         info['output_path'] = str(output_path)
         if verbose:
             print(f"Saved: {output_path}")
-
-        # Generate and save alignment overlay for projector calibration
-        overlay = _generate_alignment_overlay(warped)
-        overlay_path = output_path.with_name(
-            output_path.stem + "_edges" + ".png"
-        )
-        cv2.imwrite(str(overlay_path), overlay)
-        info['overlay_path'] = str(overlay_path)
-        if verbose:
-            print(f"Saved alignment overlay: {overlay_path}")
 
     return warped, info
 
