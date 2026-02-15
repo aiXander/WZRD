@@ -12,6 +12,8 @@ import traceback
 TEST_DAY_IMAGE = "test_imgs/day.jpg"
 TEST_NIGHT_IMAGE = "test_imgs/night.jpg"
 
+TEST_SEGMAP = "test_imgs/segmap.jpeg"
+
 TEST_VIDEO = "test_imgs/test_video/video.mp4"
 TEST_BACKGROUND = "test_imgs/test_video/background.jpg"
 
@@ -25,8 +27,8 @@ def test_darken():
     _require(TEST_DAY_IMAGE)
     out_dir = _result_dir("darken")
     _copy_input(TEST_DAY_IMAGE, out_dir)
-    img, info = darken.darken_image_file(TEST_DAY_IMAGE, output_path=os.path.join(out_dir, "output.jpg"))
-    assert img is not None, "darken returned None image"
+    result = darken.darken_image_file(TEST_DAY_IMAGE, output_path=os.path.join(out_dir, "output.jpg"))
+    assert result['image'] is not None, "darken returned None image"
 
 
 def test_subtract_video():
@@ -42,11 +44,11 @@ def test_subtract_video():
 
 def test_islands():
     from wzrd import islands
-    _require(TEST_DAY_IMAGE)
+    _require(TEST_SEGMAP)
     out_dir = _result_dir("islands")
-    _copy_input(TEST_DAY_IMAGE, out_dir)
+    _copy_input(TEST_SEGMAP, out_dir)
     regions_dir = os.path.join(out_dir, "regions")
-    regions, _ = islands.extract_color_regions(TEST_DAY_IMAGE, regions_dir)
+    regions, _ = islands.extract_color_regions(TEST_SEGMAP, regions_dir)
     assert isinstance(regions, list), "islands did not return a list"
 
 
@@ -97,13 +99,11 @@ def test_prepare_surface_darken_only():
     _require(TEST_DAY_IMAGE)
     out_dir = _result_dir("prepare_surface_darken_only")
     _copy_input(TEST_DAY_IMAGE, out_dir)
-    result, info = prepare_surface(
+    result = prepare_surface(
         TEST_DAY_IMAGE,
         output_path=os.path.join(out_dir, "output.jpg"),
-        verbose=True,
     )
-    assert result is not None, "prepare_surface returned None"
-    assert info['mode'] == 'darken_only'
+    assert result['image'] is not None, "prepare_surface returned None"
     assert os.path.isfile(os.path.join(out_dir, "output.jpg"))
 
 
@@ -113,16 +113,12 @@ def test_prepare_surface_full():
     out_dir = _result_dir("prepare_surface_full")
     _copy_input(TEST_DAY_IMAGE, out_dir)
     _copy_input(TEST_NIGHT_IMAGE, out_dir)
-    result, info = prepare_surface(
+    result = prepare_surface(
         TEST_NIGHT_IMAGE,
         day_image_path=TEST_DAY_IMAGE,
         output_path=os.path.join(out_dir, "output.jpg"),
-        verbose=True,
     )
-    assert result is not None, "prepare_surface returned None"
-    assert info['mode'] == 'full'
-    assert 'detect' in info
-    assert 'align' in info
+    assert result['image'] is not None, "prepare_surface returned None"
     assert os.path.isfile(os.path.join(out_dir, "output.jpg"))
 
 

@@ -368,57 +368,22 @@ def darken_image_file(
     base_resolution: int = BASE_RESOLUTION,
     normalize: bool = True,
     alignment_aids: bool = True,
-    debug_dir: Optional[str] = None,
-) -> Tuple[Image.Image, dict]:
+) -> dict:
     """
     Load, optionally normalise, and darken an image file.
 
-    Args:
-        input_path:     Path to input image
-        output_path:    Path to save output (optional)
-        max_brightness: Output luminance ceiling (0.0-1.0)
-        detail_boost:   Detail layer amplification
-        guide_fraction: Guided filter radius as fraction of min(H, W)
-        guide_eps:      Guided filter regularisation (relative to dynamic range)
-        hist_bins:      Histogram resolution for CDF
-        chroma_correction: Chroma scaling strength (0=none, 1=full)
-        gradient_source: Blend raw-L (0) vs detail-residual (1) gradients
-        target_aspect:  Aspect ratio string e.g. "16:9"
-        base_resolution: Max dimension in pixels
-        normalize:      Whether to normalise aspect ratio and resolution
-        alignment_aids: Whether to generate alignment aid overlays
-
     Returns:
-        Tuple of (darkened PIL Image, info dict with processing details)
+        Dict with 'image' (PIL Image) and 'video' (str path or None).
     """
     input_path = Path(input_path)
     img = Image.open(input_path).convert('RGB')
-    original_size = img.size
-
-    info = {
-        'original_size': original_size,
-        'max_brightness': max_brightness,
-        'detail_boost': detail_boost,
-        'guide_fraction': guide_fraction,
-        'guide_eps': guide_eps,
-        'hist_bins': hist_bins,
-        'chroma_correction': chroma_correction,
-        'gradient_source': gradient_source,
-        'normalized': False,
-        'target_aspect': None,
-        'final_size': None,
-    }
 
     if normalize:
         target_aspect_val = parse_aspect_ratio(target_aspect)
         img = normalize_image(img, target_aspect_val, base_resolution)
-        info['normalized'] = True
-        info['target_aspect'] = target_aspect
 
-    info['final_size'] = img.size
-
-    # Run surface analysis on the un-darkened, normalized image
-    analysis = {}
+    # Generate alignment aids on the un-darkened, normalized image
+    alignment_video = None
     if alignment_aids:
         surface_rgb = np.array(img)
         if output_path is not None:
@@ -430,8 +395,8 @@ def darken_image_file(
         analysis = _generate_alignment_aids(
             surface_rgb, output_dir=aids_output_dir, stem=aids_stem,
         )
+        alignment_video = analysis.get('video_path')
 
-    debug = DebugContext(debug_dir)
     darkened_arr = darken_image(
         img,
         max_brightness=max_brightness,
@@ -441,19 +406,13 @@ def darken_image_file(
         hist_bins=hist_bins,
         chroma_correction=chroma_correction,
         gradient_source=gradient_source,
-        debug=debug,
     )
     darkened_img = Image.fromarray(darkened_arr)
 
     if output_path is not None:
-        output_path = Path(output_path)
         darkened_img.save(str(output_path), quality=95)
-        info['output_path'] = str(output_path)
 
-        if 'video_path' in analysis:
-            info['alignment_video_path'] = analysis['video_path']
-
-    return darkened_img, info
+    return {'image': darkened_img, 'video': alignment_video}
 
 
 # ---------------------------------------------------------------------------
@@ -497,17 +456,13 @@ def _cli():
                         help='Skip aspect ratio and resolution normalization')
     parser.add_argument('--no-alignment-aids', action='store_true',
                         help='Skip generation of alignment aid overlays')
-    parser.add_argument('--debug', action='store_true',
-                        help='Save intermediate debug images next to the input')
     args = parser.parse_args()
 
     if args.output is None:
         input_path = Path(args.input_image)
         args.output = str(input_path.with_name(f"{input_path.stem}_darkened.jpg"))
 
-    debug_dir = str(Path(args.input_image).parent) if args.debug else None
-
-    img, info = darken_image_file(
+    result = darken_image_file(
         args.input_image,
         output_path=args.output,
         max_brightness=args.max_brightness,
@@ -521,14 +476,12 @@ def _cli():
         base_resolution=args.base_resolution,
         normalize=not args.no_normalize,
         alignment_aids=not args.no_alignment_aids,
-        debug_dir=debug_dir,
     )
 
-    print(f"Saved: {info.get('output_path', args.output)}")
-    print(f"  Size: {info['final_size'][0]}x{info['final_size'][1]}")
-    print(f"  Max brightness: {info['max_brightness']}")
-    print(f"  Detail boost: {info['detail_boost']}")
-    print(f"  Guide: fraction={info['guide_fraction']}, eps={info['guide_eps']}")
+    img = result['image']
+    print(f"Saved: {args.output}  ({img.size[0]}x{img.size[1]})")
+    if result['video']:
+        print(f"  Alignment video: {result['video']}")
 
 
 if __name__ == '__main__':

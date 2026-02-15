@@ -25,7 +25,7 @@ Example usage:
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Optional, Union, Tuple
+from typing import Optional, Union
 from PIL import Image
 
 from .detect import detect_projection_area
@@ -66,10 +66,7 @@ def prepare_surface(
     base_resolution: int = BASE_RESOLUTION,
     normalize: bool = True,
     alignment_aids: bool = True,
-    # general
-    verbose: bool = False,
-    debug_dir: Optional[str] = None,
-) -> Tuple[Image.Image, dict]:
+) -> dict:
     """
     Prepare a projection surface reference image.
 
@@ -79,94 +76,31 @@ def prepare_surface(
     Otherwise runs darken-only on the supplied image (treated as
     an already-cropped surface photo).
 
-    Args:
-        night_image_path: In full-pipeline mode this is the nighttime photo
-                          with the projector illuminating the surface.
-                          In darken-only mode this is the pre-cropped image.
-        day_image_path:   Optional daytime photo of the same surface.
-                          When provided, the full pipeline is used.
-        output_path:      Where to save the final darkened image.
-
-        margin:                  Detect margin (fraction to shrink inward).
-        min_projection_fraction: Minimum projection area fraction for detect.
-        detect_aspect_ratio:     Target aspect ratio for detect crop (e.g. "16:9").
-        detect_resolution:       Max dimension for detect output.
-
-        max_brightness:    Darken luminance ceiling (0.0-1.0).
-        detail_boost:      Detail layer amplification.
-        guide_fraction:    Guided filter radius fraction.
-        guide_eps:         Guided filter regularisation.
-        hist_bins:         CDF histogram bins.
-        chroma_correction: Chroma scaling strength.
-        gradient_source:   Raw-L (0) vs detail-residual (1) gradient blend.
-        target_aspect:     Aspect ratio for darken normalisation.
-        base_resolution:   Max dimension for darken output.
-        normalize:         Whether darken normalises aspect/resolution.
-        alignment_aids:    Whether to generate alignment aid overlays.
-
-        verbose:   Print progress messages.
-        debug_dir: Save intermediate debug images to this directory.
-
     Returns:
-        Tuple of (darkened_image_pil, info_dict)
+        Dict with 'image' (PIL Image) and 'video' (str path or None).
     """
-    info: dict = {'mode': 'darken_only'}
+    alignment_video = None
 
     if day_image_path is not None:
         # ── Full pipeline: detect → align → darken ──────────────────
-        info['mode'] = 'full'
-
-        # Step 1: Detect projection area in night image
-        if verbose:
-            print(f"[1/3] Detecting projection surface in {night_image_path} ...")
 
         cropped_bgr, detect_info = detect_projection_area(
             night_image_path,
             margin=margin,
-            debug_dir=debug_dir,
             min_projection_fraction=min_projection_fraction,
             target_aspect_ratio=detect_aspect_ratio,
             output_resolution=detect_resolution,
         )
-        info['detect'] = {k: v for k, v in detect_info.items() if k != 'preview'}
-
-        if verbose:
-            print(f"  Detected crop: {detect_info['cropped_size']}")
-
-        # Step 2: Align day image to the detected crop
-        if verbose:
-            print(f"[2/3] Aligning {day_image_path} to detected crop ...")
 
         day_bgr = cv2.imread(str(day_image_path))
         if day_bgr is None:
             raise FileNotFoundError(f"Could not load day image: {day_image_path}")
 
-        aligned_bgr, align_result = align_images(
-            day_bgr, cropped_bgr, verbose=verbose,
-        )
-        info['align'] = {
-            'method': align_result.method,
-            'num_matches': align_result.num_matches,
-            'num_inliers': align_result.num_inliers,
-            'confidence': align_result.confidence,
-        }
-
-        if verbose:
-            print(f"  Alignment: {align_result.method}, "
-                  f"confidence={align_result.confidence:.1%}")
-
-        # Step 3: Darken the aligned image
-        if verbose:
-            print(f"[3/3] Darkening aligned image ...")
+        aligned_bgr, align_result = align_images(day_bgr, cropped_bgr)
 
         # align_images returns BGR; darken_image expects RGB or PIL
         aligned_rgb = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB)
 
-        from .utils import DebugContext
-        debug = DebugContext(debug_dir)
-
-        # When we already have a precisely cropped + aligned array,
-        # optionally normalise to the target aspect/resolution via PIL first.
         pil_img = Image.fromarray(aligned_rgb)
         if normalize:
             from .utils import parse_aspect_ratio, normalize_image
@@ -182,9 +116,8 @@ def prepare_surface(
             hist_bins=hist_bins,
             chroma_correction=chroma_correction,
             gradient_source=gradient_source,
-            debug=debug,
         )
-        result = Image.fromarray(darkened_arr)
+        result_img = Image.fromarray(darkened_arr)
 
         if alignment_aids:
             from .utils import _generate_alignment_aids
@@ -198,16 +131,13 @@ def prepare_surface(
             analysis = _generate_alignment_aids(
                 surface_rgb, output_dir=aids_output_dir, stem=aids_stem,
             )
-            if 'video_path' in analysis:
-                info['alignment_video_path'] = analysis['video_path']
+            alignment_video = analysis.get('video_path')
 
     else:
         # ── Darken-only mode ────────────────────────────────────────
-        if verbose:
-            print(f"[1/1] Darkening {night_image_path} ...")
-
-        result, darken_info = darken_image_file(
+        darken_result = darken_image_file(
             night_image_path,
+            output_path=output_path,
             max_brightness=max_brightness,
             detail_boost=detail_boost,
             guide_fraction=guide_fraction,
@@ -219,19 +149,15 @@ def prepare_surface(
             base_resolution=base_resolution,
             normalize=normalize,
             alignment_aids=alignment_aids,
-            debug_dir=debug_dir,
         )
-        info['darken'] = darken_info
+        result_img = darken_result['image']
+        alignment_video = darken_result['video']
 
-    info['final_size'] = result.size
+    if output_path is not None and day_image_path is not None:
+        # Only save here for full pipeline; darken-only already saved via darken_image_file
+        result_img.save(str(output_path), quality=95)
 
-    if output_path is not None:
-        result.save(str(output_path), quality=95)
-        info['output_path'] = str(output_path)
-        if verbose:
-            print(f"Saved: {output_path}  ({result.size[0]}x{result.size[1]})")
-
-    return result, info
+    return {'image': result_img, 'video': alignment_video}
 
 
 # ---------------------------------------------------------------------------
@@ -331,15 +257,6 @@ def _main():
         help='Skip generation of alignment aid overlays',
     )
 
-    # General
-    parser.add_argument('-v', '--verbose', action='store_true',
-                        help='Print progress messages')
-    parser.add_argument(
-        '--debug', nargs='?', const='debug_output', default=None,
-        metavar='DIR',
-        help='Save debug images to directory (default: debug_output)',
-    )
-
     args = parser.parse_args()
 
     # Resolve mode: if night_image is given → full pipeline
@@ -356,7 +273,7 @@ def _main():
         args.output = str(p.with_name(f"{p.stem}_surface.jpg"))
 
     try:
-        result, info = prepare_surface(
+        result = prepare_surface(
             night_image_path=night_path,
             day_image_path=day_path,
             output_path=args.output,
@@ -375,18 +292,12 @@ def _main():
             base_resolution=args.base_resolution,
             normalize=not args.no_normalize,
             alignment_aids=not args.no_alignment_aids,
-            verbose=args.verbose,
-            debug_dir=args.debug,
         )
 
-        print(f"Mode: {info['mode']}")
-        print(f"Output: {args.output}  ({info['final_size'][0]}x{info['final_size'][1]})")
-
-        if 'detect' in info:
-            print(f"  Detected crop: {info['detect']['cropped_size']}")
-        if 'align' in info:
-            ai = info['align']
-            print(f"  Alignment: {ai['method']}, confidence={ai['confidence']:.1%}")
+        img = result['image']
+        print(f"Output: {args.output}  ({img.size[0]}x{img.size[1]})")
+        if result['video']:
+            print(f"  Alignment video: {result['video']}")
 
     except Exception as e:
         print(f"Error: {e}")
