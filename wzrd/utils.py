@@ -123,14 +123,33 @@ def _apply_colormap(gray: np.ndarray, colormap: int) -> np.ndarray:
     return cv2.applyColorMap(stretched, colormap)
 
 
+def _lift_dark_pixels(frame_bgr: np.ndarray, base_color_bgr: Tuple[int, int, int] = (100, 30, 30)) -> np.ndarray:
+    """Lift dark pixels towards a base color so they're visible on a projector.
+
+    Uses per-channel ``np.maximum`` — dark pixels become the base color,
+    bright pixels stay untouched.  Chosen default is a deep indigo that is
+    clearly distinct from content.
+
+    Args:
+        frame_bgr: BGR uint8 image.
+        base_color_bgr: Minimum per-channel floor (B, G, R).
+
+    Returns:
+        BGR uint8 image with no pixel darker than *base_color_bgr*.
+    """
+    floor = np.array(base_color_bgr, dtype=np.uint8).reshape(1, 1, 3)
+    return np.maximum(frame_bgr, floor)
+
+
 def _generate_alignment_aids(
     image: np.ndarray,
     *,
     output_dir: Optional[Union[str, Path]] = None,
     stem: str = "surface",
     video_fps: float = 24.0,
-    hold_seconds: float = 6.0,
-    crossfade_seconds: float = 3.0,
+    hold_seconds: float = 3.0,
+    crossfade_seconds: float = 1.5,
+    base_color_bgr: Tuple[int, int, int] = (100, 30, 30),
 ) -> dict:
     """Generate a false-color alignment video for beamer calibration.
 
@@ -138,6 +157,11 @@ def _generate_alignment_aids(
     complementary colour visualisations.  Each aid is held for several
     seconds with gentle cross-fades, giving the operator time to study
     the projected image and make fine physical adjustments to the beamer.
+
+    Because projection is additive (beamers can only ADD light), every
+    frame is lifted so that no pixel is darker than *base_color_bgr*.
+    This ensures that even featureless regions project enough light to
+    reveal alignment errors.
 
     False-colour palettes exploit the human eye's superior sensitivity to
     colour differences — even tiny alignment errors become immediately
@@ -150,6 +174,9 @@ def _generate_alignment_aids(
         video_fps: Playback frame rate (higher = smoother fades).
         hold_seconds: Seconds each aid is shown before transitioning.
         crossfade_seconds: Seconds for each cross-fade transition.
+        base_color_bgr: Minimum per-channel color floor (B, G, R).
+            Dark pixels are lifted to this color so they remain visible
+            on an additive projector.  Default deep indigo ``(100, 30, 30)``.
 
     Returns:
         Dict with ``'video_path'`` key (str) when *output_dir* is set,
@@ -204,6 +231,9 @@ def _generate_alignment_aids(
         contour_bgr[edges_band > 0] = 255
     aids.append(contour_bgr)
 
+    # Lift dark pixels on ALL aids so they're visible on projector
+    aids = [_lift_dark_pixels(a, base_color_bgr) for a in aids]
+
     # Generate seamlessly looping video
     if output_dir is not None:
         out = Path(output_dir)
@@ -212,10 +242,13 @@ def _generate_alignment_aids(
         # Dimmed original as a rest frame between aids
         dimmed_gray = _normalize_to_full_range((gray * 0.3).astype(np.uint8))
         dimmed_color = _apply_colormap(dimmed_gray, cv2.COLORMAP_BONE)
+        dimmed_color = _lift_dark_pixels(dimmed_color, base_color_bgr)
 
         # Convert all key frames to RGB for the video writer
         key_frames_bgr = [dimmed_color] + aids
         key_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in key_frames_bgr]
+        # Pre-compute float32 versions for crossfade blending
+        key_frames_f = [f.astype(np.float32) for f in key_frames]
 
         h, w = gray.shape[:2]
         video_path = out / f"{stem}_alignment_cycle.mp4"
@@ -224,25 +257,25 @@ def _generate_alignment_aids(
         hold_frames = max(int(video_fps * hold_seconds), 1)
         crossfade_frames = max(int(video_fps * crossfade_seconds), 1)
 
-        # Build seamless sequence: hold → cross-fade → hold → ...
-        # Wraps around so last aid fades back into first for perfect loop.
+        # Stream frames directly to ffmpeg (no intermediate list).
+        # Hold-frame bytes are serialised once and written N times.
         n = len(key_frames)
-        all_frames = []
-        for i in range(n):
-            src = key_frames[i].astype(np.float32)
-            dst = key_frames[(i + 1) % n].astype(np.float32)
-            # Hold
-            for _ in range(hold_frames):
-                all_frames.append(key_frames[i])
-            # Cross-fade
-            for t in range(crossfade_frames):
-                alpha = (t + 1) / (crossfade_frames + 1)
-                blended = ((1 - alpha) * src + alpha * dst).astype(np.uint8)
-                all_frames.append(blended)
+        # Pre-crop hold frames so tobytes matches what ffmpeg expects
+        crop_h = h - (h % 2)
+        crop_w = w - (w % 2)
+        key_raw = [f[:crop_h, :crop_w].tobytes() for f in key_frames]
 
         with VideoWriter(video_path, w, h, video_fps) as writer:
-            for frame in all_frames:
-                writer.write(frame)
+            for i in range(n):
+                src_f = key_frames_f[i]
+                dst_f = key_frames_f[(i + 1) % n]
+                # Hold — write pre-serialised bytes
+                writer.write_raw(key_raw[i], hold_frames)
+                # Cross-fade
+                for t in range(crossfade_frames):
+                    alpha = (t + 1) / (crossfade_frames + 1)
+                    blended = ((1 - alpha) * src_f + alpha * dst_f).astype(np.uint8)
+                    writer.write(blended)
 
         return {'video_path': str(video_path)}
 
@@ -955,6 +988,11 @@ class VideoWriter:
         if self._crop:
             frame = frame[:self.height, :self.width]
         self._process.stdin.write(frame.tobytes())
+
+    def write_raw(self, raw: bytes, count: int = 1) -> None:
+        """Write pre-serialised frame bytes *count* times."""
+        for _ in range(count):
+            self._process.stdin.write(raw)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._process.stdin.close()

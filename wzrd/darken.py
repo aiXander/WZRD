@@ -367,6 +367,7 @@ def darken_image_file(
     target_aspect: str = DEFAULT_ASPECT,
     base_resolution: int = BASE_RESOLUTION,
     normalize: bool = True,
+    alignment_aids: bool = True,
     debug_dir: Optional[str] = None,
 ) -> Tuple[Image.Image, dict]:
     """
@@ -385,6 +386,7 @@ def darken_image_file(
         target_aspect:  Aspect ratio string e.g. "16:9"
         base_resolution: Max dimension in pixels
         normalize:      Whether to normalise aspect ratio and resolution
+        alignment_aids: Whether to generate alignment aid overlays
 
     Returns:
         Tuple of (darkened PIL Image, info dict with processing details)
@@ -416,12 +418,18 @@ def darken_image_file(
     info['final_size'] = img.size
 
     # Run surface analysis on the un-darkened, normalized image
-    surface_rgb = np.array(img)
-    aids_output_dir = str(Path(output_path).parent) if output_path is not None else None
-    aids_stem = Path(output_path).stem if output_path is not None else "surface"
-    analysis = _generate_alignment_aids(
-        surface_rgb, output_dir=aids_output_dir, stem=aids_stem,
-    )
+    analysis = {}
+    if alignment_aids:
+        surface_rgb = np.array(img)
+        if output_path is not None:
+            aids_output_dir = str(Path(output_path).parent)
+            aids_stem = Path(output_path).stem
+        else:
+            aids_output_dir = str(input_path.parent)
+            aids_stem = input_path.stem
+        analysis = _generate_alignment_aids(
+            surface_rgb, output_dir=aids_output_dir, stem=aids_stem,
+        )
 
     debug = DebugContext(debug_dir)
     darkened_arr = darken_image(
@@ -487,6 +495,8 @@ def _cli():
                         help=f'Base resolution. Default: {BASE_RESOLUTION}')
     parser.add_argument('--no-normalize', action='store_true',
                         help='Skip aspect ratio and resolution normalization')
+    parser.add_argument('--no-alignment-aids', action='store_true',
+                        help='Skip generation of alignment aid overlays')
     parser.add_argument('--debug', action='store_true',
                         help='Save intermediate debug images next to the input')
     args = parser.parse_args()
@@ -510,6 +520,7 @@ def _cli():
         target_aspect=args.aspect,
         base_resolution=args.base_resolution,
         normalize=not args.no_normalize,
+        alignment_aids=not args.no_alignment_aids,
         debug_dir=debug_dir,
     )
 

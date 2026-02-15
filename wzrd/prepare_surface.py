@@ -65,6 +65,7 @@ def prepare_surface(
     target_aspect: str = DEFAULT_ASPECT,
     base_resolution: int = BASE_RESOLUTION,
     normalize: bool = True,
+    alignment_aids: bool = True,
     # general
     verbose: bool = False,
     debug_dir: Optional[str] = None,
@@ -101,6 +102,7 @@ def prepare_surface(
         target_aspect:     Aspect ratio for darken normalisation.
         base_resolution:   Max dimension for darken output.
         normalize:         Whether darken normalises aspect/resolution.
+        alignment_aids:    Whether to generate alignment aid overlays.
 
         verbose:   Print progress messages.
         debug_dir: Save intermediate debug images to this directory.
@@ -184,6 +186,21 @@ def prepare_surface(
         )
         result = Image.fromarray(darkened_arr)
 
+        if alignment_aids:
+            from .utils import _generate_alignment_aids
+            surface_rgb = np.array(pil_img)
+            if output_path is not None:
+                aids_output_dir = str(Path(output_path).parent)
+                aids_stem = Path(output_path).stem
+            else:
+                aids_output_dir = str(Path(night_image_path).parent)
+                aids_stem = Path(night_image_path).stem + "_surface"
+            analysis = _generate_alignment_aids(
+                surface_rgb, output_dir=aids_output_dir, stem=aids_stem,
+            )
+            if 'video_path' in analysis:
+                info['alignment_video_path'] = analysis['video_path']
+
     else:
         # ── Darken-only mode ────────────────────────────────────────
         if verbose:
@@ -201,6 +218,7 @@ def prepare_surface(
             target_aspect=target_aspect,
             base_resolution=base_resolution,
             normalize=normalize,
+            alignment_aids=alignment_aids,
             debug_dir=debug_dir,
         )
         info['darken'] = darken_info
@@ -308,6 +326,10 @@ def _main():
         '--no-normalize', action='store_true',
         help='Skip aspect ratio / resolution normalisation',
     )
+    darken_group.add_argument(
+        '--no-alignment-aids', action='store_true',
+        help='Skip generation of alignment aid overlays',
+    )
 
     # General
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -352,6 +374,7 @@ def _main():
             target_aspect=args.aspect,
             base_resolution=args.base_resolution,
             normalize=not args.no_normalize,
+            alignment_aids=not args.no_alignment_aids,
             verbose=args.verbose,
             debug_dir=args.debug,
         )
