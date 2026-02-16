@@ -889,6 +889,7 @@ def extract_creature(
     background: np.ndarray,
     mask: np.ndarray,
     gamma: float = 0.85,
+    subtract_bg: bool = False,
 ) -> np.ndarray:
     """Extract the creature (bright additive elements) using the mask.
 
@@ -900,15 +901,23 @@ def extract_creature(
         background: Background frame float32 (HWC, 0-255).
         mask:       Difference mask float32 (HW, 0.0-1.0).
         gamma:      Gamma correction (< 1.0 brightens, > 1.0 darkens).
+        subtract_bg: If True, subtract background pixels before masking
+            (legacy mode — can imprint background texture as artifacts).
+            If False (default), use the generated frame directly with
+            the mask as alpha, avoiding texture artifacts.
 
     Returns:
         Extracted creature as uint8 (HWC, 0-255).
     """
-    # Positive difference only (additive elements)
-    creature_diff = np.clip(generated - background, 0, 255)
+    if subtract_bg:
+        # Legacy: subtract background pixels (can cause texture artifacts)
+        base = np.clip(generated - background, 0, 255)
+    else:
+        # Mask-only: keep generated frame colors, let the mask handle fading
+        base = generated
 
     # Gamma correction for smooth brightness boost
-    normalized = creature_diff / 255.0
+    normalized = base / 255.0
     boosted = np.power(normalized, gamma) * 255.0
 
     # Apply mask

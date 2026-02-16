@@ -29,16 +29,16 @@ from .utils import (
 DEFAULT_THRESHOLD = 10
 DEFAULT_RAMP = 20
 DEFAULT_GAMMA = 0.85
-#DEFAULT_FEATHER_RADIUS = 4
-DEFAULT_FEATHER_RADIUS = 0
+DEFAULT_FEATHER_RADIUS = 4
+#DEFAULT_FEATHER_RADIUS = 0
 
 DEFAULT_DIFF_MODE = 'lab'
 DEFAULT_OUTPUT_MODE = 'additive'
 DEFAULT_MIN_ALPHA = 0.0
 DEFAULT_MORPH_SIZE = 5
 DEFAULT_GUIDED_FILTER_EPS = 0.02
-#DEFAULT_COLOR_CORRECTION_PERCENTILE = 50
-DEFAULT_COLOR_CORRECTION_PERCENTILE = 0
+DEFAULT_COLOR_CORRECTION_PERCENTILE = 50
+#DEFAULT_COLOR_CORRECTION_PERCENTILE = 0
 
 DEFAULT_TEMPORAL_SMOOTHING = 0.3
 DEFAULT_ASPECT_TOLERANCE = 0.02
@@ -91,6 +91,7 @@ def process_frame(
     morph_size: int = 5,
     guided_filter_eps: float = 0.02,
     color_correction_percentile: float = 50,
+    subtract_bg: bool = True,
     *,
     bg_lab: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -109,6 +110,7 @@ def process_frame(
         morph_size: Morphological kernel size (0 = disable).
         guided_filter_eps: Guided-filter regularization.
         color_correction_percentile: Color correction strength (0 = disable).
+        subtract_bg: Subtract background before masking (default True).
         bg_lab:     Precomputed background LAB (optional, avoids recomputation).
 
     Returns:
@@ -134,7 +136,7 @@ def process_frame(
         bg_lab=bg_lab,
     )
 
-    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma)
+    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma, subtract_bg=subtract_bg)
     return creature, mask
 
 
@@ -231,6 +233,7 @@ def subtract_background_video(
     guided_filter_eps: float = DEFAULT_GUIDED_FILTER_EPS,
     color_correction_percentile: float = DEFAULT_COLOR_CORRECTION_PERCENTILE,
     temporal_smoothing: float = DEFAULT_TEMPORAL_SMOOTHING,
+    subtract_bg: bool = True,
     preview: bool = False,
     crf: int = 18,
     codec: str = 'libx264',
@@ -272,43 +275,30 @@ def subtract_background_video(
     min_alpha = DEFAULT_MIN_ALPHA
     aspect_tolerance = DEFAULT_ASPECT_TOLERANCE
 
-    # Load background
-    background = Image.open(background_path).convert('RGB')
-    bg_size = background.size
+    # Get video info first — resize the background once instead of every frame
+    width, height, fps, frame_count = get_video_info(video_path)
 
     # Ensure even dimensions for codec compatibility
-    output_width = bg_size[0] if bg_size[0] % 2 == 0 else bg_size[0] - 1
-    output_height = bg_size[1] if bg_size[1] % 2 == 0 else bg_size[1] - 1
-    if (output_width, output_height) != bg_size:
-        background = background.crop((0, 0, output_width, output_height))
-        bg_size = (output_width, output_height)
+    output_width = width - (width % 2)
+    output_height = height - (height % 2)
+    output_size = (output_width, output_height)
+
+    # Load background and resize to match video dimensions
+    background = Image.open(background_path).convert('RGB')
+    bg_orig_size = background.size
+    if background.size != output_size:
+        background = background.resize(output_size, Image.Resampling.LANCZOS)
 
     bg_arr = np.array(background, dtype=np.float32)
     bg_lab = rgb_to_lab(bg_arr)
 
-    # Precompute downscaled backgrounds (computed once, used every frame)
-    bg_lab_half = downscale_arr(bg_lab, 2)
-    bg_lab_quarter = downscale_arr(bg_lab, 4)
-    bg_arr_half = downscale_arr(bg_arr, 2)
+    # Precompute downscaled backgrounds
+    bg_lab_quarter = downscale_arr(bg_lab, 4)   # color correction at 1/4 res
+    bg_lab_half = downscale_arr(bg_lab, 2)      # mask computation at 1/2 res
+    bg_arr_half = downscale_arr(bg_arr, 2)      # mask computation at 1/2 res
 
-    # Get video info
-    width, height, fps, frame_count = get_video_info(video_path)
-    needs_alignment = (width, height) != bg_size
-
-    # Precompute alignment crop box (all video frames share dimensions)
-    _align_crop = None
-    if needs_alignment:
-        vid_ar = width / height
-        bg_ar = bg_size[0] / bg_size[1]
-        if not aspect_ratios_match(vid_ar, bg_ar, aspect_tolerance):
-            if vid_ar > bg_ar:
-                new_w = int(height * bg_ar)
-                x_off = (width - new_w) // 2
-                _align_crop = (0, height, x_off, x_off + new_w)
-            else:
-                new_h = int(width / bg_ar)
-                y_off = (height - new_h) // 2
-                _align_crop = (y_off, y_off + new_h, 0, width)
+    # Only need to crop 1px if video has odd dimensions
+    _needs_crop = (width, height) != output_size
 
     # Setup output paths
     if output_path is None:
@@ -335,7 +325,7 @@ def subtract_background_video(
         'output_video': str(output_path),
         'background': str(background_path),
         'video_size': (width, height),
-        'output_size': bg_size,
+        'output_size': output_size,
         'fps': fps,
         'frame_count': frame_count,
         'threshold': threshold,
@@ -347,17 +337,17 @@ def subtract_background_video(
         'morph_size': morph_size,
         'temporal_smoothing': temporal_smoothing,
         'color_correction_percentile': color_correction_percentile,
-        'needs_alignment': needs_alignment,
+        'bg_original_size': bg_orig_size,
     }
 
     # ---- Video writers -------------------------------------------------------
     is_alpha = output_mode == 'alpha'
     output_writer = VideoWriter(
-        output_path, bg_size[0], bg_size[1], fps,
+        output_path, output_size[0], output_size[1], fps,
         alpha=is_alpha, crf=crf, codec=codec,
     )
     preview_writer = (
-        VideoWriter(preview_path, bg_size[0], bg_size[1], fps, crf=crf, codec=codec)
+        VideoWriter(preview_path, output_size[0], output_size[1], fps, crf=crf, codec=codec)
         if preview else None
     )
 
@@ -365,26 +355,23 @@ def subtract_background_video(
     num_workers = min(cpu_count(), 8)
     batch_size = num_workers * 2
 
+    # Precompute half-res morph kernel size (at least 1 if morph enabled)
+    morph_size_half = max(morph_size // 2, 1) if morph_size > 0 else 0
+
     def _compute_frame_data(args):
-        """Thread worker: multi-resolution align, color-correct & mask.
+        """Thread worker: color-correct & compute mask.
 
         - Color shift estimation at 1/4 res  (16x fewer pixels)
-        - Diff mask + morph at 1/2 res        (4x fewer pixels)
-        - Guided filter at full res           (re-snaps edges)
+        - Diff mask + soft ramp + morph at 1/2 res  (4x fewer pixels)
+        - Upscale mask to full res, then guided filter at full res
         """
         fn, frame_arr = args
 
-        # Alignment via cv2 (no PIL overhead)
-        if needs_alignment:
-            if _align_crop:
-                y1, y2, x1, x2 = _align_crop
-                frame_arr = frame_arr[y1:y2, x1:x2]
-            frame_arr = cv2.resize(
-                frame_arr, bg_size, interpolation=cv2.INTER_LANCZOS4,
-            )
+        # Crop 1px if video has odd dimensions
+        if _needs_crop:
+            frame_arr = frame_arr[:output_height, :output_width]
 
         gen_arr = frame_arr.astype(np.float32)
-        H, W = gen_arr.shape[:2]
 
         # --- Color correction: shift at 1/4 res, apply at full res ----------
         gen_lab = None
@@ -398,27 +385,23 @@ def subtract_background_video(
                 gen_lab -= shift                    # broadcast (3,) over (H,W,3)
                 gen_arr = lab_to_rgb(gen_lab)
 
-        # --- Diff mask at 1/2 res -------------------------------------------
+        # --- Diff mask at half resolution -----------------------------------
+        gen_arr_half = downscale_arr(gen_arr, 2)
+
         if diff_mode == 'lab':
-            if gen_lab is not None:
-                gen_lab_half = downscale_arr(gen_lab, 2)
-            else:
-                gen_half = downscale_arr(gen_arr, 2)
-                gen_lab_half = rgb_to_lab(gen_half)
+            gen_lab_half = downscale_arr(gen_lab, 2) if gen_lab is not None else rgb_to_lab(gen_arr_half)
             diff_mag = np.sqrt(
                 np.sum((gen_lab_half - bg_lab_half) ** 2, axis=2)
             )
             diff_mag = np.clip(diff_mag * 2.55, 0, 255)
 
         elif diff_mode == 'rgb':
-            gen_half = downscale_arr(gen_arr, 2)
-            diff_mag = np.max(np.abs(gen_half - bg_arr_half), axis=2)
+            diff_mag = np.max(np.abs(gen_arr_half - bg_arr_half), axis=2)
 
         elif diff_mode == 'luminance':
-            gen_half = downscale_arr(gen_arr, 2)
-            gen_lum = (0.299 * gen_half[:, :, 0]
-                       + 0.587 * gen_half[:, :, 1]
-                       + 0.114 * gen_half[:, :, 2])
+            gen_lum = (0.299 * gen_arr_half[:, :, 0]
+                       + 0.587 * gen_arr_half[:, :, 1]
+                       + 0.114 * gen_arr_half[:, :, 2])
             bg_lum = (0.299 * bg_arr_half[:, :, 0]
                       + 0.587 * bg_arr_half[:, :, 1]
                       + 0.114 * bg_arr_half[:, :, 2])
@@ -427,23 +410,25 @@ def subtract_background_video(
         else:
             raise ValueError(f"Unknown diff_mode: {diff_mode}")
 
-        # Soft ramp threshold at 1/2 res
+        # Soft ramp threshold (half res)
         ramp_width = max(float(ramp), 1e-6)
-        mask_half = np.clip(
+        mask = np.clip(
             (diff_mag - threshold) / ramp_width, 0, 1,
         ).astype(np.float32)
 
-        # Morphological opening at 1/2 res (kernel scaled down)
-        if morph_size > 0:
-            ms = max(morph_size // 2 | 1, 3)   # halve, round up to odd, min 3
-            kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ms, ms))
-            mask_u8 = (mask_half * 255).astype(np.uint8)
+        # Morphological opening (half res, half kernel)
+        if morph_size_half > 0:
+            kern = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (morph_size_half, morph_size_half),
+            )
+            mask_u8 = (mask * 255).astype(np.uint8)
             mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kern)
-            mask_half = mask_u8.astype(np.float32) / 255.0
+            mask = mask_u8.astype(np.float32) / 255.0
 
-        # --- Upscale mask → full res, then guided filter --------------------
-        mask = upscale_arr(mask_half, (H, W))
+        # --- Upscale mask to full res ---------------------------------------
+        mask = upscale_arr(mask, (output_height, output_width))
 
+        # --- Guided filter at full res --------------------------------------
         if feather_radius > 0:
             guide = cv2.cvtColor(
                 gen_arr.astype(np.uint8), cv2.COLOR_RGB2GRAY,
@@ -510,7 +495,8 @@ def subtract_background_video(
 
                     # Extract creature
                     creature = extract_creature(
-                        gen_arr, bg_arr, mask, gamma=gamma
+                        gen_arr, bg_arr, mask, gamma=gamma,
+                        subtract_bg=subtract_bg,
                     )
 
                     if progress_callback:
@@ -583,10 +569,12 @@ def _cli():
     parser.add_argument('--guided-filter-eps', type=float,
                         default=DEFAULT_GUIDED_FILTER_EPS,
                         help=f'Guided-filter epsilon (default: {DEFAULT_GUIDED_FILTER_EPS})')
+    parser.add_argument('--no-subtract-bg', action='store_true',
+                        help='Disable background subtraction before masking (keeps raw projected colors)')
     parser.add_argument('--preview', action='store_true',
                         help='Also save a preview video with composite')
-    parser.add_argument('--crf', type=int, default=18,
-                        help='FFmpeg CRF quality (default: 18)')
+    parser.add_argument('--crf', type=int, default=23,
+                        help='FFmpeg CRF quality (default: 23)')
     parser.add_argument('--codec', default='libx264',
                         help='Video codec (default: libx264)')
     args = parser.parse_args()
@@ -616,6 +604,7 @@ def _cli():
         guided_filter_eps=args.guided_filter_eps,
         color_correction_percentile=args.color_correction,
         temporal_smoothing=args.temporal_smoothing,
+        subtract_bg=not args.no_subtract_bg,
         preview=args.preview,
         crf=args.crf,
         codec=args.codec,

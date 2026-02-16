@@ -45,6 +45,7 @@ def subtract_background(
     guided_filter_eps: float = 0.02,
     color_correction_percentile: float = 50,
     output_mode: OutputMode = 'additive',
+    subtract_bg: bool = True,
     align: bool = True,
     aspect_tolerance: float = 0.02,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
@@ -126,7 +127,7 @@ def subtract_background(
     )
 
     # Extract creature
-    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma)
+    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma, subtract_bg=subtract_bg)
 
     # Compute stats
     info['mask_coverage'] = float(np.mean(mask > 0.5) * 100)
@@ -158,6 +159,7 @@ def subtract_background_file(
     morph_size: int = DEFAULT_MORPH_SIZE,
     guided_filter_eps: float = DEFAULT_GUIDED_FILTER_EPS,
     color_correction_percentile: float = DEFAULT_COLOR_CORRECTION_PERCENTILE,
+    subtract_bg: bool = True,
     preview: bool = False,
 ) -> Tuple[Image.Image, dict]:
     """
@@ -176,6 +178,7 @@ def subtract_background_file(
         morph_size:   Morphological kernel size (0 = disable).
         guided_filter_eps: Guided-filter regularization.
         color_correction_percentile: Color correction (0 = disable).
+        subtract_bg:  Subtract background before masking.
         preview:      Whether to also save a preview composite.
 
     Returns:
@@ -201,6 +204,7 @@ def subtract_background_file(
         guided_filter_eps=guided_filter_eps,
         color_correction_percentile=color_correction_percentile,
         output_mode=output_mode,
+        subtract_bg=subtract_bg,
         aspect_tolerance=aspect_tolerance,
     )
 
@@ -256,9 +260,16 @@ def _cli():
     parser.add_argument('--output-mode', type=str, choices=['additive', 'alpha'],
                         default=DEFAULT_OUTPUT_MODE,
                         help=f'Output format. Default: {DEFAULT_OUTPUT_MODE}')
+    parser.add_argument('--morph-size', type=int, default=DEFAULT_MORPH_SIZE,
+                        help=f'Morphological cleanup kernel (0=off, default: {DEFAULT_MORPH_SIZE})')
+    parser.add_argument('--guided-filter-eps', type=float,
+                        default=DEFAULT_GUIDED_FILTER_EPS,
+                        help=f'Guided-filter epsilon (default: {DEFAULT_GUIDED_FILTER_EPS})')
     parser.add_argument('--color-correction', type=float,
                         default=DEFAULT_COLOR_CORRECTION_PERCENTILE,
-                        help=f'Color correction percentile (0=off). Default: {DEFAULT_COLOR_CORRECTION_PERCENTILE}')
+                        help=f'Color correction percentile (0=off, default: {DEFAULT_COLOR_CORRECTION_PERCENTILE}')
+    parser.add_argument('--no-subtract-bg', action='store_true',
+                        help='Disable background subtraction before masking (keeps raw projected colors)')
     parser.add_argument('--preview', action='store_true',
                         help='Also save a preview composite')
     args = parser.parse_args()
@@ -280,7 +291,10 @@ def _cli():
         feather_radius=args.feather,
         diff_mode=args.mode,
         output_mode=args.output_mode,
+        morph_size=args.morph_size,
+        guided_filter_eps=args.guided_filter_eps,
         color_correction_percentile=args.color_correction,
+        subtract_bg=not args.no_subtract_bg,
         preview=args.preview,
     )
 
