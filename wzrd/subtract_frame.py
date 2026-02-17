@@ -18,11 +18,11 @@ from .utils import (
 DEFAULT_THRESHOLD = 10
 DEFAULT_RAMP = 20
 DEFAULT_GAMMA = 0.85
-DEFAULT_FEATHER_RADIUS = 4
+DEFAULT_FEATHER_RADIUS = 0.004      # fraction of min(H,W); ≈ 4 px at 1080p
 DEFAULT_DIFF_MODE = 'lab'
 DEFAULT_OUTPUT_MODE = 'additive'
 DEFAULT_MIN_ALPHA = 0.0
-DEFAULT_MORPH_SIZE = 5
+DEFAULT_MORPH_SIZE = 0.005           # fraction of min(H,W); ≈ 5 px at 1080p
 DEFAULT_GUIDED_FILTER_EPS = 0.02
 DEFAULT_COLOR_CORRECTION_PERCENTILE = 50
 DEFAULT_ASPECT_TOLERANCE = 0.02
@@ -38,10 +38,10 @@ def subtract_background(
     threshold: int = 10,
     ramp: int = 20,
     gamma: float = 0.85,
-    feather_radius: int = 4,
+    feather_radius: float = DEFAULT_FEATHER_RADIUS,
     diff_mode: DiffMode = 'lab',
     min_alpha: float = 0.0,
-    morph_size: int = 5,
+    morph_size: float = DEFAULT_MORPH_SIZE,
     guided_filter_eps: float = 0.02,
     color_correction_percentile: float = 50,
     output_mode: OutputMode = 'additive',
@@ -58,10 +58,12 @@ def subtract_background(
         threshold:  Low cutoff for difference mask (0-255).
         ramp:       Soft transition width above threshold.
         gamma:      Gamma correction (< 1.0 brightens).
-        feather_radius: Guided-filter feather radius in pixels.
+        feather_radius: Guided-filter feather radius as fraction of
+            ``min(H, W)`` (0 = disable).
         diff_mode:  ``'rgb'``, ``'lab'``, or ``'luminance'``.
         min_alpha:  Minimum mask value.
-        morph_size: Morphological cleanup kernel size (0 = disable).
+        morph_size: Morphological kernel size as fraction of
+            ``min(H, W)`` (0 = disable).
         guided_filter_eps: Guided-filter regularization.
         color_correction_percentile: Percentile for background pixel
             selection during color shift correction (0 = disable).
@@ -154,10 +156,10 @@ def subtract_background_file(
     threshold: int = DEFAULT_THRESHOLD,
     ramp: int = DEFAULT_RAMP,
     gamma: float = DEFAULT_GAMMA,
-    feather_radius: int = DEFAULT_FEATHER_RADIUS,
+    feather_radius: float = DEFAULT_FEATHER_RADIUS,
     diff_mode: DiffMode = DEFAULT_DIFF_MODE,
     output_mode: OutputMode = DEFAULT_OUTPUT_MODE,
-    morph_size: int = DEFAULT_MORPH_SIZE,
+    morph_size: float = DEFAULT_MORPH_SIZE,
     guided_filter_eps: float = DEFAULT_GUIDED_FILTER_EPS,
     color_correction_percentile: float = DEFAULT_COLOR_CORRECTION_PERCENTILE,
     subtract_bg: bool = True,
@@ -253,16 +255,16 @@ def _cli():
                         help=f'Soft ramp width. Default: {DEFAULT_RAMP}')
     parser.add_argument('--gamma', type=float, default=DEFAULT_GAMMA,
                         help=f'Gamma correction (<1 brightens). Default: {DEFAULT_GAMMA}')
-    parser.add_argument('--feather', type=int, default=DEFAULT_FEATHER_RADIUS,
-                        help=f'Guided-filter feather radius. Default: {DEFAULT_FEATHER_RADIUS}')
+    parser.add_argument('--feather', type=float, default=DEFAULT_FEATHER_RADIUS,
+                        help=f'Guided-filter feather radius as fraction of min(H,W). Default: {DEFAULT_FEATHER_RADIUS}')
     parser.add_argument('--mode', type=str, choices=['rgb', 'lab', 'luminance'],
                         default=DEFAULT_DIFF_MODE,
                         help=f'Difference calculation mode. Default: {DEFAULT_DIFF_MODE}')
     parser.add_argument('--output-mode', type=str, choices=['additive', 'alpha'],
                         default=DEFAULT_OUTPUT_MODE,
                         help=f'Output format. Default: {DEFAULT_OUTPUT_MODE}')
-    parser.add_argument('--morph-size', type=int, default=DEFAULT_MORPH_SIZE,
-                        help=f'Morphological cleanup kernel (0=off, default: {DEFAULT_MORPH_SIZE})')
+    parser.add_argument('--morph-size', type=float, default=DEFAULT_MORPH_SIZE,
+                        help=f'Morphological kernel as fraction of min(H,W) (0=off, default: {DEFAULT_MORPH_SIZE})')
     parser.add_argument('--guided-filter-eps', type=float,
                         default=DEFAULT_GUIDED_FILTER_EPS,
                         help=f'Guided-filter epsilon (default: {DEFAULT_GUIDED_FILTER_EPS})')

@@ -793,6 +793,28 @@ def compute_color_shift(
 
 
 # ---------------------------------------------------------------------------
+# Resolution-relative size helpers
+# ---------------------------------------------------------------------------
+
+def frac_to_px(frac: float, ref_dim: int, *, odd: bool = False) -> int:
+    """Convert a resolution-relative fraction to a pixel count.
+
+    Args:
+        frac: Fraction of *ref_dim* (e.g. 0.004 means 0.4 % of the
+            reference dimension).
+        ref_dim: Reference dimension in pixels (typically ``min(H, W)``).
+        odd: If True, ensure the result is odd (useful for kernel sizes).
+
+    Returns:
+        Pixel count (at least 1 when *frac* > 0).
+    """
+    px = max(1, round(frac * ref_dim))
+    if odd and px > 1 and px % 2 == 0:
+        px += 1
+    return px
+
+
+# ---------------------------------------------------------------------------
 # Background subtraction primitives
 # ---------------------------------------------------------------------------
 
@@ -801,10 +823,10 @@ def compute_difference_mask(
     background: np.ndarray,
     threshold: int = 10,
     ramp: int = 20,
-    feather_radius: int = 4,
+    feather_radius: float = 0.004,
     diff_mode: str = 'lab',
     min_alpha: float = 0.0,
-    morph_size: int = 5,
+    morph_size: float = 0.005,
     guided_filter_eps: float = 0.02,
     *,
     gen_lab: Optional[np.ndarray] = None,
@@ -819,15 +841,22 @@ def compute_difference_mask(
         background: Background frame float32 (HWC, 0-255).
         threshold:  Low cutoff — differences below this are fully masked out.
         ramp:       Width of soft transition above threshold (higher = softer).
-        feather_radius: Guided-filter radius in pixels (0 = skip).
+        feather_radius: Guided-filter radius as fraction of ``min(H, W)``
+            (0 = skip).  E.g. 0.004 ≈ 4 px at 1080p.
         diff_mode:  ``'rgb'``, ``'lab'``, or ``'luminance'``.
         min_alpha:  Floor value for the mask (0.0-1.0).
-        morph_size: Morphological-opening kernel size (0 = skip).
+        morph_size: Morphological-opening kernel size as fraction of
+            ``min(H, W)`` (0 = skip).  E.g. 0.005 ≈ 5 px at 1080p.
         guided_filter_eps: Guided-filter regularization.
 
     Returns:
         Mask as float32 (HW, 0.0-1.0).
     """
+    h, w = generated.shape[:2]
+    ref_dim = min(h, w)
+    feather_px = frac_to_px(feather_radius, ref_dim) if feather_radius > 0 else 0
+    morph_px = frac_to_px(morph_size, ref_dim, odd=True) if morph_size > 0 else 0
+
     # --- Per-pixel difference magnitude ---
     if diff_mode == 'rgb':
         diff = np.abs(generated - background)
@@ -861,20 +890,20 @@ def compute_difference_mask(
     ).astype(np.float32)
 
     # --- Morphological opening (remove small noise, then restore shapes) ---
-    if morph_size > 0:
+    if morph_px > 0:
         kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (morph_size, morph_size)
+            cv2.MORPH_ELLIPSE, (morph_px, morph_px)
         )
         mask_u8 = (mask * 255).astype(np.uint8)
         mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
         mask = mask_u8.astype(np.float32) / 255.0
 
     # --- Edge-aware feathering via guided filter ---
-    if feather_radius > 0:
+    if feather_px > 0:
         guide = cv2.cvtColor(
             generated.astype(np.uint8), cv2.COLOR_RGB2GRAY
         ).astype(np.float32) / 255.0
-        mask = guided_filter(guide, mask, feather_radius, guided_filter_eps)
+        mask = guided_filter(guide, mask, feather_px, guided_filter_eps)
         mask = np.clip(mask, 0, 1)
 
     # --- Apply minimum alpha ---
@@ -888,7 +917,7 @@ def compute_difference_mask(
 # legacy per-pixel subtraction (False).  The smooth mode prevents
 # high-frequency background texture from imprinting onto flat, bright
 # creature regions.  Flip to False to restore the original behavior.
-SMOOTH_BG_SUBTRACT = False
+SMOOTH_BG_SUBTRACT = True
 SMOOTH_BG_SUBTRACT_RADIUS = 31   # Gaussian blur kernel size (must be odd)
 
 

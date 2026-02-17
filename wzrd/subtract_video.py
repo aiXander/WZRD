@@ -19,31 +19,25 @@ from threading import Thread
 
 from .utils import (
     get_aspect_ratio, aspect_ratios_match,
-    correct_color_shift, compute_difference_mask, extract_creature,
-    rgb_to_lab, lab_to_rgb,
-    downscale_arr, upscale_arr, compute_color_shift, guided_filter,
-    VideoWriter,
+    extract_creature,
+    downscale_arr, upscale_arr,
+    frac_to_px, VideoWriter,
 )
 
 # Module-level defaults
 DEFAULT_THRESHOLD = 10
 DEFAULT_RAMP = 20
 DEFAULT_GAMMA = 0.85
-DEFAULT_FEATHER_RADIUS = 4
-#DEFAULT_FEATHER_RADIUS = 0
-
-DEFAULT_DIFF_MODE = 'lab'
+DEFAULT_BLUR_RADIUS = 0.004         # fraction of min(H,W); ≈ 6 px at 1080p
 DEFAULT_OUTPUT_MODE = 'additive'
 DEFAULT_MIN_ALPHA = 0.0
-DEFAULT_MORPH_SIZE = 5
-DEFAULT_GUIDED_FILTER_EPS = 0.02
-DEFAULT_COLOR_CORRECTION_PERCENTILE = 50
-#DEFAULT_COLOR_CORRECTION_PERCENTILE = 0
-
-DEFAULT_TEMPORAL_SMOOTHING = 0.3
+DEFAULT_MORPH_SIZE = 0               # off by default (0 = disabled)
 DEFAULT_ASPECT_TOLERANCE = 0.02
+DEFAULT_COLOR_CORRECTION_THRESHOLD = 15  # max luminance diff to count as "background" pixel
 
-DiffMode = Literal['rgb', 'lab', 'luminance']
+# Number of frames to subsample when estimating the global color shift
+COLOR_SHIFT_SAMPLE_FRAMES = 50
+
 OutputMode = Literal['additive', 'alpha']
 
 
@@ -79,66 +73,79 @@ def get_video_info(
     return width, height, fps, frame_count
 
 
-def process_frame(
-    gen_arr: np.ndarray,
+def _luminance(arr: np.ndarray) -> np.ndarray:
+    """Compute luminance from float32 RGB (HWC, 0-255). Returns HW float32."""
+    return 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+
+
+def estimate_color_shift(
+    video_path: Union[str, Path],
     bg_arr: np.ndarray,
-    threshold: int = 10,
-    ramp: int = 20,
-    gamma: float = 0.85,
-    feather_radius: int = 4,
-    diff_mode: DiffMode = 'lab',
-    min_alpha: float = 0.0,
-    morph_size: int = 5,
-    guided_filter_eps: float = 0.02,
-    color_correction_percentile: float = 50,
-    subtract_bg: bool = True,
-    *,
-    bg_lab: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Process a single frame: color-correct, compute mask, extract creature.
+    output_size: Tuple[int, int],
+    threshold: float = DEFAULT_COLOR_CORRECTION_THRESHOLD,
+    n_samples: int = COLOR_SHIFT_SAMPLE_FRAMES,
+) -> np.ndarray:
+    """Estimate a global color shift between the AI video and the background.
+
+    Subsamples *n_samples* frames, finds the one with the lowest overall
+    luminance difference to the background (i.e. the most "static" frame),
+    then computes the per-channel RGB shift using only pixels whose
+    luminance difference is below *threshold*.
 
     Args:
-        gen_arr:    Generated frame float32 (HWC, 0-255).
-        bg_arr:     Background frame float32 (HWC, 0-255).
-        threshold:  Low cutoff for difference mask.
-        ramp:       Soft transition width above threshold.
-        gamma:      Gamma correction (< 1.0 brightens).
-        feather_radius: Guided-filter radius.
-        diff_mode:  ``'rgb'``, ``'lab'``, or ``'luminance'``.
-        min_alpha:  Minimum mask value.
-        morph_size: Morphological kernel size (0 = disable).
-        guided_filter_eps: Guided-filter regularization.
-        color_correction_percentile: Color correction strength (0 = disable).
-        subtract_bg: Subtract background before masking (default True).
-        bg_lab:     Precomputed background LAB (optional, avoids recomputation).
+        video_path:   Path to the AI-generated video.
+        bg_arr:       Background image as float32 (HWC, 0-255).
+        output_size:  (width, height) to resize frames to.
+        threshold:    Max luminance difference for a pixel to count as
+            "background" when computing the shift.
+        n_samples:    Number of frames to subsample.
 
     Returns:
-        Tuple of (creature uint8 array, mask float32 array).
+        3-element float32 RGB shift vector (to be added to bg_arr).
     """
-    gen_lab = None
-    if color_correction_percentile > 0:
-        gen_arr, _, gen_lab = correct_color_shift(
-            gen_arr, bg_arr, color_correction_percentile,
-            bg_lab=bg_lab,
-        )
+    _, _, _, frame_count = get_video_info(video_path)
+    if frame_count is None or frame_count == 0:
+        return np.zeros(3, dtype=np.float32)
 
-    mask = compute_difference_mask(
-        gen_arr, bg_arr,
-        threshold=threshold,
-        ramp=ramp,
-        feather_radius=feather_radius,
-        diff_mode=diff_mode,
-        min_alpha=min_alpha,
-        morph_size=morph_size,
-        guided_filter_eps=guided_filter_eps,
-        gen_lab=gen_lab,
-        bg_lab=bg_lab,
-    )
+    # Pick evenly-spaced frame indices
+    step = max(1, frame_count // n_samples)
+    sample_indices = set(range(0, frame_count, step))
 
-    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma,
-                                subtract_bg=subtract_bg)
-    return creature, mask
+    bg_lum = _luminance(bg_arr)
+
+    best_frame = None
+    best_diff = float('inf')
+
+    for fn, frame_u8 in iter_video_frames(video_path, target_size=output_size):
+        if fn not in sample_indices:
+            continue
+        frame_f = frame_u8.astype(np.float32)
+        # Crop to output size if needed (odd dimension handling)
+        frame_f = frame_f[:bg_arr.shape[0], :bg_arr.shape[1]]
+        lum_diff = np.abs(_luminance(frame_f) - bg_lum)
+        mean_diff = float(np.mean(lum_diff))
+        if mean_diff < best_diff:
+            best_diff = mean_diff
+            best_frame = frame_f
+
+    if best_frame is None:
+        return np.zeros(3, dtype=np.float32)
+
+    # Build mask of "confident background" pixels (low luminance diff)
+    lum_diff = np.abs(_luminance(best_frame) - bg_lum)
+    bg_mask = lum_diff < threshold
+
+    if np.sum(bg_mask) < 100:
+        return np.zeros(3, dtype=np.float32)
+
+    # Per-channel RGB shift (video_frame - background)
+    shift = np.array([
+        np.mean(best_frame[bg_mask, 0] - bg_arr[bg_mask, 0]),
+        np.mean(best_frame[bg_mask, 1] - bg_arr[bg_mask, 1]),
+        np.mean(best_frame[bg_mask, 2] - bg_arr[bg_mask, 2]),
+    ], dtype=np.float32)
+
+    return shift
 
 
 def iter_video_frames(
@@ -227,13 +234,11 @@ def subtract_background_video(
     threshold: int = DEFAULT_THRESHOLD,
     ramp: int = DEFAULT_RAMP,
     gamma: float = DEFAULT_GAMMA,
-    feather_radius: int = DEFAULT_FEATHER_RADIUS,
-    diff_mode: DiffMode = DEFAULT_DIFF_MODE,
+    blur_radius: float = DEFAULT_BLUR_RADIUS,
     output_mode: OutputMode = DEFAULT_OUTPUT_MODE,
-    morph_size: int = DEFAULT_MORPH_SIZE,
-    guided_filter_eps: float = DEFAULT_GUIDED_FILTER_EPS,
-    color_correction_percentile: float = DEFAULT_COLOR_CORRECTION_PERCENTILE,
-    temporal_smoothing: float = DEFAULT_TEMPORAL_SMOOTHING,
+    morph_size: float = DEFAULT_MORPH_SIZE,
+    color_correction: bool = True,
+    color_correction_threshold: float = DEFAULT_COLOR_CORRECTION_THRESHOLD,
     subtract_bg: bool = True,
     preview: bool = False,
     crf: int = 18,
@@ -243,26 +248,34 @@ def subtract_background_video(
     """
     Process a video file with background subtraction.
 
-    Uses streaming FFmpeg pipes for memory efficiency.  Expensive per-frame
-    work (color correction, LAB conversion, mask computation) runs in
-    parallel threads; temporal smoothing and creature extraction are applied
-    sequentially to maintain frame ordering.
+    Pipeline per frame:
+      1. Luminance difference against (color-corrected) background
+      2. Soft ramp threshold → mask
+      3. Optional morphological opening
+      4. Gaussian blur for smooth falloff
+      5. Background subtraction with smooth mask modulation
+      6. Gamma correction + mask application
+
+    Color correction is computed **once** before processing: subsample
+    frames, find the most static one, estimate a global RGB shift from
+    low-diff pixels, and adjust the background to match.
 
     Args:
         video_path:  Path to input video.
         background_path: Path to background frame image.
         output_path: Path for output video (auto-generated if None).
-        threshold:   Difference threshold (0-255).
-        ramp:        Soft ramp width.
+        threshold:   Luminance difference threshold (0-255).
+        ramp:        Soft ramp width above threshold.
         gamma:       Gamma correction (< 1.0 brightens).
-        feather_radius: Edge feather radius.
-        diff_mode:   Difference mode ('rgb', 'lab', 'luminance').
+        blur_radius: Gaussian blur radius for mask feathering, as fraction
+            of min(H,W).  0 = disable.
         output_mode: ``'additive'`` or ``'alpha'``.
-        morph_size:  Morphological kernel size (0 = disable).
-        guided_filter_eps: Guided-filter regularization.
-        color_correction_percentile: Color correction (0 = disable).
-        temporal_smoothing: EMA smoothing strength 0-1 where higher = more
-            smoothing. 0 disables.
+        morph_size:  Morphological kernel size as fraction of min(H,W)
+            (0 = disable, default).
+        color_correction: Estimate and correct global color shift.
+        color_correction_threshold: Max luminance diff for "background"
+            pixels during color shift estimation.
+        subtract_bg: Subtract background before masking (default True).
         preview:     Also save a preview video with composite.
         crf:         FFmpeg CRF quality (0-51, lower = better).
         codec:       Video codec (default: libx264).
@@ -274,7 +287,6 @@ def subtract_background_video(
     video_path = Path(video_path)
     background_path = Path(background_path)
     min_alpha = DEFAULT_MIN_ALPHA
-    aspect_tolerance = DEFAULT_ASPECT_TOLERANCE
 
     # Get video info first — resize the background once instead of every frame
     width, height, fps, frame_count = get_video_info(video_path)
@@ -291,21 +303,34 @@ def subtract_background_video(
         background = background.resize(output_size, Image.Resampling.LANCZOS)
 
     bg_arr = np.array(background, dtype=np.float32)
-    bg_lab = rgb_to_lab(bg_arr)
 
-    # Precompute downscaled backgrounds
-    bg_lab_quarter = downscale_arr(bg_lab, 4)   # color correction at 1/4 res
-    bg_lab_half = downscale_arr(bg_lab, 2)      # mask computation at 1/2 res
-    bg_arr_half = downscale_arr(bg_arr, 2)      # mask computation at 1/2 res
+    # ---- One-time color correction ------------------------------------------
+    color_shift = np.zeros(3, dtype=np.float32)
+    if color_correction:
+        print('  Estimating color shift...', flush=True)
+        color_shift = estimate_color_shift(
+            video_path, bg_arr, output_size,
+            threshold=color_correction_threshold,
+        )
+        if np.any(np.abs(color_shift) > 0.5):
+            print(f'  Color shift (RGB): [{color_shift[0]:+.1f}, '
+                  f'{color_shift[1]:+.1f}, {color_shift[2]:+.1f}]', flush=True)
+            # Shift the background to match the AI video's color space
+            bg_arr = np.clip(bg_arr + color_shift, 0, 255)
+        else:
+            print('  No significant color shift detected.', flush=True)
+            color_shift = np.zeros(3, dtype=np.float32)
+
+    # Precompute background luminance at half res
+    bg_arr_half = downscale_arr(bg_arr, 2)
+    bg_lum_half = _luminance(bg_arr_half)
 
     # Only need to crop 1px if video has odd dimensions
     _needs_crop = (width, height) != output_size
 
     # Setup output paths
     if output_path is None:
-        params_str = (
-            f"t{threshold}_g{gamma:.2f}_f{feather_radius}_{diff_mode}"
-        )
+        params_str = f"t{threshold}_g{gamma:.2f}_r{ramp}"
         if output_mode == 'alpha':
             output_path = video_path.with_name(
                 f"{video_path.stem}_creature_{params_str}_alpha.mov"
@@ -332,12 +357,10 @@ def subtract_background_video(
         'threshold': threshold,
         'ramp': ramp,
         'gamma': gamma,
-        'feather_radius': feather_radius,
-        'diff_mode': diff_mode,
+        'blur_radius': blur_radius,
         'output_mode': output_mode,
         'morph_size': morph_size,
-        'temporal_smoothing': temporal_smoothing,
-        'color_correction_percentile': color_correction_percentile,
+        'color_shift': color_shift.tolist(),
         'bg_original_size': bg_orig_size,
     }
 
@@ -356,16 +379,15 @@ def subtract_background_video(
     num_workers = min(cpu_count(), 8)
     batch_size = num_workers * 2
 
-    # Precompute half-res morph kernel size (at least 1 if morph enabled)
-    morph_size_half = max(morph_size // 2, 1) if morph_size > 0 else 0
+    # Convert fractional sizes to pixels at half resolution
+    half_ref = min(output_height // 2, output_width // 2)
+    morph_px = frac_to_px(morph_size, half_ref, odd=True) if morph_size > 0 else 0
+    blur_px = frac_to_px(blur_radius, half_ref) if blur_radius > 0 else 0
+    # Gaussian kernel size must be odd
+    blur_ksize = blur_px * 2 + 1 if blur_px > 0 else 0
 
     def _compute_frame_data(args):
-        """Thread worker: color-correct & compute mask.
-
-        - Color shift estimation at 1/4 res  (16x fewer pixels)
-        - Diff mask + soft ramp + morph at 1/2 res  (4x fewer pixels)
-        - Upscale mask to full res, then guided filter at full res
-        """
+        """Thread worker: compute luminance diff mask at half res."""
         fn, frame_arr = args
 
         # Crop 1px if video has odd dimensions
@@ -373,74 +395,41 @@ def subtract_background_video(
             frame_arr = frame_arr[:output_height, :output_width]
 
         gen_arr = frame_arr.astype(np.float32)
-
-        # --- Color correction: shift at 1/4 res, apply at full res ----------
-        gen_lab = None
-        if color_correction_percentile > 0:
-            gen_lab = rgb_to_lab(gen_arr)
-            gen_lab_q = downscale_arr(gen_lab, 4)
-            shift = compute_color_shift(
-                gen_lab_q, bg_lab_quarter, color_correction_percentile,
-            )
-            if np.any(shift != 0):
-                gen_lab -= shift                    # broadcast (3,) over (H,W,3)
-                gen_arr = lab_to_rgb(gen_lab)
-
-        # --- Diff mask at half resolution -----------------------------------
         gen_arr_half = downscale_arr(gen_arr, 2)
 
-        if diff_mode == 'lab':
-            gen_lab_half = downscale_arr(gen_lab, 2) if gen_lab is not None else rgb_to_lab(gen_arr_half)
-            diff_mag = np.sqrt(
-                np.sum((gen_lab_half - bg_lab_half) ** 2, axis=2)
-            )
-            diff_mag = np.clip(diff_mag * 2.55, 0, 255)
+        # --- Luminance difference at half res --------------------------------
+        gen_lum_half = _luminance(gen_arr_half)
+        diff_mag = np.abs(gen_lum_half - bg_lum_half)
 
-        elif diff_mode == 'rgb':
-            diff_mag = np.max(np.abs(gen_arr_half - bg_arr_half), axis=2)
-
-        elif diff_mode == 'luminance':
-            gen_lum = (0.299 * gen_arr_half[:, :, 0]
-                       + 0.587 * gen_arr_half[:, :, 1]
-                       + 0.114 * gen_arr_half[:, :, 2])
-            bg_lum = (0.299 * bg_arr_half[:, :, 0]
-                      + 0.587 * bg_arr_half[:, :, 1]
-                      + 0.114 * bg_arr_half[:, :, 2])
-            diff_mag = np.abs(gen_lum - bg_lum)
-
-        else:
-            raise ValueError(f"Unknown diff_mode: {diff_mode}")
-
-        # Soft ramp threshold (half res)
+        # Soft ramp threshold
         ramp_width = max(float(ramp), 1e-6)
         mask = np.clip(
             (diff_mag - threshold) / ramp_width, 0, 1,
         ).astype(np.float32)
 
-        # Morphological opening (half res, half kernel)
-        if morph_size_half > 0:
+        # Morphological opening (half res, off by default)
+        if morph_px > 0:
             kern = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (morph_size_half, morph_size_half),
+                cv2.MORPH_ELLIPSE, (morph_px, morph_px),
             )
             mask_u8 = (mask * 255).astype(np.uint8)
             mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kern)
             mask = mask_u8.astype(np.float32) / 255.0
 
+        # --- Gaussian blur for smooth falloff (half res) ---------------------
+        # Use max(original, blurred) so the blur only *adds* glow around
+        # edges — small bright features keep their full mask value.
+        if blur_ksize > 0:
+            blurred = cv2.GaussianBlur(mask, (blur_ksize, blur_ksize), 0)
+            mask = np.maximum(mask, blurred)
+
         # --- Upscale mask to full res ---------------------------------------
         mask = upscale_arr(mask, (output_height, output_width))
-
-        # --- Guided filter at full res --------------------------------------
-        if feather_radius > 0:
-            guide = cv2.cvtColor(
-                gen_arr.astype(np.uint8), cv2.COLOR_RGB2GRAY,
-            ).astype(np.float32) / 255.0
-            mask = guided_filter(guide, mask, feather_radius, guided_filter_eps)
-            mask = np.clip(mask, 0, 1)
 
         return fn, gen_arr, mask
 
     # Prefetch frames in a background thread to overlap I/O with compute
-    frame_queue = Queue(maxsize=2)
+    frame_queue: Queue = Queue(maxsize=2)
 
     def _read_frames():
         for batch in iter_video_frames_batched(
@@ -452,7 +441,6 @@ def subtract_background_video(
     reader = Thread(target=_read_frames, daemon=True)
     reader.start()
 
-    prev_mask = None
     frame_num = 0
 
     writers = [output_writer]
@@ -470,27 +458,17 @@ def subtract_background_video(
                 if batch is None:
                     break
 
-                # Parallel: alignment + color correction + mask computation
+                # Parallel: mask computation
                 results = list(
                     executor.map(_compute_frame_data, batch)
                 )
                 results.sort(key=lambda x: x[0])
 
-                # Sequential: temporal smoothing → creature extraction → write
-                for fn, gen_arr, raw_mask in results:
+                # Sequential: creature extraction → write
+                for fn, gen_arr, mask in results:
                     frame_num = fn
 
-                    # Temporal EMA smoothing
-                    if temporal_smoothing > 0 and prev_mask is not None:
-                        mask = (
-                            (1 - temporal_smoothing) * raw_mask
-                            + temporal_smoothing * prev_mask
-                        )
-                    else:
-                        mask = raw_mask
-                    prev_mask = mask
-
-                    # Apply min_alpha after temporal smoothing
+                    # Apply min_alpha
                     if min_alpha > 0:
                         mask = np.clip(mask, min_alpha, 1.0)
 
@@ -546,32 +524,25 @@ def _cli():
     parser.add_argument('-o', '--output', default=None,
                         help='Output path (default: auto-generated)')
     parser.add_argument('--threshold', type=int, default=DEFAULT_THRESHOLD,
-                        help=f'Low cutoff for difference mask (default: {DEFAULT_THRESHOLD})')
+                        help=f'Luminance difference threshold (default: {DEFAULT_THRESHOLD})')
     parser.add_argument('--ramp', type=int, default=DEFAULT_RAMP,
                         help=f'Soft ramp width above threshold (default: {DEFAULT_RAMP})')
     parser.add_argument('--gamma', type=float, default=DEFAULT_GAMMA,
                         help=f'Gamma correction, <1 brightens (default: {DEFAULT_GAMMA})')
-    parser.add_argument('--feather', type=int, default=DEFAULT_FEATHER_RADIUS,
-                        help=f'Guided-filter feather radius (default: {DEFAULT_FEATHER_RADIUS})')
-    parser.add_argument('--mode', choices=['rgb', 'lab', 'luminance'],
-                        default=DEFAULT_DIFF_MODE,
-                        help=f'Difference mode (default: {DEFAULT_DIFF_MODE})')
+    parser.add_argument('--blur-radius', type=float, default=DEFAULT_BLUR_RADIUS,
+                        help=f'Gaussian blur radius for mask feathering as fraction of min(H,W) (default: {DEFAULT_BLUR_RADIUS})')
     parser.add_argument('--output-mode', choices=['additive', 'alpha'],
                         default=DEFAULT_OUTPUT_MODE,
                         help=f'Output format (default: {DEFAULT_OUTPUT_MODE})')
-    parser.add_argument('--morph-size', type=int, default=DEFAULT_MORPH_SIZE,
-                        help=f'Morphological cleanup kernel (0=off, default: {DEFAULT_MORPH_SIZE})')
-    parser.add_argument('--color-correction', type=float,
-                        default=DEFAULT_COLOR_CORRECTION_PERCENTILE,
-                        help=f'Color correction percentile (0=off, default: {DEFAULT_COLOR_CORRECTION_PERCENTILE})')
-    parser.add_argument('--temporal-smoothing', type=float,
-                        default=DEFAULT_TEMPORAL_SMOOTHING,
-                        help=f'Temporal EMA smoothing 0-1, higher=smoother (0=off, default: {DEFAULT_TEMPORAL_SMOOTHING})')
-    parser.add_argument('--guided-filter-eps', type=float,
-                        default=DEFAULT_GUIDED_FILTER_EPS,
-                        help=f'Guided-filter epsilon (default: {DEFAULT_GUIDED_FILTER_EPS})')
+    parser.add_argument('--morph-size', type=float, default=DEFAULT_MORPH_SIZE,
+                        help=f'Morphological kernel as fraction of min(H,W) (0=off, default: {DEFAULT_MORPH_SIZE})')
+    parser.add_argument('--no-color-correction', action='store_true',
+                        help='Disable one-time color shift estimation')
+    parser.add_argument('--color-correction-threshold', type=float,
+                        default=DEFAULT_COLOR_CORRECTION_THRESHOLD,
+                        help=f'Max luminance diff for background pixels during color shift estimation (default: {DEFAULT_COLOR_CORRECTION_THRESHOLD})')
     parser.add_argument('--no-subtract-bg', action='store_true',
-                        help='Disable background subtraction before masking (keeps raw projected colors)')
+                        help='Disable background subtraction before masking')
     parser.add_argument('--preview', action='store_true',
                         help='Also save a preview video with composite')
     parser.add_argument('--crf', type=int, default=23,
@@ -598,13 +569,11 @@ def _cli():
         threshold=args.threshold,
         ramp=args.ramp,
         gamma=args.gamma,
-        feather_radius=args.feather,
-        diff_mode=args.mode,
+        blur_radius=args.blur_radius,
         output_mode=args.output_mode,
         morph_size=args.morph_size,
-        guided_filter_eps=args.guided_filter_eps,
-        color_correction_percentile=args.color_correction,
-        temporal_smoothing=args.temporal_smoothing,
+        color_correction=not args.no_color_correction,
+        color_correction_threshold=args.color_correction_threshold,
         subtract_bg=not args.no_subtract_bg,
         preview=args.preview,
         crf=args.crf,
@@ -616,8 +585,7 @@ def _cli():
     print(f'  Output: {info["output_video"]}')
     print(f'  Frames: {info["frames_processed"]}')
     print(f'  Settings: threshold={info["threshold"]}, ramp={info["ramp"]}, '
-          f'gamma={info["gamma"]:.2f}, mode={info["diff_mode"]}, '
-          f'temporal_smoothing={info["temporal_smoothing"]}')
+          f'gamma={info["gamma"]:.2f}')
     if 'preview_video' in info:
         print(f'  Preview: {info["preview_video"]}')
 
