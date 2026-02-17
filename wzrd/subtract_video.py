@@ -136,7 +136,8 @@ def process_frame(
         bg_lab=bg_lab,
     )
 
-    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma, subtract_bg=subtract_bg)
+    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma,
+                                subtract_bg=subtract_bg)
     return creature, mask
 
 

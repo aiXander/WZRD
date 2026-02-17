@@ -127,7 +127,8 @@ def subtract_background(
     )
 
     # Extract creature
-    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma, subtract_bg=subtract_bg)
+    creature = extract_creature(gen_arr, bg_arr, mask, gamma=gamma,
+                                subtract_bg=subtract_bg)
 
     # Compute stats
     info['mask_coverage'] = float(np.mean(mask > 0.5) * 100)

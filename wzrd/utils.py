@@ -884,6 +884,14 @@ def compute_difference_mask(
     return mask
 
 
+# Toggle between smooth mask-modulated background subtraction (True) and
+# legacy per-pixel subtraction (False).  The smooth mode prevents
+# high-frequency background texture from imprinting onto flat, bright
+# creature regions.  Flip to False to restore the original behavior.
+SMOOTH_BG_SUBTRACT = False
+SMOOTH_BG_SUBTRACT_RADIUS = 31   # Gaussian blur kernel size (must be odd)
+
+
 def extract_creature(
     generated: np.ndarray,
     background: np.ndarray,
@@ -896,22 +904,36 @@ def extract_creature(
     Uses gamma correction to boost brightness relative to pixel intensity,
     producing smoother edges than a flat multiplier.
 
+    When ``subtract_bg`` is True and ``SMOOTH_BG_SUBTRACT`` is enabled,
+    background subtraction strength is modulated by a heavily blurred
+    (spatially smooth) inverse of the mask.  In solid creature regions
+    the mask is ~1 so almost no background is subtracted, avoiding
+    high-frequency texture imprinting.  At the edges where the mask
+    fades, full subtraction still removes the background cleanly.
+
     Args:
         generated:  Generated frame float32 (HWC, 0-255).
         background: Background frame float32 (HWC, 0-255).
         mask:       Difference mask float32 (HW, 0.0-1.0).
         gamma:      Gamma correction (< 1.0 brightens, > 1.0 darkens).
-        subtract_bg: If True, subtract background pixels before masking
-            (legacy mode — can imprint background texture as artifacts).
-            If False (default), use the generated frame directly with
-            the mask as alpha, avoiding texture artifacts.
+        subtract_bg: If True, subtract background before masking.
+            If False, use the generated frame directly with the mask as alpha.
 
     Returns:
         Extracted creature as uint8 (HWC, 0-255).
     """
     if subtract_bg:
-        # Legacy: subtract background pixels (can cause texture artifacts)
-        base = np.clip(generated - background, 0, 255)
+        if SMOOTH_BG_SUBTRACT:
+            # Smooth the mask so subtraction strength varies spatially without
+            # introducing high-frequency background texture into the creature.
+            k = SMOOTH_BG_SUBTRACT_RADIUS | 1  # ensure odd
+            smooth_mask = cv2.GaussianBlur(mask, (k, k), 0)
+            # subtraction_strength: 0 in creature core, 1 in background
+            strength = (1.0 - smooth_mask)[:, :, np.newaxis]
+            base = np.clip(generated - strength * background, 0, 255)
+        else:
+            # Legacy per-pixel subtraction
+            base = np.clip(generated - background, 0, 255)
     else:
         # Mask-only: keep generated frame colors, let the mask handle fading
         base = generated
