@@ -31,12 +31,7 @@ from .subtract_frame import (
 
 # Core image-processing primitives (always available via utils)
 from .utils import (
-    compute_difference_mask,
     extract_creature,
-    correct_color_shift,
-    guided_filter,
-    rgb_to_lab,
-    lab_to_rgb,
     # Aspect ratio handling
     parse_aspect_ratio,
     get_aspect_ratio,
@@ -66,17 +61,11 @@ __all__ = [
     # Subtract
     'subtract_background',
     'subtract_background_file',
-    'compute_difference_mask',
     'extract_creature',
-    'correct_color_shift',
-    'guided_filter',
-    'rgb_to_lab',
-    'lab_to_rgb',
     # Video (lazy)
     'subtract_background_video',
     'get_video_info',
     'iter_video_frames',
-    'process_frame',
     # Islands (lazy)
     'find_islands',
     'crop_island',
@@ -132,7 +121,7 @@ def __getattr__(name):
         from . import islands
         return getattr(islands, name)
     if name in ('subtract_background_video', 'get_video_info',
-                'iter_video_frames', 'process_frame'):
+                'iter_video_frames'):
         from . import subtract_video
         return getattr(subtract_video, name)
     if name in ('reproject_video', 'reproject_videos_batch',

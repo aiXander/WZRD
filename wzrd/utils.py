@@ -609,68 +609,6 @@ def print_alignment_info(info: dict, prefix: str = "  ") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Color space conversion
-# ---------------------------------------------------------------------------
-
-def rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
-    """Convert RGB float32 (0-255) to CIELab float32 via OpenCV.
-
-    Returns L in [0, 100], a and b in [-127, 127].
-    """
-    rgb_01 = np.clip(rgb / 255.0, 0, 1).astype(np.float32)
-    bgr = cv2.cvtColor(rgb_01, cv2.COLOR_RGB2BGR)
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2Lab)
-
-
-def lab_to_rgb(lab: np.ndarray) -> np.ndarray:
-    """Convert CIELab float32 to RGB float32 (0-255) via OpenCV."""
-    bgr = cv2.cvtColor(lab.astype(np.float32), cv2.COLOR_Lab2BGR)
-    rgb_01 = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    return np.clip(rgb_01 * 255.0, 0, 255).astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
-# Guided filter
-# ---------------------------------------------------------------------------
-
-def guided_filter(
-    guide: np.ndarray,
-    src: np.ndarray,
-    radius: int,
-    eps: float,
-) -> np.ndarray:
-    """Edge-preserving guided filter (O(N) box-filter implementation).
-
-    Smooths *src* while preserving edges present in *guide*.
-
-    Args:
-        guide: Guide image (HW, float32, typically 0-1).
-        src:   Source image to filter (HW, float32).
-        radius: Filter radius in pixels.
-        eps:   Regularization (larger → smoother, smaller → more edge-preserving).
-
-    Returns:
-        Filtered image (HW, float32).
-    """
-    ksize = (2 * radius + 1, 2 * radius + 1)
-    mean_g = cv2.boxFilter(guide, -1, ksize)
-    mean_s = cv2.boxFilter(src, -1, ksize)
-    corr_gs = cv2.boxFilter(guide * src, -1, ksize)
-    corr_gg = cv2.boxFilter(guide * guide, -1, ksize)
-
-    var_g = corr_gg - mean_g * mean_g
-    cov_gs = corr_gs - mean_g * mean_s
-
-    a = cov_gs / (var_g + eps)
-    b = mean_s - a * mean_g
-
-    mean_a = cv2.boxFilter(a, -1, ksize)
-    mean_b = cv2.boxFilter(b, -1, ksize)
-
-    return mean_a * guide + mean_b
-
-
-# ---------------------------------------------------------------------------
 # Multi-resolution helpers
 # ---------------------------------------------------------------------------
 
@@ -701,95 +639,6 @@ def upscale_arr(arr: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
     return cv2.resize(arr, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_LINEAR)
 
 
-# ---------------------------------------------------------------------------
-# Color shift correction
-# ---------------------------------------------------------------------------
-
-def correct_color_shift(
-    generated: np.ndarray,
-    background: np.ndarray,
-    percentile: float = 50,
-    *,
-    gen_lab: Optional[np.ndarray] = None,
-    bg_lab: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Correct global color/brightness shift in perceptual CIELab space.
-
-    AI video models often introduce a systematic color offset from the
-    reference image.  This estimates the offset using *confident background
-    pixels* (those with the smallest per-pixel difference) and subtracts it.
-
-    Args:
-        generated:  Generated frame float32 (HWC, 0-255).
-        background: Background frame float32 (HWC, 0-255).
-        percentile: Use lowest N% of difference pixels as reference.
-
-    Returns:
-        Tuple of (corrected_rgb_float32, lab_shift_vector, corrected_lab).
-    """
-    if gen_lab is None:
-        gen_lab = rgb_to_lab(generated)
-    if bg_lab is None:
-        bg_lab = rgb_to_lab(background)
-
-    # Per-pixel LAB Euclidean distance (first-pass rough difference)
-    diff = np.sqrt(np.sum((gen_lab - bg_lab) ** 2, axis=2))
-
-    # Select confident background pixels
-    cutoff = np.percentile(diff, percentile)
-    bg_mask = diff <= cutoff
-
-    if np.sum(bg_mask) < 100:
-        # Not enough background pixels — skip correction
-        return generated.copy(), np.zeros(3, dtype=np.float32), gen_lab
-
-    # Average LAB shift across background pixels
-    shift = np.array([
-        np.mean(gen_lab[bg_mask, 0] - bg_lab[bg_mask, 0]),
-        np.mean(gen_lab[bg_mask, 1] - bg_lab[bg_mask, 1]),
-        np.mean(gen_lab[bg_mask, 2] - bg_lab[bg_mask, 2]),
-    ], dtype=np.float32)
-
-    # Subtract the shift
-    corrected_lab = gen_lab.copy()
-    corrected_lab[:, :, 0] -= shift[0]
-    corrected_lab[:, :, 1] -= shift[1]
-    corrected_lab[:, :, 2] -= shift[2]
-
-    return lab_to_rgb(corrected_lab), shift, corrected_lab
-
-
-def compute_color_shift(
-    gen_lab: np.ndarray,
-    bg_lab: np.ndarray,
-    percentile: float = 50,
-) -> np.ndarray:
-    """Compute global LAB color shift between generated and background.
-
-    Estimates the systematic color offset using confident background pixels
-    (those with the smallest per-pixel LAB difference).  Designed to run on
-    downscaled inputs for speed — only the 3-element shift vector is needed.
-
-    Args:
-        gen_lab: Generated frame in LAB (HWC, float32).
-        bg_lab: Background frame in LAB (HWC, float32).
-        percentile: Use lowest N% of difference pixels as reference.
-
-    Returns:
-        3-element float32 shift vector (L, a, b).
-    """
-    diff = np.sqrt(np.sum((gen_lab - bg_lab) ** 2, axis=2))
-    cutoff = np.percentile(diff, percentile)
-    bg_mask = diff <= cutoff
-
-    if np.sum(bg_mask) < 100:
-        return np.zeros(3, dtype=np.float32)
-
-    return np.array([
-        np.mean(gen_lab[bg_mask, 0] - bg_lab[bg_mask, 0]),
-        np.mean(gen_lab[bg_mask, 1] - bg_lab[bg_mask, 1]),
-        np.mean(gen_lab[bg_mask, 2] - bg_lab[bg_mask, 2]),
-    ], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -818,107 +667,10 @@ def frac_to_px(frac: float, ref_dim: int, *, odd: bool = False) -> int:
 # Background subtraction primitives
 # ---------------------------------------------------------------------------
 
-def compute_difference_mask(
-    generated: np.ndarray,
-    background: np.ndarray,
-    threshold: int = 10,
-    ramp: int = 20,
-    feather_radius: float = 0.004,
-    diff_mode: str = 'lab',
-    min_alpha: float = 0.0,
-    morph_size: float = 0.005,
-    guided_filter_eps: float = 0.02,
-    *,
-    gen_lab: Optional[np.ndarray] = None,
-    bg_lab: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """Compute a soft difference mask between generated and background.
-
-    Pipeline: difference → soft ramp → morphological cleanup → guided filter.
-
-    Args:
-        generated:  Generated frame float32 (HWC, 0-255).
-        background: Background frame float32 (HWC, 0-255).
-        threshold:  Low cutoff — differences below this are fully masked out.
-        ramp:       Width of soft transition above threshold (higher = softer).
-        feather_radius: Guided-filter radius as fraction of ``min(H, W)``
-            (0 = skip).  E.g. 0.004 ≈ 4 px at 1080p.
-        diff_mode:  ``'rgb'``, ``'lab'``, or ``'luminance'``.
-        min_alpha:  Floor value for the mask (0.0-1.0).
-        morph_size: Morphological-opening kernel size as fraction of
-            ``min(H, W)`` (0 = skip).  E.g. 0.005 ≈ 5 px at 1080p.
-        guided_filter_eps: Guided-filter regularization.
-
-    Returns:
-        Mask as float32 (HW, 0.0-1.0).
-    """
-    h, w = generated.shape[:2]
-    ref_dim = min(h, w)
-    feather_px = frac_to_px(feather_radius, ref_dim) if feather_radius > 0 else 0
-    morph_px = frac_to_px(morph_size, ref_dim, odd=True) if morph_size > 0 else 0
-
-    # --- Per-pixel difference magnitude ---
-    if diff_mode == 'rgb':
-        diff = np.abs(generated - background)
-        diff_magnitude = np.max(diff, axis=2)
-
-    elif diff_mode == 'lab':
-        if gen_lab is None:
-            gen_lab = rgb_to_lab(generated)
-        if bg_lab is None:
-            bg_lab = rgb_to_lab(background)
-        diff_magnitude = np.sqrt(np.sum((gen_lab - bg_lab) ** 2, axis=2))
-        # Scale to ~0-255 so threshold values are consistent across modes
-        diff_magnitude = np.clip(diff_magnitude * 2.55, 0, 255)
-
-    elif diff_mode == 'luminance':
-        gen_lum = (0.299 * generated[:, :, 0]
-                   + 0.587 * generated[:, :, 1]
-                   + 0.114 * generated[:, :, 2])
-        bg_lum = (0.299 * background[:, :, 0]
-                  + 0.587 * background[:, :, 1]
-                  + 0.114 * background[:, :, 2])
-        diff_magnitude = np.abs(gen_lum - bg_lum)
-
-    else:
-        raise ValueError(f"Unknown diff_mode: {diff_mode}")
-
-    # --- Soft ramp threshold (replaces hard binary threshold) ---
-    ramp_width = max(float(ramp), 1e-6)
-    mask = np.clip(
-        (diff_magnitude - threshold) / ramp_width, 0, 1
-    ).astype(np.float32)
-
-    # --- Morphological opening (remove small noise, then restore shapes) ---
-    if morph_px > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (morph_px, morph_px)
-        )
-        mask_u8 = (mask * 255).astype(np.uint8)
-        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
-        mask = mask_u8.astype(np.float32) / 255.0
-
-    # --- Edge-aware feathering via guided filter ---
-    if feather_px > 0:
-        guide = cv2.cvtColor(
-            generated.astype(np.uint8), cv2.COLOR_RGB2GRAY
-        ).astype(np.float32) / 255.0
-        mask = guided_filter(guide, mask, feather_px, guided_filter_eps)
-        mask = np.clip(mask, 0, 1)
-
-    # --- Apply minimum alpha ---
-    if min_alpha > 0:
-        mask = np.clip(mask, min_alpha, 1.0)
-
-    return mask
-
-
-# Toggle between smooth mask-modulated background subtraction (True) and
-# legacy per-pixel subtraction (False).  The smooth mode prevents
-# high-frequency background texture from imprinting onto flat, bright
-# creature regions.  Flip to False to restore the original behavior.
-SMOOTH_BG_SUBTRACT = True
-SMOOTH_BG_SUBTRACT_RADIUS = 31   # Gaussian blur kernel size (must be odd)
+# Gaussian blur kernel size for smooth mask-modulated background subtraction
+# (must be odd). Smoothing prevents high-frequency background texture from
+# imprinting onto flat, bright creature regions.
+_BG_SUBTRACT_BLUR_RADIUS = 31
 
 
 def extract_creature(
@@ -933,12 +685,12 @@ def extract_creature(
     Uses gamma correction to boost brightness relative to pixel intensity,
     producing smoother edges than a flat multiplier.
 
-    When ``subtract_bg`` is True and ``SMOOTH_BG_SUBTRACT`` is enabled,
-    background subtraction strength is modulated by a heavily blurred
-    (spatially smooth) inverse of the mask.  In solid creature regions
-    the mask is ~1 so almost no background is subtracted, avoiding
-    high-frequency texture imprinting.  At the edges where the mask
-    fades, full subtraction still removes the background cleanly.
+    When ``subtract_bg`` is True, background subtraction strength is
+    modulated by a heavily blurred (spatially smooth) inverse of the mask.
+    In solid creature regions the mask is ~1 so almost no background is
+    subtracted, avoiding high-frequency texture imprinting.  At the edges
+    where the mask fades, full subtraction still removes the background
+    cleanly.
 
     Args:
         generated:  Generated frame float32 (HWC, 0-255).
@@ -952,17 +704,13 @@ def extract_creature(
         Extracted creature as uint8 (HWC, 0-255).
     """
     if subtract_bg:
-        if SMOOTH_BG_SUBTRACT:
-            # Smooth the mask so subtraction strength varies spatially without
-            # introducing high-frequency background texture into the creature.
-            k = SMOOTH_BG_SUBTRACT_RADIUS | 1  # ensure odd
-            smooth_mask = cv2.GaussianBlur(mask, (k, k), 0)
-            # subtraction_strength: 0 in creature core, 1 in background
-            strength = (1.0 - smooth_mask)[:, :, np.newaxis]
-            base = np.clip(generated - strength * background, 0, 255)
-        else:
-            # Legacy per-pixel subtraction
-            base = np.clip(generated - background, 0, 255)
+        # Smooth the mask so subtraction strength varies spatially without
+        # introducing high-frequency background texture into the creature.
+        k = _BG_SUBTRACT_BLUR_RADIUS | 1  # ensure odd
+        smooth_mask = cv2.GaussianBlur(mask, (k, k), 0)
+        # subtraction_strength: 0 in creature core, 1 in background
+        strength = (1.0 - smooth_mask)[:, :, np.newaxis]
+        base = np.clip(generated - strength * background, 0, 255)
     else:
         # Mask-only: keep generated frame colors, let the mask handle fading
         base = generated
@@ -990,7 +738,7 @@ class VideoWriter:
     Usage::
 
         with VideoWriter(path, width, height, fps) as w:
-            w.write(frame_uint8)  # HWC uint8, rgb24 or rgba
+            w.write(frame_uint8)  # HWC uint8, rgb24
     """
 
     def __init__(
@@ -1000,7 +748,6 @@ class VideoWriter:
         height: int,
         fps: float,
         *,
-        alpha: bool = False,
         crf: int = 18,
         codec: str = 'libx264',
     ):
@@ -1010,28 +757,18 @@ class VideoWriter:
         self.height = height - (height % 2)
         self._crop = (self.width != width or self.height != height)
 
-        if alpha:
-            input_pix_fmt = 'rgba'
-            output_pix_fmt = 'yuva444p10le'
-            output_codec = 'prores_ks'
-            extra_args = ['-profile:v', '4444']
-        else:
-            input_pix_fmt = 'rgb24'
-            output_pix_fmt = 'yuv420p'
-            output_codec = codec
-            extra_args = ['-crf', str(crf), '-movflags', '+faststart']
-
         self._cmd = [
             'ffmpeg', '-y',
             '-f', 'rawvideo',
             '-vcodec', 'rawvideo',
             '-s', f'{self.width}x{self.height}',
-            '-pix_fmt', input_pix_fmt,
+            '-pix_fmt', 'rgb24',
             '-r', str(fps),
             '-i', '-',
-            '-c:v', output_codec,
-            *extra_args,
-            '-pix_fmt', output_pix_fmt,
+            '-c:v', codec,
+            '-crf', str(crf),
+            '-movflags', '+faststart',
+            '-pix_fmt', 'yuv420p',
             '-v', 'error',
             str(self.output_path),
         ]

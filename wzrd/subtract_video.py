@@ -10,7 +10,7 @@ from PIL import Image
 import numpy as np
 import subprocess
 from pathlib import Path
-from typing import Union, Optional, Tuple, Literal, Callable, Iterator, List
+from typing import Union, Optional, Tuple, Callable, Iterator, List
 import cv2
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
@@ -29,16 +29,12 @@ DEFAULT_THRESHOLD = 10
 DEFAULT_RAMP = 20
 DEFAULT_GAMMA = 0.85
 DEFAULT_BLUR_RADIUS = 0.004         # fraction of min(H,W); ≈ 6 px at 1080p
-DEFAULT_OUTPUT_MODE = 'additive'
-DEFAULT_MIN_ALPHA = 0.0
 DEFAULT_MORPH_SIZE = 0               # off by default (0 = disabled)
 DEFAULT_ASPECT_TOLERANCE = 0.02
 DEFAULT_COLOR_CORRECTION_THRESHOLD = 15  # max luminance diff to count as "background" pixel
 
 # Number of frames to subsample when estimating the global color shift
 COLOR_SHIFT_SAMPLE_FRAMES = 50
-
-OutputMode = Literal['additive', 'alpha']
 
 
 def get_video_info(
@@ -235,7 +231,6 @@ def subtract_background_video(
     ramp: int = DEFAULT_RAMP,
     gamma: float = DEFAULT_GAMMA,
     blur_radius: float = DEFAULT_BLUR_RADIUS,
-    output_mode: OutputMode = DEFAULT_OUTPUT_MODE,
     morph_size: float = DEFAULT_MORPH_SIZE,
     color_correction: bool = True,
     color_correction_threshold: float = DEFAULT_COLOR_CORRECTION_THRESHOLD,
@@ -269,7 +264,6 @@ def subtract_background_video(
         gamma:       Gamma correction (< 1.0 brightens).
         blur_radius: Gaussian blur radius for mask feathering, as fraction
             of min(H,W).  0 = disable.
-        output_mode: ``'additive'`` or ``'alpha'``.
         morph_size:  Morphological kernel size as fraction of min(H,W)
             (0 = disable, default).
         color_correction: Estimate and correct global color shift.
@@ -286,7 +280,6 @@ def subtract_background_video(
     """
     video_path = Path(video_path)
     background_path = Path(background_path)
-    min_alpha = DEFAULT_MIN_ALPHA
 
     # Get video info first — resize the background once instead of every frame
     width, height, fps, frame_count = get_video_info(video_path)
@@ -331,14 +324,9 @@ def subtract_background_video(
     # Setup output paths
     if output_path is None:
         params_str = f"t{threshold}_g{gamma:.2f}_r{ramp}"
-        if output_mode == 'alpha':
-            output_path = video_path.with_name(
-                f"{video_path.stem}_creature_{params_str}_alpha.mov"
-            )
-        else:
-            output_path = video_path.with_name(
-                f"{video_path.stem}_creature_{params_str}.mp4"
-            )
+        output_path = video_path.with_name(
+            f"{video_path.stem}_creature_{params_str}.mp4"
+        )
     output_path = Path(output_path)
 
     preview_path = (
@@ -358,17 +346,15 @@ def subtract_background_video(
         'ramp': ramp,
         'gamma': gamma,
         'blur_radius': blur_radius,
-        'output_mode': output_mode,
         'morph_size': morph_size,
         'color_shift': color_shift.tolist(),
         'bg_original_size': bg_orig_size,
     }
 
     # ---- Video writers -------------------------------------------------------
-    is_alpha = output_mode == 'alpha'
     output_writer = VideoWriter(
         output_path, output_size[0], output_size[1], fps,
-        alpha=is_alpha, crf=crf, codec=codec,
+        crf=crf, codec=codec,
     )
     preview_writer = (
         VideoWriter(preview_path, output_size[0], output_size[1], fps, crf=crf, codec=codec)
@@ -468,10 +454,6 @@ def subtract_background_video(
                 for fn, gen_arr, mask in results:
                     frame_num = fn
 
-                    # Apply min_alpha
-                    if min_alpha > 0:
-                        mask = np.clip(mask, min_alpha, 1.0)
-
                     # Extract creature
                     creature = extract_creature(
                         gen_arr, bg_arr, mask, gamma=gamma,
@@ -481,13 +463,7 @@ def subtract_background_video(
                     if progress_callback:
                         progress_callback(frame_num, frame_count or 0)
 
-                    # Write to output
-                    if output_mode == 'alpha':
-                        alpha_channel = (mask * 255).astype(np.uint8)
-                        rgba = np.dstack([creature, alpha_channel])
-                        output_writer.write(rgba)
-                    else:
-                        output_writer.write(creature)
+                    output_writer.write(creature)
 
                     # Write preview
                     if preview_writer:
@@ -531,9 +507,6 @@ def _cli():
                         help=f'Gamma correction, <1 brightens (default: {DEFAULT_GAMMA})')
     parser.add_argument('--blur-radius', type=float, default=DEFAULT_BLUR_RADIUS,
                         help=f'Gaussian blur radius for mask feathering as fraction of min(H,W) (default: {DEFAULT_BLUR_RADIUS})')
-    parser.add_argument('--output-mode', choices=['additive', 'alpha'],
-                        default=DEFAULT_OUTPUT_MODE,
-                        help=f'Output format (default: {DEFAULT_OUTPUT_MODE})')
     parser.add_argument('--morph-size', type=float, default=DEFAULT_MORPH_SIZE,
                         help=f'Morphological kernel as fraction of min(H,W) (0=off, default: {DEFAULT_MORPH_SIZE})')
     parser.add_argument('--no-color-correction', action='store_true',
@@ -550,7 +523,7 @@ def _cli():
     parser.add_argument('--codec', default='libx264',
                         help='Video codec (default: libx264)')
     args = parser.parse_args()
-    
+
     start_time = time.time()
 
     def progress(frame_num, total):
@@ -570,7 +543,6 @@ def _cli():
         ramp=args.ramp,
         gamma=args.gamma,
         blur_radius=args.blur_radius,
-        output_mode=args.output_mode,
         morph_size=args.morph_size,
         color_correction=not args.no_color_correction,
         color_correction_threshold=args.color_correction_threshold,
