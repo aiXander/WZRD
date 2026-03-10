@@ -25,14 +25,31 @@ image = (
     .add_local_python_source("wzrd", "wzrd_mcp")
 )
 
+with image.imports():
+    import numpy  # noqa: F401
+    import cv2  # noqa: F401
+    import sklearn  # noqa: F401
+    import PIL  # noqa: F401
+    import boto3  # noqa: F401
+    import httpx  # noqa: F401
+    from wzrd_mcp.server import mcp
 
-@app.function(
+
+@app.cls(
     image=image,
     timeout=600,
     secrets=[modal.Secret.from_name("eve-secrets-PROD")],
+    enable_memory_snapshot=True,
+    container_idle_timeout=120,
 )
-@modal.asgi_app()
-def web():
-    from wzrd_mcp.server import mcp
+class McpServer:
+    @modal.enter(snap=True)
+    def preload(self):
+        """Build the ASGI app before snapshotting so restore is instant."""
+        self._asgi_app = mcp.http_app(
+            transport="streamable-http", stateless_http=True
+        )
 
-    return mcp.http_app(transport="streamable-http", stateless_http=True)
+    @modal.asgi_app()
+    def web(self):
+        return self._asgi_app
