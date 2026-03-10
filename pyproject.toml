@@ -21,6 +21,7 @@ mcp = [
     "uvicorn>=0.30",
     "boto3>=1.34",
     "python-dotenv>=1.0",
+    "modal>=0.73",
 ]
 modal = [
     "fastmcp>=3.0",

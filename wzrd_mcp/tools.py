@@ -5,7 +5,9 @@ Each tool handles: resolve inputs (URL→local) → call wzrd → publish output
 
 from __future__ import annotations
 
+import os
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastmcp import Context
 
@@ -26,9 +28,7 @@ async def subtract_background_frame(
     blur_radius: float = 0.004,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Remove background from a single image, extracting the foreground subject for additive projection mapping.
-
-    Uses luminance-based difference with soft ramp thresholding and Gaussian feathering.
+    """Remove static projection surface background from a generated image, extracting the foreground subject for additive projection mapping using luminance-based differences.
 
     Args:
         generated_image: URL or path to the generated image with subject.
@@ -76,12 +76,12 @@ async def subtract_background_video(
     ramp: int = 20,
     blur_radius: float = 0.004,
     codec: str = "libx264",
-    crf: int = 18,
+    crf: int = 23,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Remove background from an entire video frame-by-frame for projection mapping content.
 
-    This is a long-running operation. Processing time scales with video length.
+    This is a slower operation. Processing time scales with video length and resolution.
 
     Args:
         video: URL or path to the input video.
@@ -128,11 +128,11 @@ async def subtract_background_video(
 async def detect_projection_surface(
     image: str,
     margin: float = 0.01,
-    target_aspect_ratio: Optional[str] = None,
-    output_resolution: Optional[int] = None,
+    target_aspect_ratio: Optional[str] = "16:9",
+    output_resolution: Optional[int] = 1920,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Detect and extract a projection surface from a photo.
+    """Detect and extract a projection surface from a night-time photo of projector light on a projection surface.
 
     Finds the illuminated quadrilateral (screen/wall) and returns a rectified, perspective-corrected crop.
 
@@ -174,8 +174,7 @@ async def detect_projection_surface(
 async def align_images(
     source_image: str,
     target_image: str,
-    max_features: int = 10000,
-    use_ecc_refinement: bool = True,
+    max_features: int = 2500,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Align a source image to match a target image's perspective.
@@ -186,7 +185,6 @@ async def align_images(
         source_image: URL or path to the image to warp.
         target_image: URL or path to the reference image to align to.
         max_features: SIFT feature detection limit.
-        use_ecc_refinement: Enable sub-pixel ECC refinement for better accuracy.
     """
     import wzrd
 
@@ -198,8 +196,7 @@ async def align_images(
         source_path=src_path,
         target_path=tgt_path,
         output_path=out_path,
-        max_features=max_features,
-        use_ecc_refinement=use_ecc_refinement,
+        max_features=max_features
     )
 
     return {
@@ -223,7 +220,7 @@ async def darken_surface(
     detail_boost: float = 1.15,
     target_aspect: str = "16:9",
     base_resolution: int = 1920,
-    alignment_aids: bool = True,
+    alignment_aids: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Darken a surface photo for additive projection mapping.
@@ -237,7 +234,7 @@ async def darken_surface(
         detail_boost: Detail amplification factor.
         target_aspect: Output aspect ratio, e.g. "16:9".
         base_resolution: Output width in pixels.
-        alignment_aids: Whether to generate an alignment aid video.
+        alignment_aids: Whether to generate an alignment aid video to be used for aligning the projector with the surface (only needed once per VJ session).
     """
     import wzrd
 
@@ -277,7 +274,7 @@ async def prepare_surface(
     target_aspect: str = "16:9",
     max_brightness: float = 0.20,
     margin: float = 0.01,
-    alignment_aids: bool = True,
+    alignment_aids: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Full pipeline to prepare a projection surface from photos.
@@ -291,7 +288,7 @@ async def prepare_surface(
         target_aspect: Output aspect ratio.
         max_brightness: Luminance ceiling (0.0–1.0).
         margin: Detection margin for surface extraction.
-        alignment_aids: Generate alignment aid video.
+        alignment_aids: Whether to generate an alignment aid video to be used for aligning the projector with the surface (only needed once per VJ session).
     """
     import wzrd
 
@@ -394,12 +391,12 @@ async def reproject_video(
     target_aspect: str = "16:9",
     base_resolution: int = 1920,
     codec: str = "libx264",
-    crf: int = 18,
+    crf: int = 23,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Place a processed video back at its original position on a canvas.
+    """Place a processed video (typically a segmented section of a projection surface) back at its original position of the full projection canvas.
 
-    Used to recompose island regions into a full-frame projection output for additive compositing.
+    Used to reposition generated island regions back into a full-frame projection output for additive compositing.
 
     Args:
         video: URL or path to the island video.
@@ -433,4 +430,152 @@ async def reproject_video(
             "canvas_size": info.get("canvas_size"),
             "island_position": info.get("island_position"),
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool 9: texture_flow
+# ---------------------------------------------------------------------------
+
+# S3/CloudFront settings for downloading TextureFlow outputs
+_TF_BUCKET = os.getenv("AWS_BUCKET_NAME", "edenartlab-stage-data")
+_TF_REGION = os.getenv("AWS_REGION_NAME", "us-east-1")
+_TF_CLOUDFRONT = os.getenv("CLOUDFRONT_URL")
+
+
+def _tf_file_url(filename: str) -> str:
+    """Build a download URL for an S3 key from the TextureFlow result."""
+    if _TF_CLOUDFRONT:
+        return f"{_TF_CLOUDFRONT}/{filename}"
+    return f"https://{_TF_BUCKET}.s3.{_TF_REGION}.amazonaws.com/{filename}"
+
+
+def _tf_extract_urls(obj):
+    """Recursively extract download URLs from a ComfyUI upload_result structure."""
+    urls = []
+    if isinstance(obj, str) and obj.startswith("http"):
+        local_name = os.path.basename(urlparse(obj).path) or "output"
+        urls.append((obj, local_name))
+    elif isinstance(obj, dict):
+        if "filename" in obj and isinstance(obj["filename"], str):
+            s3_key = obj["filename"]
+            urls.append((_tf_file_url(s3_key), os.path.basename(s3_key)))
+        else:
+            for v in obj.values():
+                urls.extend(_tf_extract_urls(v))
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            urls.extend(_tf_extract_urls(item))
+    return urls
+
+
+@mcp.tool()
+async def texture_flow(
+    images: list[str],
+    n_seconds: float = 5.0,
+    width: int = 512,
+    height: int = 384,
+    base_model: str = "SD15/juggernaut_reborn.safetensors",
+    use_controlnet1: bool = False,
+    control_input: Optional[str] = None,
+    diffusion_mask: Optional[str] = None,
+    preprocessor1: str = "Scribble_XDoG_Preprocessor",
+    controlnet_strength1: float = 0.45,
+    denoise: float = 1.0,
+    control_input_fit_strategy: str = "fill / crop",
+    map_shape_input_to_ip_masks: bool = False,
+    mapping_mode: str = "concentric_circles_outwards",
+    n_steps: int = 6,
+    motion_scale: float = 1.15,
+    use_upscale: bool = False,
+    upscale_resolution: int = 1024,
+    upscale_esrgan: bool = False,
+    seed: Optional[int] = None,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Generate a smooth, morphing animation video from style images using the TextureFlow AI model (runs on a remote Modal GPU endpoint).
+
+    TextureFlow creates trippy, artistic, morphing animations from 1-6 style images based on AnimateDiff, SDv15 and IP-adapter and controlnet.
+    Ideal for VJ loops, animated logos, abstract animations, and projection mapping content.
+
+    The style images drive the textures, content, and colors of the output video, but style images will never appear in the generated video exactly as keyframes.
+    Scale video length proportionally with number of style images (~3s per image is a good rule of thumb).
+
+    Optional shape guidance (controlnet):
+    - Set use_controlnet1=true and provide a control_input image/video to add shape guidance.
+    - Great for embedding logo contours, projection surface lines, or driving animations with simple motion videos.
+    - Without control_input, TextureFlow often produces visually appealing results out-of-the-box.
+    - With control_input, results can be amazing but may require tuning (especially controlnet_strength1).
+
+    Example use cases:
+    - Abstract artistic animation from style image(s) (will deform input, great for smooth animated textures)
+    - Mixing multiple style images with various mapping modes for VJ content
+    - Logo animation: logo as control_input + texture images as style
+    - Motion-driven animation: simple motion video/GIF as control_input
+    - Animated QR codes: QR code as control_input with preprocessor1="none"
+
+    Args:
+        images: 1-6 style image URLs driving the content/textures/colors of the video. More images = more variety.
+        n_seconds: Video length in seconds (2.0-24.0). Scale with number of style images (~3s per image).
+        width: Video width in pixels (320-1280, step 32). High values may cause duplication artifacts and are very slow.
+        height: Video height in pixels (320-1280, step 32). High values may cause duplication artifacts and are very slow.
+        base_model: SD1.5 checkpoint. Options: "SD15/juggernaut_reborn.safetensors" (realistic, best default), "SD15/darkSushiMixMix_225D.safetensors" (creative/abstract, pastel colors), "SD15/protogenV22Anime_protogenV22.safetensors" (anime/cartoon, flat colors).
+        use_controlnet1: Enable controlnet shape guidance. Requires control_input.
+        control_input: URL to an image/video for shape guidance. Used as controlnet input when use_controlnet1=true. Can be a logo, surface photo, motion video, or QR code.
+        diffusion_mask: Optional image/video mask URL controlling which regions are affected by diffusion. White regions will get animated, black regions remain black. Use this to generated island videos. Diffusion_mask can also be eg a shape filling video.
+        preprocessor1: Shape guidance type (only used when use_controlnet1=true). Options: "Scribble_XDoG_Preprocessor" (rough shape, good quality), "CannyEdgePreprocessor" (strong detailed edges), "DepthAnythingV2Preprocessor" (depth structure, ignores edges), "AnyLineArtPreprocessor_aux" (lineart), "DensePosePreprocessor" (human pose extraction), "none" (luminance/QR mode - maintains dark/bright regions).
+        controlnet_strength1: Shape guidance strength 0.0-1.0 (only when use_controlnet1=true). Default 0.45. Subtle: 0.35-0.45, strong: 0.45-0.65. Too high can look bad.
+        denoise: AI strength on top of shape input 0.1-1.0 (only when use_controlnet1=true). Lower values (0.8-0.9) preserve some of the control input's colors/shape. This can be used to provide eg a logo / rough color outline and then diffuse an animation on top of that. Can be used with or without controlnet_strength1.
+        control_input_fit_strategy: How to resize shape input to target dimensions. "fill / crop" (recommended), "stretch" (distorts), "pad" (can cause artifacts).
+        map_shape_input_to_ip_masks: Advanced: use color clusters from shape input to spatially map style images. Only enable when shape input has flat single-color regions. Overrides mapping_mode.
+        mapping_mode: Motion pattern for style image mapping. Options: "concentric_circles_inwards", "concentric_circles_outwards" (good default), "concentric_rectangles_inwards", "concentric_rectangles_outwards", "rotating_segments_clockwise", "rotating_segments_counter_clockwise" (avoid unless asked), "pushing_segments_clockwise", "pushing_segments_counter_clockwise", "vertical_stripes_left", "vertical_stripes_right", "horizontal_stripes_up" (good for demos), "horizontal_stripes_down".
+        n_steps: LCM denoising steps (4-14). Lower = faster/cheaper, higher = slightly better quality. Runtime scales linearly with n_steps.
+        motion_scale: Animation motion strength (0.7-1.4). Default 1.1 is good. 0.9 = subtle, 1.25 = more motion. Above 1.3 is rarely desirable.
+        use_upscale: Enable HD upscaling second pass. Disable for faster/cheaper experimentation, enable for HD videos.
+        upscale_resolution: Max dimension for latent upscale (1024-1536, step 64). Only used when use_upscale=true.
+        upscale_esrgan: Enable ESRGAN postprocessing for full HD (1080p). Great for sharp/realistic, less ideal for organic/stylistic. Only used when use_upscale=true.
+        seed: Random seed for reproducibility (0-2147483647). Leave as None for random, set manually when doing param gridsearches (rarely needed).
+    """
+    import modal
+
+    args = {
+        "images": images,
+        "n_seconds": n_seconds,
+        "width": width,
+        "height": height,
+        "base_model": base_model,
+        "use_controlnet1": use_controlnet1,
+        "preprocessor1": preprocessor1,
+        "controlnet_strength1": controlnet_strength1,
+        "denoise": denoise,
+        "control_input_fit_strategy": control_input_fit_strategy,
+        "map_shape_input_to_ip_masks": map_shape_input_to_ip_masks,
+        "mapping_mode": mapping_mode,
+        "n_steps": n_steps,
+        "motion_scale": motion_scale,
+        "use_upscale": use_upscale,
+        "upscale_resolution": upscale_resolution,
+        "upscale_esrgan": upscale_esrgan,
+    }
+
+    if control_input is not None:
+        args["control_input"] = control_input
+    if diffusion_mask is not None:
+        args["diffusion_mask"] = diffusion_mask
+    if seed is not None:
+        args["seed"] = seed
+
+    app_name = os.getenv("MODAL_APP_NAME", "comfyui-wzrd-STAGE")
+    cls_name = os.getenv("MODAL_CLS_NAME", "ComfyUIPremium")
+
+    cls = modal.Cls.from_name(app_name, cls_name)
+    instance = cls()
+    result = instance.run.remote(tool_key="texture_flow", args=args)
+
+    # Extract output URLs from the result
+    output_urls = _tf_extract_urls(result)
+
+    return {
+        "output_urls": [{"url": url, "filename": fname} for url, fname in output_urls],
+        "raw_result": result,
     }

@@ -21,6 +21,7 @@ _DEFAULT_TOOLS = {
     "prepare_surface": True,
     "extract_color_regions": True,
     "reproject_video": True,
+    "texture_flow": True,
 }
 
 
@@ -46,8 +47,9 @@ mcp = FastMCP(
         "- Image alignment (feature matching + template matching + ECC)\n"
         "- Surface darkening for additive projection\n"
         "- Color region segmentation (islands)\n"
-        "- Video reprojection for layer compositing\n\n"
-        "Typical workflow: detect surface → prepare surface → generate content → "
+        "- Video reprojection for layer compositing\n"
+        "- TextureFlow: AI video generation from style images (remote Modal GPU endpoint)\n\n"
+        "Typical workflow: detect surface → prepare surface → generate content (e.g. texture_flow) → "
         "subtract background → (optionally segment into islands → reproject)\n\n"
         "All image/video inputs accept URLs or local file paths.\n"
         "All outputs include the processed file and an info dict with metadata."

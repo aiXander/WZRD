@@ -110,6 +110,50 @@ from wzrd import reproject_videos_batch
 reproject_videos_batch(video_json_pairs, canvas_width=1920, canvas_height=1080)
 ```
 
+## MCP Server
+
+WZRD includes an MCP (Model Context Protocol) server that exposes all tools to AI agents.
+
+### Running the server
+
+```bash
+pip install -e ".[mcp]"
+python -m wzrd_mcp                    # default: 0.0.0.0:8787
+python -m wzrd_mcp --port 9000        # custom port
+```
+
+The server uses Streamable HTTP transport at `http://localhost:8787/mcp`. It won't respond to regular browser requests (you'll get a 406 — that's normal).
+
+### Inspecting & testing tools
+
+Use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) to browse and invoke tools interactively:
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+This opens a UI at **http://localhost:5173**. To connect:
+1. Set transport type to **Streamable HTTP**
+2. Enter URL: `http://localhost:8787/mcp`
+3. Click **Connect**
+
+You'll see all registered tools with their schemas and can fire test calls.
+
+### Connecting from Claude Code
+
+Add to your MCP config (e.g. `.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "wzrd": {
+      "type": "streamable-http",
+      "url": "http://localhost:8787/mcp"
+    }
+  }
+}
+```
+
 ## Dependencies
 
 - **Pillow**, **NumPy**, **OpenCV** (core)

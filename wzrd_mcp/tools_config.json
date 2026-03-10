@@ -1,10 +1,11 @@
 {
-  "subtract_background_frame": true,
+  "subtract_background_frame": false,
   "subtract_background_video": true,
-  "detect_projection_surface": true,
-  "align_images": true,
-  "darken_surface": true,
+  "detect_projection_surface": false,
+  "align_images": false,
+  "darken_surface": false,
   "prepare_surface": true,
   "extract_color_regions": true,
-  "reproject_video": true
+  "reproject_video": true,
+  "texture_flow": true
 }
