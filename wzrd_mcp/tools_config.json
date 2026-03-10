@@ -1,0 +1,10 @@
+{
+  "subtract_background_frame": true,
+  "subtract_background_video": true,
+  "detect_projection_surface": true,
+  "align_images": true,
+  "darken_surface": true,
+  "prepare_surface": true,
+  "extract_color_regions": true,
+  "reproject_video": true
+}
