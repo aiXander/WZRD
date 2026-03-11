@@ -22,6 +22,8 @@ _DEFAULT_TOOLS = {
     "extract_color_regions": True,
     "reproject_video": True,
     "texture_flow": True,
+    "kling_v3_image_to_video": True,
+    "nano_banana_pro": True,
 }
 
 
@@ -48,7 +50,9 @@ mcp = FastMCP(
         "- Surface darkening for additive projection\n"
         "- Color region segmentation (islands)\n"
         "- Video reprojection for layer compositing\n"
-        "- TextureFlow: AI video generation from style images (remote Modal GPU endpoint)\n\n"
+        "- TextureFlow: AI video generation from style images (remote Modal GPU endpoint)\n"
+        "- Kling v3: Image-to-video generation (3-15s cinematic videos via FAL)\n"
+        "- Nano Banana Pro: Text-to-image and image editing (via FAL)\n\n"
         "Typical workflow: detect surface → prepare surface → generate content (e.g. texture_flow) → "
         "subtract background → (optionally segment into islands → reproject)\n\n"
         "All image/video inputs accept URLs or local file paths.\n"
@@ -59,6 +63,7 @@ mcp = FastMCP(
 # Import tools module to register all @mcp.tool() decorated functions.
 # This must happen after `mcp` is defined since tools.py imports `mcp` from here.
 from . import tools as _tools  # noqa: E402, F401
+from . import fal_tools as _fal_tools  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
 # Filter out disabled tools based on config

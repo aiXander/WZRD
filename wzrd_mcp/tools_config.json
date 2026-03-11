@@ -7,5 +7,7 @@
   "prepare_surface": true,
   "extract_color_regions": true,
   "reproject_video": true,
-  "texture_flow": true
+  "texture_flow": true,
+  "kling_v3_image_to_video": true,
+  "nano_banana_pro": true
 }
