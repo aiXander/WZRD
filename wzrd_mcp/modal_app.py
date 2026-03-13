@@ -2,9 +2,15 @@
 
 Deploy with:
     modal deploy wzrd_mcp/modal_app.py
+
+Authentication:
+    Set WZRD_API_KEY in your Modal secret (eve-secrets-PROD).
+    Clients must send: Authorization: Bearer <key>
 """
 
 from __future__ import annotations
+
+import os
 
 import modal
 
@@ -21,6 +27,7 @@ image = (
         "pillow>=10.0.0",
         "numpy>=2.2.0",
         "opencv-python>=4.8.0,<4.11.0",
+        "starlette",
     )
     .add_local_python_source("wzrd", "wzrd_mcp")
 )
@@ -32,7 +39,42 @@ with image.imports():
     import PIL  # noqa: F401
     import boto3  # noqa: F401
     import httpx  # noqa: F401
+    from starlette.middleware import Middleware
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from starlette.types import ASGIApp, Receive, Scope, Send
     from wzrd_mcp.server import mcp
+
+
+class ApiKeyMiddleware:
+    """ASGI middleware that checks for a valid Bearer token."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        api_key = os.environ.get("WZRD_API_KEY", "")
+        if not api_key:
+            # No key configured — allow all (dev convenience)
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode()
+
+        if auth == f"Bearer {api_key}":
+            await self.app(scope, receive, send)
+            return
+
+        response = JSONResponse(
+            {"error": "Invalid or missing API key. Use: Authorization: Bearer <key>"},
+            status_code=401,
+        )
+        await response(scope, receive, send)
 
 
 @app.cls(
@@ -52,4 +94,4 @@ class McpServer:
 
     @modal.asgi_app()
     def web(self):
-        return self._asgi_app
+        return ApiKeyMiddleware(self._asgi_app)

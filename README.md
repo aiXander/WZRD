@@ -112,6 +112,9 @@ reproject_videos_batch(video_json_pairs, canvas_width=1920, canvas_height=1080)
 
 ## MCP Server
 
+Deploy mcp server to modal:
+ modal deploy wzrd_mcp/modal_app.py
+
 WZRD includes an MCP (Model Context Protocol) server that exposes all tools to AI agents.
 
 ### Running the server
