@@ -34,7 +34,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="WZRD MCP Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8787, help="Bind port (default: 8787)")
+    parser.add_argument("--debug", default=True, action=argparse.BooleanOptionalAction,
+                        help="Enable debug logging (default: True)")
     args = parser.parse_args()
+
+    from . import _log
+    _log.DEBUG = args.debug
 
     from .server import mcp
 

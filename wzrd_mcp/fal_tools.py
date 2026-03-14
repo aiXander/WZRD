@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import time
 from typing import Optional
 
 import fal_client
@@ -19,7 +20,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from .file_io import upload
-from ._log import log_call, log_progress, log_done, log_error
+from ._log import log_call, log_progress, log_done, log_error, logged_tool
 from .server import mcp
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,7 @@ async def _download_to_tmp(url: str, suffix: str = "") -> str:
 # Tool: Kling v3 Image-to-Video
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def kling_v3_image_to_video(
     prompt: str,
     start_image_url: str,
@@ -171,11 +173,7 @@ async def kling_v3_image_to_video(
         aspect_ratio: Output aspect ratio. Choices: "16:9", "9:16", "1:1".
     """
     _name = "kling_v3_image_to_video"
-    t0 = log_call(_name, {
-        "prompt": prompt, "start_image_url": start_image_url,
-        "duration": duration, "generate_audio": generate_audio,
-        "aspect_ratio": aspect_ratio,
-    })
+    t0 = time.time()
     try:
         fal_args: dict = {
             "prompt": prompt,
@@ -213,7 +211,7 @@ async def kling_v3_image_to_video(
                 "aspect_ratio": aspect_ratio,
             },
         }
-        log_done(_name, t0)
+        log_done(_name, t0, response)
         return response
     except ToolError:
         raise
@@ -226,6 +224,7 @@ async def kling_v3_image_to_video(
 # Tool: Nano Banana Pro (txt2img + img2img unified)
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def nano_banana_pro(
     prompt: str,
     image_urls: list[str] = [],
@@ -253,10 +252,7 @@ async def nano_banana_pro(
     """
     _name = "nano_banana_pro"
     mode = "edit" if image_urls else "txt2img"
-    t0 = log_call(_name, {
-        "prompt": prompt, "mode": mode, "num_images": num_images,
-        "resolution": resolution, "aspect_ratio": aspect_ratio,
-    })
+    t0 = time.time()
     try:
         endpoint = (
             "fal-ai/nano-banana-pro/edit" if image_urls else "fal-ai/nano-banana-pro"
@@ -301,7 +297,7 @@ async def nano_banana_pro(
                 "mode": mode,
             },
         }
-        log_done(_name, t0)
+        log_done(_name, t0, response)
         return response
     except ToolError:
         raise

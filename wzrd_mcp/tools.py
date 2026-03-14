@@ -6,6 +6,7 @@ Each tool handles: resolve inputs (URL→local) → call wzrd → publish output
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -13,7 +14,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from .file_io import make_temp_dir, make_temp_path, resolve_input, upload
-from ._log import log_call, log_progress, log_done, log_error
+from ._log import log_call, log_progress, log_done, log_error, logged_tool
 from .server import mcp
 
 
@@ -21,6 +22,7 @@ from .server import mcp
 # Tool 1: subtract_background_frame
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def subtract_background_frame(
     generated_image: str,
     background_image: str,
@@ -41,10 +43,7 @@ async def subtract_background_frame(
         blur_radius: Mask feathering as fraction of image size.
     """
     _name = "subtract_background_frame"
-    t0 = log_call(_name, {
-        "generated_image": generated_image, "background_image": background_image,
-        "threshold": threshold, "ramp": ramp, "gamma": gamma, "blur_radius": blur_radius,
-    })
+    t0 = time.time()
     try:
         from wzrd.subtract_frame import subtract_background_file
 
@@ -73,7 +72,7 @@ async def subtract_background_frame(
                 "creature_mean_brightness": info.get("creature_mean_brightness"),
             },
         }
-        log_done(_name, t0)
+        log_done(_name, t0, result)
         return result
     except ToolError:
         raise
@@ -86,6 +85,7 @@ async def subtract_background_frame(
 # Tool 2: subtract_background_video
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def subtract_background_video(
     video: str,
     background_image: str,
@@ -112,11 +112,7 @@ async def subtract_background_video(
         crf: Video quality — lower is better (0-51).
     """
     _name = "subtract_background_video"
-    t0 = log_call(_name, {
-        "video": video, "background_image": background_image,
-        "threshold": threshold, "gamma": gamma, "ramp": ramp,
-        "blur_radius": blur_radius, "codec": codec, "crf": crf,
-    })
+    t0 = time.time()
     try:
         from wzrd.subtract_video import subtract_background_video as _subtract_bg_video
 
@@ -147,7 +143,7 @@ async def subtract_background_video(
                 "video_size": info.get("video_size"),
             },
         }
-        log_done(_name, t0)
+        log_done(_name, t0, result)
         return result
     except ToolError:
         raise
@@ -160,6 +156,7 @@ async def subtract_background_video(
 # Tool 3: detect_projection_surface
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def detect_projection_surface(
     image: str,
     margin: float = 0.01,
@@ -178,10 +175,7 @@ async def detect_projection_surface(
         output_resolution: Output width in pixels. None keeps original resolution.
     """
     _name = "detect_projection_surface"
-    t0 = log_call(_name, {
-        "image": image, "margin": margin,
-        "target_aspect_ratio": target_aspect_ratio, "output_resolution": output_resolution,
-    })
+    t0 = time.time()
     try:
         from wzrd.detect import detect_projection_area
 
@@ -209,7 +203,7 @@ async def detect_projection_surface(
                 "target_aspect_ratio": info.get("target_aspect_ratio"),
             },
         }
-        log_done(_name, t0)
+        log_done(_name, t0, result)
         return result
     except ToolError:
         raise
@@ -222,6 +216,7 @@ async def detect_projection_surface(
 # Tool 4: align_images
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def align_images(
     source_image: str,
     target_image: str,
@@ -238,10 +233,7 @@ async def align_images(
         max_features: SIFT feature detection limit.
     """
     _name = "align_images"
-    t0 = log_call(_name, {
-        "source_image": source_image, "target_image": target_image,
-        "max_features": max_features,
-    })
+    t0 = time.time()
     try:
         from wzrd.align import align_images_file
 
@@ -268,7 +260,7 @@ async def align_images(
                 "num_matches": info.get("num_matches"),
             },
         }
-        log_done(_name, t0)
+        log_done(_name, t0, result)
         return result
     except ToolError:
         raise
@@ -281,6 +273,7 @@ async def align_images(
 # Tool 5: darken_surface
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def darken_surface(
     image: str,
     max_brightness: float = 0.25,
@@ -304,11 +297,7 @@ async def darken_surface(
         alignment_aids: Whether to generate an alignment aid video to be used for aligning the projector with the surface (only needed once per VJ session).
     """
     _name = "darken_surface"
-    t0 = log_call(_name, {
-        "image": image, "max_brightness": max_brightness, "detail_boost": detail_boost,
-        "target_aspect": target_aspect, "base_resolution": base_resolution,
-        "alignment_aids": alignment_aids,
-    })
+    t0 = time.time()
     try:
         from wzrd.darken import darken_image_file
 
@@ -335,7 +324,7 @@ async def darken_surface(
         if result.get("video"):
             response["alignment_video"] = upload(str(result["video"]))
 
-        log_done(_name, t0)
+        log_done(_name, t0, response)
         return response
     except ToolError:
         raise
@@ -348,6 +337,7 @@ async def darken_surface(
 # Tool 6: prepare_surface
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def prepare_surface(
     night_image: str,
     day_image: str = "",
@@ -371,11 +361,7 @@ async def prepare_surface(
         alignment_aids: Whether to generate an alignment aid video to be used for aligning the projector with the surface (only needed once per VJ session).
     """
     _name = "prepare_surface"
-    t0 = log_call(_name, {
-        "night_image": night_image, "day_image": day_image,
-        "target_aspect": target_aspect, "max_brightness": max_brightness,
-        "margin": margin, "alignment_aids": alignment_aids,
-    })
+    t0 = time.time()
     try:
         from wzrd.prepare_surface import prepare_surface as _prepare_surface
 
@@ -407,7 +393,7 @@ async def prepare_surface(
         if result.get("video"):
             response["alignment_video"] = upload(str(result["video"]))
 
-        log_done(_name, t0)
+        log_done(_name, t0, response)
         return response
     except ToolError:
         raise
@@ -420,6 +406,7 @@ async def prepare_surface(
 # Tool 7: extract_color_regions
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def extract_color_regions(
     image: str,
     max_colors: int = 5,
@@ -440,10 +427,7 @@ async def extract_color_regions(
         output_min_size: Minimum output dimension in pixels for each region crop.
     """
     _name = "extract_color_regions"
-    t0 = log_call(_name, {
-        "image": image, "max_colors": max_colors, "min_area_fraction": min_area_fraction,
-        "surface_image": surface_image, "output_min_size": output_min_size,
-    })
+    t0 = time.time()
     try:
         from wzrd.islands import extract_color_regions as _extract_color_regions
 
@@ -483,7 +467,7 @@ async def extract_color_regions(
             "regions": published_regions,
             "metadata_path": metadata_url,
         }
-        log_done(_name, t0)
+        log_done(_name, t0, result)
         return result
     except ToolError:
         raise
@@ -496,6 +480,7 @@ async def extract_color_regions(
 # Tool 8: reproject_video
 # ---------------------------------------------------------------------------
 @mcp.tool()
+@logged_tool
 async def reproject_video(
     video: str,
     island_metadata: str,
@@ -518,11 +503,7 @@ async def reproject_video(
         crf: Quality setting — lower is better (0-51).
     """
     _name = "reproject_video"
-    t0 = log_call(_name, {
-        "video": video, "island_metadata": island_metadata,
-        "target_aspect": target_aspect, "base_resolution": base_resolution,
-        "codec": codec, "crf": crf,
-    })
+    t0 = time.time()
     try:
         from wzrd.reproject import reproject_video_with_aspect
 
@@ -552,7 +533,7 @@ async def reproject_video(
                 "island_position": info.get("island_position"),
             },
         }
-        log_done(_name, t0)
+        log_done(_name, t0, result)
         return result
     except ToolError:
         raise
@@ -597,7 +578,14 @@ def _tf_extract_urls(obj):
     return urls
 
 
+def _tf_extract_first_url(obj) -> str | None:
+    """Extract the first download URL from a ComfyUI output node value."""
+    urls = _tf_extract_urls(obj)
+    return urls[0][0] if urls else None
+
+
 @mcp.tool()
+@logged_tool
 async def texture_flow(
     images: list[str],
     n_seconds: float = 5.0,
@@ -665,11 +653,7 @@ async def texture_flow(
         seed: Random seed for reproducibility (0-2147483647). Leave as None for random, set manually when doing param gridsearches (rarely needed).
     """
     _name = "texture_flow"
-    t0 = log_call(_name, {
-        "images": images, "n_seconds": n_seconds, "width": width, "height": height,
-        "base_model": base_model, "use_controlnet1": use_controlnet1,
-        "mapping_mode": mapping_mode, "use_upscale": use_upscale, "seed": seed,
-    })
+    t0 = time.time()
     try:
         import modal
 
@@ -709,12 +693,46 @@ async def texture_flow(
         result = instance.run.remote(tool_key="texture_flow", args=args)
 
         log_progress(_name, "Extracting output URLs...")
-        output_urls = _tf_extract_urls(result)
 
-        response = {
-            "output_videos": [url for url, _fname in output_urls],
+        # Map ComfyUI intermediate output keys to descriptive names
+        _INTERMEDIATE_KEY_MAP = {
+            "pass_1": "first_pass_video",
+            "control_signal_1": "control_signal_preview",
+            "mapping_motion": "mapping_motion_preview",
         }
-        log_done(_name, t0)
+
+        # Extract main output video
+        response: dict = {}
+        if isinstance(result, dict):
+            # Main output: top-level "output" key from ComfyUI handler
+            main_output = result.get("output")
+            if main_output:
+                url = _tf_extract_first_url(main_output)
+                if url:
+                    response["output_video"] = url
+
+            # Intermediate/debug outputs
+            intermediates = result.get("intermediate_outputs", {})
+            if isinstance(intermediates, dict):
+                for raw_key, named_key in _INTERMEDIATE_KEY_MAP.items():
+                    node_val = intermediates.get(raw_key)
+                    if node_val:
+                        url = _tf_extract_first_url(node_val)
+                        if url:
+                            response[named_key] = url
+
+        # Fallback: if we couldn't parse structured output, extract all URLs
+        if "output_video" not in response:
+            all_urls = _tf_extract_urls(result)
+            if all_urls:
+                response["output_video"] = all_urls[0][0]
+                # Assign remaining URLs to intermediate keys in order
+                fallback_keys = ["first_pass_video", "control_signal_preview", "mapping_motion_preview"]
+                for i, (url, _) in enumerate(all_urls[1:]):
+                    key = fallback_keys[i] if i < len(fallback_keys) else f"extra_output_{i}"
+                    response[key] = url
+
+        log_done(_name, t0, response)
         return response
     except ToolError:
         raise
