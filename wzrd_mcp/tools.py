@@ -15,13 +15,13 @@ from fastmcp.exceptions import ToolError
 
 from .file_io import make_temp_dir, make_temp_path, resolve_input, upload
 from ._log import log_call, log_progress, log_done, log_error, logged_tool
-from .server import mcp
+from .server import mcp, get_timeout
 
 
 # ---------------------------------------------------------------------------
 # Tool 1: subtract_background_frame
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("subtract_background_frame"))
 @logged_tool
 async def subtract_background_frame(
     generated_image: str,
@@ -84,7 +84,7 @@ async def subtract_background_frame(
 # ---------------------------------------------------------------------------
 # Tool 2: subtract_background_video
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("subtract_background_video"))
 @logged_tool
 async def subtract_background_video(
     video: str,
@@ -155,7 +155,7 @@ async def subtract_background_video(
 # ---------------------------------------------------------------------------
 # Tool 3: detect_projection_surface
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("detect_projection_surface"))
 @logged_tool
 async def detect_projection_surface(
     image: str,
@@ -215,7 +215,7 @@ async def detect_projection_surface(
 # ---------------------------------------------------------------------------
 # Tool 4: align_images
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("align_images"))
 @logged_tool
 async def align_images(
     source_image: str,
@@ -272,7 +272,7 @@ async def align_images(
 # ---------------------------------------------------------------------------
 # Tool 5: darken_surface
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("darken_surface"))
 @logged_tool
 async def darken_surface(
     image: str,
@@ -336,7 +336,7 @@ async def darken_surface(
 # ---------------------------------------------------------------------------
 # Tool 6: prepare_surface
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("prepare_surface"))
 @logged_tool
 async def prepare_surface(
     night_image: str,
@@ -405,7 +405,7 @@ async def prepare_surface(
 # ---------------------------------------------------------------------------
 # Tool 7: extract_color_regions
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("extract_color_regions"))
 @logged_tool
 async def extract_color_regions(
     image: str,
@@ -479,11 +479,14 @@ async def extract_color_regions(
 # ---------------------------------------------------------------------------
 # Tool 8: reproject_video
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("reproject_video"))
 @logged_tool
 async def reproject_video(
     video: str,
-    island_metadata: str,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
     target_aspect: str = "16:9",
     base_resolution: int = 1920,
     codec: str = "libx264",
@@ -493,10 +496,14 @@ async def reproject_video(
     """Place a processed video (typically a segmented section of a projection surface) back at its original position of the full projection canvas.
 
     Used to reposition generated island regions back into a full-frame projection output for additive compositing.
+    The x, y, width, height values come from the source_box returned by extract_color_regions for the specific region being reprojected.
 
     Args:
         video: URL or path to the island video.
-        island_metadata: URL or path to the islands.json metadata file.
+        x: Island x-offset on canvas (from source_box).
+        y: Island y-offset on canvas (from source_box).
+        width: Island source width in pixels (from source_box).
+        height: Island source height in pixels (from source_box).
         target_aspect: Canvas aspect ratio, e.g. "16:9".
         base_resolution: Canvas width in pixels.
         codec: Video codec.
@@ -509,13 +516,12 @@ async def reproject_video(
 
         log_progress(_name, "Resolving inputs...")
         vid_path = resolve_input(video, suffix=".mp4")
-        meta_path = resolve_input(island_metadata, suffix=".json")
         out_path = make_temp_path(suffix=".mp4")
 
         log_progress(_name, "Reprojecting video onto canvas...")
         info = reproject_video_with_aspect(
             video_path=vid_path,
-            island_metadata=meta_path,
+            island_metadata={"x": x, "y": y, "width": width, "height": height},
             output_path=out_path,
             target_aspect=target_aspect,
             base_resolution=base_resolution,
@@ -584,7 +590,7 @@ def _tf_extract_first_url(obj) -> str | None:
     return urls[0][0] if urls else None
 
 
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("texture_flow"))
 @logged_tool
 async def texture_flow(
     images: list[str],

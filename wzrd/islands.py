@@ -432,7 +432,7 @@ def extract_color_regions(
         'regions': all_regions,
     }
 
-    json_path = output_dir / 'regions.json'
+    json_path = output_dir / 'islands.json'
     with open(json_path, 'w') as f:
         json.dump(metadata, f, indent=2)
 
@@ -448,7 +448,7 @@ def reassemble_regions(
     Reassemble processed regions back into the original image layout.
 
     Args:
-        metadata_path: Path to regions.json
+        metadata_path: Path to islands.json
         processed_dir: Directory containing processed region images
                        (default: same as metadata)
         output_path: Path to save the reassembled image (optional)

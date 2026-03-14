@@ -9,6 +9,7 @@ This enables layer-based compositing in tools like Resolume using additive blend
 import json
 from pathlib import Path
 from typing import Union, Optional, Tuple, Callable, List, Dict
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -115,6 +116,9 @@ def reproject_video(
     # Create black canvas template
     canvas_template = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
 
+    # Check once whether we need to resize frames to match island box
+    need_resize = (vid_width != island_w) or (vid_height != island_h)
+
     frame_num = 0
     with VideoWriter(output_path, canvas_width, canvas_height, fps, crf=crf, codec=codec) as writer:
         for fn, frame_arr in iter_video_frames(video_path):
@@ -122,6 +126,13 @@ def reproject_video(
 
             if progress_callback:
                 progress_callback(frame_num, frame_count or 0)
+
+            # Resize frame to match the original island source box
+            if need_resize:
+                frame_arr = cv2.resize(
+                    frame_arr, (island_w, island_h),
+                    interpolation=cv2.INTER_LINEAR,
+                )
 
             # Create canvas with island placed at correct position
             canvas = canvas_template.copy()

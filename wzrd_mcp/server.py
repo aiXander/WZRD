@@ -12,30 +12,50 @@ from fastmcp import FastMCP
 # Tool activation config
 # ---------------------------------------------------------------------------
 _CONFIG_PATH = Path(__file__).parent / "tools_config.json"
+_DEFAULT_TIMEOUT = 120  # seconds
+
 _DEFAULT_TOOLS = {
-    "subtract_background_frame": True,
-    "subtract_background_video": True,
-    "detect_projection_surface": True,
-    "align_images": True,
-    "darken_surface": True,
-    "prepare_surface": True,
-    "extract_color_regions": True,
-    "reproject_video": True,
-    "texture_flow": True,
-    "kling_v3_image_to_video": True,
-    "nano_banana_pro": True,
+    "subtract_background_frame": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "subtract_background_video": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "detect_projection_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "align_images": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "darken_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "prepare_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "extract_color_regions": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "reproject_video": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "texture_flow": {"enabled": True, "timeout": 1500},
+    "kling_v3_image_to_video": {"enabled": True, "timeout": 300},
+    "nano_banana_pro": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
 }
 
 
 def _load_tool_config() -> dict:
-    """Load tool activation config. Falls back to all-enabled defaults."""
+    """Load tool config. Supports both old (bool) and new (dict) formats."""
+    merged = {k: dict(v) for k, v in _DEFAULT_TOOLS.items()}
     if _CONFIG_PATH.exists():
         with open(_CONFIG_PATH) as f:
-            return {**_DEFAULT_TOOLS, **json.load(f)}
-    return dict(_DEFAULT_TOOLS)
+            raw = json.load(f)
+        for name, value in raw.items():
+            if isinstance(value, bool):
+                # Legacy format: bare bool → convert
+                merged.setdefault(name, {"enabled": True, "timeout": _DEFAULT_TIMEOUT})
+                merged[name]["enabled"] = value
+            elif isinstance(value, dict):
+                merged.setdefault(name, {"enabled": True, "timeout": _DEFAULT_TIMEOUT})
+                merged[name].update(value)
+    return merged
 
 
 TOOL_CONFIG = _load_tool_config()
+
+
+def get_timeout(tool_name: str) -> float:
+    """Get the configured timeout (seconds) for a tool."""
+    cfg = TOOL_CONFIG.get(tool_name)
+    if cfg is None:
+        print(f"\033[33m⚠ WZRD: tool '{tool_name}' not found in tools_config.json — using default timeout ({_DEFAULT_TIMEOUT}s)\033[0m")
+        return float(_DEFAULT_TIMEOUT)
+    return float(cfg.get("timeout", _DEFAULT_TIMEOUT))
 
 # ---------------------------------------------------------------------------
 # Server instance
@@ -72,8 +92,8 @@ from . import fal_tools as _fal_tools  # noqa: E402, F401
 
 def _apply_tool_config() -> None:
     """Remove disabled tools from the server's tool registry."""
-    for name, enabled in TOOL_CONFIG.items():
-        if not enabled:
+    for name, cfg in TOOL_CONFIG.items():
+        if not cfg.get("enabled", True):
             try:
                 mcp.remove_tool(name)
             except (KeyError, ValueError):

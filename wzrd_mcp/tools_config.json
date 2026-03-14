@@ -1,13 +1,13 @@
 {
-  "subtract_background_frame": false,
-  "subtract_background_video": true,
-  "detect_projection_surface": false,
-  "align_images": false,
-  "darken_surface": false,
-  "prepare_surface": true,
-  "extract_color_regions": true,
-  "reproject_video": true,
-  "texture_flow": true,
-  "kling_v3_image_to_video": true,
-  "nano_banana_pro": true
+  "subtract_background_frame": {"enabled": false, "timeout": 60},
+  "subtract_background_video": {"enabled": true, "timeout": 300},
+  "detect_projection_surface": {"enabled": false, "timeout": 60},
+  "align_images": {"enabled": false, "timeout": 60},
+  "darken_surface": {"enabled": false, "timeout": 120},
+  "prepare_surface": {"enabled": true, "timeout": 120},
+  "extract_color_regions": {"enabled": true, "timeout": 120},
+  "reproject_video": {"enabled": true, "timeout": 300},
+  "texture_flow": {"enabled": true, "timeout": 1500},
+  "kling_v3_image_to_video": {"enabled": true, "timeout": 420},
+  "nano_banana_pro": {"enabled": true, "timeout": 120}
 }

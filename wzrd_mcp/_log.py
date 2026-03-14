@@ -87,7 +87,6 @@ def logged_tool(fn):
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         bound = sig.bind(*args, **kwargs)
-        bound.apply_defaults()
         client_args = {
             k: v for k, v in bound.arguments.items() if k not in _SKIP_PARAMS
         }

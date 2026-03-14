@@ -21,7 +21,7 @@ from fastmcp.exceptions import ToolError
 
 from .file_io import upload
 from ._log import log_call, log_progress, log_done, log_error, logged_tool
-from .server import mcp
+from .server import mcp, get_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ async def _download_to_tmp(url: str, suffix: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Tool: Kling v3 Image-to-Video
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("kling_v3_image_to_video"))
 @logged_tool
 async def kling_v3_image_to_video(
     prompt: str,
@@ -223,7 +223,7 @@ async def kling_v3_image_to_video(
 # ---------------------------------------------------------------------------
 # Tool: Nano Banana Pro (txt2img + img2img unified)
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@mcp.tool(timeout=get_timeout("nano_banana_pro"))
 @logged_tool
 async def nano_banana_pro(
     prompt: str,
