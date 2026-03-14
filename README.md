@@ -113,7 +113,7 @@ reproject_videos_batch(video_json_pairs, canvas_width=1920, canvas_height=1080)
 ## MCP Server
 
 Deploy mcp server to modal:
- modal deploy wzrd_mcp/modal_app.py
+`modal deploy wzrd_mcp/modal_app.py`
 
 WZRD includes an MCP (Model Context Protocol) server that exposes all tools to AI agents.
 
@@ -122,7 +122,7 @@ WZRD includes an MCP (Model Context Protocol) server that exposes all tools to A
 ```bash
 pip install -e ".[mcp]"
 python -m wzrd_mcp                    # default: 0.0.0.0:8787
-python -m wzrd_mcp --port 9000        # custom port
+python -m wzrd_mcp --port 8000        # custom port
 ```
 
 The server uses Streamable HTTP transport at `http://localhost:8787/mcp`. It won't respond to regular browser requests (you'll get a 406 — that's normal).

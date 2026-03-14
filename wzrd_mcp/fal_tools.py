@@ -16,8 +16,10 @@ from typing import Optional
 import fal_client
 import httpx
 from fastmcp import Context
+from fastmcp.exceptions import ToolError
 
 from .file_io import upload
+from ._log import log_call, log_progress, log_done, log_error
 from .server import mcp
 
 logger = logging.getLogger(__name__)
@@ -55,7 +57,7 @@ def _user_error(error: Exception) -> str:
     return str(error)
 
 
-async def _fal_subscribe(endpoint: str, args: dict) -> dict:
+async def _fal_subscribe(endpoint: str, args: dict, tool_name: str = "") -> dict:
     """Call fal_client.subscribe in a thread with retry + exponential backoff."""
     if not os.getenv("FAL_KEY"):
         raise ValueError("FAL_KEY environment variable is not set")
@@ -65,11 +67,16 @@ async def _fal_subscribe(endpoint: str, args: dict) -> dict:
 
     for attempt in range(_MAX_RETRIES + 1):
         try:
+            if tool_name:
+                log_progress(tool_name, f"Submitting to FAL ({endpoint})...")
 
             def _on_update(update):
                 if isinstance(update, fal_client.InProgress):
-                    for log in update.logs:
-                        logger.info(log["message"])
+                    for log_entry in update.logs:
+                        msg = log_entry["message"]
+                        logger.info(msg)
+                        if tool_name:
+                            log_progress(tool_name, f"FAL: {msg}")
 
             result = await asyncio.to_thread(
                 fal_client.subscribe,
@@ -89,7 +96,11 @@ async def _fal_subscribe(endpoint: str, args: dict) -> dict:
                 _MAX_RETRIES + 1,
                 exc,
             )
+            if tool_name:
+                log_progress(tool_name, f"FAL attempt {attempt + 1} failed: {exc}")
             if _is_retryable(exc) and attempt < _MAX_RETRIES:
+                if tool_name:
+                    log_progress(tool_name, f"Retrying in {delay:.0f}s...")
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
@@ -138,7 +149,7 @@ async def kling_v3_image_to_video(
     start_image_url: str,
     duration: str = "5",
     generate_audio: bool = False,
-    end_image_url: Optional[str] = None,
+    end_image_url: str = "",
     negative_prompt: str = "blur, distort, and low quality",
     cfg_scale: float = 0.5,
     aspect_ratio: str = "16:9",
@@ -159,31 +170,56 @@ async def kling_v3_image_to_video(
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
         aspect_ratio: Output aspect ratio. Choices: "16:9", "9:16", "1:1".
     """
-    fal_args: dict = {
-        "prompt": prompt,
-        "start_image_url": start_image_url,
-        "duration": duration,
-        "generate_audio": generate_audio,
-        "negative_prompt": negative_prompt,
-        "cfg_scale": cfg_scale,
+    _name = "kling_v3_image_to_video"
+    t0 = log_call(_name, {
+        "prompt": prompt, "start_image_url": start_image_url,
+        "duration": duration, "generate_audio": generate_audio,
         "aspect_ratio": aspect_ratio,
-    }
-    if end_image_url is not None:
-        fal_args["end_image_url"] = end_image_url
+    })
+    try:
+        fal_args: dict = {
+            "prompt": prompt,
+            "start_image_url": start_image_url,
+            "duration": duration,
+            "generate_audio": generate_audio,
+            "negative_prompt": negative_prompt,
+            "cfg_scale": cfg_scale,
+            "aspect_ratio": aspect_ratio,
+        }
+        if end_image_url != "":
+            fal_args["end_image_url"] = end_image_url
 
-    result = await _fal_subscribe(
-        "fal-ai/kling-video/v3/standard/image-to-video", fal_args
-    )
+        result = await _fal_subscribe(
+            "fal-ai/kling-video/v3/standard/image-to-video", fal_args,
+            tool_name=_name,
+        )
 
-    urls = _extract_urls(result)
-    if not urls:
-        return {"error": "No video URL in FAL response", "raw_result": result}
+        urls = _extract_urls(result)
+        if not urls:
+            err = "No video URL in FAL response"
+            log_error(_name, ValueError(err), t0)
+            raise ToolError(err)
 
-    # Download the video and re-upload to our S3
-    video_tmp = await _download_to_tmp(urls[0], suffix=".mp4")
-    uploaded_url = upload(video_tmp)
+        log_progress(_name, "Downloading video from FAL...")
+        video_tmp = await _download_to_tmp(urls[0], suffix=".mp4")
 
-    return {"output_video": uploaded_url, "raw_result": result}
+        log_progress(_name, "Uploading to S3...")
+        uploaded_url = upload(video_tmp)
+
+        response = {
+            "output_video": uploaded_url,
+            "info": {
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+            },
+        }
+        log_done(_name, t0)
+        return response
+    except ToolError:
+        raise
+    except Exception as exc:
+        log_error(_name, exc, t0)
+        raise ToolError(str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +228,12 @@ async def kling_v3_image_to_video(
 @mcp.tool()
 async def nano_banana_pro(
     prompt: str,
-    image_urls: Optional[list[str]] = None,
+    image_urls: list[str] = [],
     num_images: int = 1,
     resolution: str = "1K",
     aspect_ratio: str = "1:1",
     enable_web_search: bool = False,
-    seed: Optional[int] = None,
+    seed: int = -1,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Generate or edit images using Google's Nano Banana Pro model via FAL.
@@ -215,36 +251,60 @@ async def nano_banana_pro(
         enable_web_search: Use web search for current events or real-world references.
         seed: Random seed for reproducibility (0-2147483647).
     """
-    # Pick endpoint based on whether reference images are provided
-    endpoint = (
-        "fal-ai/nano-banana-pro/edit" if image_urls else "fal-ai/nano-banana-pro"
-    )
+    _name = "nano_banana_pro"
+    mode = "edit" if image_urls else "txt2img"
+    t0 = log_call(_name, {
+        "prompt": prompt, "mode": mode, "num_images": num_images,
+        "resolution": resolution, "aspect_ratio": aspect_ratio,
+    })
+    try:
+        endpoint = (
+            "fal-ai/nano-banana-pro/edit" if image_urls else "fal-ai/nano-banana-pro"
+        )
 
-    fal_args: dict = {
-        "prompt": prompt,
-        "num_images": num_images,
-        "aspect_ratio": aspect_ratio,
-        "output_format": "jpeg",
-    }
-    if resolution:
-        fal_args["resolution"] = resolution
-    if enable_web_search:
-        fal_args["enable_web_search"] = True
-    if seed is not None:
-        fal_args["seed"] = seed
-    if image_urls:
-        fal_args["image_urls"] = image_urls
+        fal_args: dict = {
+            "prompt": prompt,
+            "num_images": num_images,
+            "aspect_ratio": aspect_ratio,
+            "output_format": "jpeg",
+        }
+        if resolution:
+            fal_args["resolution"] = resolution
+        if enable_web_search:
+            fal_args["enable_web_search"] = True
+        if seed >= 0:
+            fal_args["seed"] = seed
+        if image_urls:
+            fal_args["image_urls"] = image_urls
 
-    result = await _fal_subscribe(endpoint, fal_args)
+        result = await _fal_subscribe(endpoint, fal_args, tool_name=_name)
 
-    urls = _extract_urls(result)
-    if not urls:
-        return {"error": "No image URLs in FAL response", "raw_result": result}
+        urls = _extract_urls(result)
+        if not urls:
+            err = "No image URLs in FAL response"
+            log_error(_name, ValueError(err), t0)
+            raise ToolError(err)
 
-    # Download each image and re-upload to our S3
-    uploaded: list[str] = []
-    for url in urls:
-        tmp = await _download_to_tmp(url, suffix=".jpg")
-        uploaded.append(upload(tmp))
+        log_progress(_name, f"Downloading {len(urls)} image(s) from FAL...")
+        uploaded: list[str] = []
+        for url in urls:
+            tmp = await _download_to_tmp(url, suffix=".jpg")
+            uploaded.append(upload(tmp))
 
-    return {"output_images": uploaded, "raw_result": result}
+        log_progress(_name, "Upload complete.")
+        response = {
+            "output_images": uploaded,
+            "info": {
+                "num_images": len(uploaded),
+                "resolution": resolution,
+                "aspect_ratio": aspect_ratio,
+                "mode": mode,
+            },
+        }
+        log_done(_name, t0)
+        return response
+    except ToolError:
+        raise
+    except Exception as exc:
+        log_error(_name, exc, t0)
+        raise ToolError(str(exc))
