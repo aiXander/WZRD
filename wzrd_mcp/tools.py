@@ -5,6 +5,7 @@ Each tool handles: resolve inputs (URL→local) → call wzrd → publish output
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import Optional
@@ -13,7 +14,7 @@ from urllib.parse import urlparse
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from .file_io import make_temp_dir, make_temp_path, resolve_input, upload
+from .file_io import make_temp_dir, make_temp_path, resolve_input_async, upload_async
 from ._log import log_call, log_progress, log_done, log_error, logged_tool
 from .server import mcp, get_timeout
 
@@ -48,12 +49,15 @@ async def subtract_background_frame(
         from wzrd.subtract_frame import subtract_background_file
 
         log_progress(_name, "Resolving inputs...")
-        gen_path = resolve_input(generated_image, suffix=".png")
-        bg_path = resolve_input(background_image, suffix=".png")
+        gen_path, bg_path = await asyncio.gather(
+            resolve_input_async(generated_image, suffix=".png"),
+            resolve_input_async(background_image, suffix=".png"),
+        )
         out_path = make_temp_path(suffix=".png")
 
         log_progress(_name, "Running background subtraction...")
-        _creature_img, info = subtract_background_file(
+        _creature_img, info = await asyncio.to_thread(
+            subtract_background_file,
             generated_path=gen_path,
             background_path=bg_path,
             output_path=out_path,
@@ -65,7 +69,7 @@ async def subtract_background_frame(
 
         log_progress(_name, "Uploading result...")
         result = {
-            "creature_image": upload(out_path),
+            "creature_image": await upload_async(out_path),
             "info": {
                 "mask_coverage": info.get("mask_coverage"),
                 "creature_max_brightness": info.get("creature_max_brightness"),
@@ -117,12 +121,15 @@ async def subtract_background_video(
         from wzrd.subtract_video import subtract_background_video as _subtract_bg_video
 
         log_progress(_name, "Resolving inputs...")
-        vid_path = resolve_input(video, suffix=".mp4")
-        bg_path = resolve_input(background_image, suffix=".png")
+        vid_path, bg_path = await asyncio.gather(
+            resolve_input_async(video, suffix=".mp4"),
+            resolve_input_async(background_image, suffix=".png"),
+        )
         out_path = make_temp_path(suffix=".mp4")
 
         log_progress(_name, "Processing video frames...")
-        info = _subtract_bg_video(
+        info = await asyncio.to_thread(
+            _subtract_bg_video,
             video_path=vid_path,
             background_path=bg_path,
             output_path=out_path,
@@ -136,7 +143,7 @@ async def subtract_background_video(
 
         log_progress(_name, "Uploading result...")
         result = {
-            "output_video": upload(out_path),
+            "output_video": await upload_async(out_path),
             "info": {
                 "frames_processed": info.get("frames_processed"),
                 "fps": info.get("fps"),
@@ -180,11 +187,12 @@ async def detect_projection_surface(
         from wzrd.detect import detect_projection_area
 
         log_progress(_name, "Resolving input...")
-        img_path = resolve_input(image, suffix=".png")
+        img_path = await resolve_input_async(image, suffix=".png")
         out_path = make_temp_path(suffix=".png")
 
         log_progress(_name, "Detecting projection surface...")
-        _cropped, info = detect_projection_area(
+        _cropped, info = await asyncio.to_thread(
+            detect_projection_area,
             image_path=img_path,
             output_path=out_path,
             margin=margin,
@@ -194,7 +202,7 @@ async def detect_projection_surface(
 
         log_progress(_name, "Uploading result...")
         result = {
-            "cropped_image": upload(out_path),
+            "cropped_image": await upload_async(out_path),
             "info": {
                 "corners": info.get("corners"),
                 "original_size": info.get("original_size"),
@@ -238,21 +246,24 @@ async def align_images(
         from wzrd.align import align_images_file
 
         log_progress(_name, "Resolving inputs...")
-        src_path = resolve_input(source_image, suffix=".png")
-        tgt_path = resolve_input(target_image, suffix=".png")
+        src_path, tgt_path = await asyncio.gather(
+            resolve_input_async(source_image, suffix=".png"),
+            resolve_input_async(target_image, suffix=".png"),
+        )
         out_path = make_temp_path(suffix=".png")
 
         log_progress(_name, "Running feature matching & alignment...")
-        _warped, info = align_images_file(
+        _warped, info = await asyncio.to_thread(
+            align_images_file,
             source_path=src_path,
             target_path=tgt_path,
             output_path=out_path,
-            max_features=max_features
+            max_features=max_features,
         )
 
         log_progress(_name, "Uploading result...")
         result = {
-            "aligned_image": upload(out_path),
+            "aligned_image": await upload_async(out_path),
             "info": {
                 "confidence": info.get("confidence"),
                 "method": info.get("method"),
@@ -302,11 +313,12 @@ async def darken_surface(
         from wzrd.darken import darken_image_file
 
         log_progress(_name, "Resolving input...")
-        img_path = resolve_input(image, suffix=".png")
+        img_path = await resolve_input_async(image, suffix=".png")
         out_path = make_temp_path(suffix=".png")
 
         log_progress(_name, "Running darken pipeline...")
-        result = darken_image_file(
+        result = await asyncio.to_thread(
+            darken_image_file,
             input_path=img_path,
             output_path=out_path,
             max_brightness=max_brightness,
@@ -317,12 +329,12 @@ async def darken_surface(
         )
 
         pil_image = result["image"]
-        pil_image.save(out_path)
+        await asyncio.to_thread(pil_image.save, out_path)
 
         log_progress(_name, "Uploading result...")
-        response: dict = {"darkened_image": upload(out_path)}
+        response: dict = {"darkened_image": await upload_async(out_path)}
         if result.get("video"):
-            response["alignment_video"] = upload(str(result["video"]))
+            response["alignment_video"] = await upload_async(str(result["video"]))
 
         log_done(_name, t0, response)
         return response
@@ -366,8 +378,12 @@ async def prepare_surface(
         from wzrd.prepare_surface import prepare_surface as _prepare_surface
 
         log_progress(_name, "Resolving inputs...")
-        night_path = resolve_input(night_image, suffix=".png")
-        day_path = resolve_input(day_image, suffix=".png") if day_image != "" else None
+        coros = [resolve_input_async(night_image, suffix=".png")]
+        if day_image != "":
+            coros.append(resolve_input_async(day_image, suffix=".png"))
+        resolved = await asyncio.gather(*coros)
+        night_path = resolved[0]
+        day_path = resolved[1] if len(resolved) > 1 else None
         out_path = make_temp_path(suffix=".png")
 
         if day_path:
@@ -375,7 +391,8 @@ async def prepare_surface(
         else:
             log_progress(_name, "Running darken-only pipeline...")
 
-        result = _prepare_surface(
+        result = await asyncio.to_thread(
+            _prepare_surface,
             night_image_path=night_path,
             day_image_path=day_path,
             output_path=out_path,
@@ -386,12 +403,12 @@ async def prepare_surface(
         )
 
         pil_image = result["image"]
-        pil_image.save(out_path)
+        await asyncio.to_thread(pil_image.save, out_path)
 
         log_progress(_name, "Uploading result...")
-        response: dict = {"surface_image": upload(out_path)}
+        response: dict = {"surface_image": await upload_async(out_path)}
         if result.get("video"):
-            response["alignment_video"] = upload(str(result["video"]))
+            response["alignment_video"] = await upload_async(str(result["video"]))
 
         log_done(_name, t0, response)
         return response
@@ -438,12 +455,17 @@ async def extract_color_regions(
         from wzrd.islands import extract_color_regions as _extract_color_regions
 
         log_progress(_name, "Resolving inputs...")
-        img_path = resolve_input(image, suffix=".png")
-        surface_path = resolve_input(surface_image, suffix=".png") if surface_image != "" else None
+        coros = [resolve_input_async(image, suffix=".png")]
+        if surface_image != "":
+            coros.append(resolve_input_async(surface_image, suffix=".png"))
+        resolved = await asyncio.gather(*coros)
+        img_path = resolved[0]
+        surface_path = resolved[1] if len(resolved) > 1 else None
         out_dir = make_temp_dir()
 
         log_progress(_name, "Running CIELAB color clustering...")
-        regions, output_dir = _extract_color_regions(
+        regions, output_dir = await asyncio.to_thread(
+            _extract_color_regions,
             image=img_path,
             output_dir=out_dir,
             max_colors=max_colors,
@@ -460,19 +482,31 @@ async def extract_color_regions(
         out = Path(output_dir)
 
         log_progress(_name, f"Uploading {len(regions)} regions...")
-        published_regions = []
-        for region in regions:
-            entry: dict = {"source_box": region.get("source_box")}
-            if "region_mask" in region:
-                entry["region_mask"] = upload(str(out / region["region_mask"]))
+        # Upload all region files concurrently
+        upload_tasks = []
+        upload_keys = []  # (region_index, key_name)
+        for i, region in enumerate(regions):
             if "crop_filename" in region:
-                entry["crop_path"] = upload(str(out / region["crop_filename"]))
+                upload_tasks.append(upload_async(str(out / region["crop_filename"])))
+                upload_keys.append((i, "region_mask"))
             if "surface_filename" in region:
-                entry["surface_path"] = upload(str(out / region["surface_filename"]))
-            published_regions.append(entry)
+                upload_tasks.append(upload_async(str(out / region["surface_filename"])))
+                upload_keys.append((i, "region_surface_image"))
 
         metadata_file = out / "islands.json"
-        metadata_url = upload(str(metadata_file)) if metadata_file.exists() else None
+        if metadata_file.exists():
+            upload_tasks.append(upload_async(str(metadata_file)))
+            upload_keys.append((-1, "metadata"))
+
+        upload_results = await asyncio.gather(*upload_tasks)
+
+        published_regions = [{"source_box": r.get("source_box")} for r in regions]
+        metadata_url = None
+        for (idx, key), url in zip(upload_keys, upload_results):
+            if idx == -1:
+                metadata_url = url
+            else:
+                published_regions[idx][key] = url
 
         result = {
             "regions": published_regions,
@@ -526,11 +560,12 @@ async def reproject_video(
         from wzrd.reproject import reproject_video_with_aspect
 
         log_progress(_name, "Resolving inputs...")
-        vid_path = resolve_input(video, suffix=".mp4")
+        vid_path = await resolve_input_async(video, suffix=".mp4")
         out_path = make_temp_path(suffix=".mp4")
 
         log_progress(_name, "Reprojecting video onto canvas...")
-        info = reproject_video_with_aspect(
+        info = await asyncio.to_thread(
+            reproject_video_with_aspect,
             video_path=vid_path,
             island_metadata={"x": x, "y": y, "width": width, "height": height},
             output_path=out_path,
@@ -542,7 +577,7 @@ async def reproject_video(
 
         log_progress(_name, "Uploading result...")
         result = {
-            "output_video": upload(out_path),
+            "output_video": await upload_async(out_path),
             "info": {
                 "frames_processed": info.get("frames_processed"),
                 "fps": info.get("fps"),
@@ -705,9 +740,13 @@ async def texture_flow(
         cls_name = os.getenv("MODAL_CLS_NAME", "ComfyUIPremium")
 
         log_progress(_name, f"Calling Modal endpoint ({app_name}/{cls_name})...")
-        cls = modal.Cls.from_name(app_name, cls_name)
-        instance = cls()
-        result = instance.run.remote(tool_key="texture_flow", args=args)
+
+        def _modal_call():
+            cls = modal.Cls.from_name(app_name, cls_name)
+            instance = cls()
+            return instance.run.remote(tool_key="texture_flow", args=args)
+
+        result = await asyncio.to_thread(_modal_call)
 
         log_progress(_name, "Extracting output URLs...")
 

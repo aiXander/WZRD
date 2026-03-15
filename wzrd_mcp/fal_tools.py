@@ -19,7 +19,7 @@ import httpx
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from .file_io import upload
+from .file_io import upload_async
 from ._log import log_call, log_progress, log_done, log_error, logged_tool
 from .server import mcp, get_timeout
 
@@ -202,7 +202,7 @@ async def kling_v3_image_to_video(
         video_tmp = await _download_to_tmp(urls[0], suffix=".mp4")
 
         log_progress(_name, "Uploading to S3...")
-        uploaded_url = upload(video_tmp)
+        uploaded_url = await upload_async(video_tmp)
 
         response = {
             "output_video": uploaded_url,
@@ -282,10 +282,14 @@ async def nano_banana_pro(
             raise ToolError(err)
 
         log_progress(_name, f"Downloading {len(urls)} image(s) from FAL...")
-        uploaded: list[str] = []
-        for url in urls:
-            tmp = await _download_to_tmp(url, suffix=".jpg")
-            uploaded.append(upload(tmp))
+        # Download all images concurrently
+        tmp_paths = await asyncio.gather(
+            *[_download_to_tmp(url, suffix=".jpg") for url in urls]
+        )
+        # Upload all to S3 concurrently
+        uploaded = list(await asyncio.gather(
+            *[upload_async(tmp) for tmp in tmp_paths]
+        ))
 
         log_progress(_name, "Upload complete.")
         response = {

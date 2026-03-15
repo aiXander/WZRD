@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import mimetypes
@@ -105,6 +106,21 @@ def make_temp_path(suffix: str = "", prefix: str = "wzrd_") -> str:
 def make_temp_dir(prefix: str = "wzrd_") -> str:
     """Create a temp directory."""
     return tempfile.mkdtemp(prefix=prefix)
+
+
+# ---------------------------------------------------------------------------
+# Async wrappers (offload blocking I/O to threads)
+# ---------------------------------------------------------------------------
+
+
+async def resolve_input_async(url_or_path: str, suffix: str = "") -> str:
+    """Async version of resolve_input — offloads downloads/decoding to a thread."""
+    return await asyncio.to_thread(resolve_input, url_or_path, suffix)
+
+
+async def upload_async(local_path: str) -> str:
+    """Async version of upload — offloads S3 I/O to a thread."""
+    return await asyncio.to_thread(upload, local_path)
 
 
 # ---------------------------------------------------------------------------
