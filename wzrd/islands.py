@@ -10,62 +10,118 @@ import numpy as np
 import json
 from pathlib import Path
 from typing import Union, Optional, List, Dict, Tuple, Literal
-from sklearn.cluster import KMeans
-
-
 Connectivity = Literal[4, 8]
+
+
+def _to_cielab(image: np.ndarray) -> np.ndarray:
+    """Convert BGR uint8 image to float CIELAB (L* 0-100, a*/b* -128..127)."""
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab[:, :, 0] *= 100.0 / 255.0
+    lab[:, :, 1] -= 128.0
+    lab[:, :, 2] -= 128.0
+    return lab
+
+
+def _bgr_to_cielab_pixel(bgr: Tuple[int, int, int]) -> np.ndarray:
+    """Convert a single BGR color to float CIELAB."""
+    u8 = cv2.cvtColor(np.uint8([[bgr]]), cv2.COLOR_BGR2LAB)[0, 0]
+    return np.array([
+        u8[0] * 100.0 / 255.0,
+        u8[1] - 128.0,
+        u8[2] - 128.0,
+    ], dtype=np.float32)
+
+
+def _lab_centers_to_bgr(lab_centers: np.ndarray) -> np.ndarray:
+    """Convert array of float CIELAB values (N,3) to BGR uint8 (N,3)."""
+    u8 = np.empty((len(lab_centers), 1, 3), dtype=np.uint8)
+    u8[:, 0, 0] = np.clip(lab_centers[:, 0] * 255.0 / 100.0, 0, 255).astype(np.uint8)
+    u8[:, 0, 1] = np.clip(lab_centers[:, 1] + 128.0, 0, 255).astype(np.uint8)
+    u8[:, 0, 2] = np.clip(lab_centers[:, 2] + 128.0, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(u8, cv2.COLOR_LAB2BGR).reshape(-1, 3)
 
 
 def detect_colors(
     image: np.ndarray,
-    max_colors: int = 5,
     min_pixel_fraction: float = 0.001,
     background_color: Tuple[int, int, int] = (0, 0, 0),
+    background_threshold: float = 15.0,
+    delta_e_threshold: float = 15.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Detect distinct colors in an image using K-means clustering.
+    Detect distinct colors using greedy clustering in CIELAB color space.
+
+    Automatically discovers the number of colors — no fixed cluster count
+    needed.  Colors within ``delta_e_threshold`` (approximate CIE76 ΔE) of
+    each other are merged into one cluster.  Works well for AI-generated
+    flat-color images with small intra-region variation.
 
     Args:
         image: BGR image
-        max_colors: Maximum number of colors to detect
-        min_pixel_fraction: Minimum fraction of total pixels for a color to be valid
+        min_pixel_fraction: Minimum fraction of total pixels for a color
         background_color: Background color to exclude (BGR)
+        background_threshold: ΔE from background below which a pixel is
+            treated as background and excluded from clustering
+        delta_e_threshold: ΔE threshold for merging similar colors.
+            Lower = more sensitive to subtle color differences.
 
     Returns:
         Tuple of:
         - Array of detected colors (BGR, excluding background)
-        - Quantized image with pixels snapped to nearest cluster center
+        - Foreground mask (bool ndarray, True = foreground pixel)
     """
     total_pixels = image.shape[0] * image.shape[1]
     min_pixel_count = int(total_pixels * min_pixel_fraction)
 
-    # Reshape image to list of pixels
-    pixels = image.reshape(-1, 3).astype(np.float32)
+    # Convert to CIELAB (perceptually uniform)
+    lab = _to_cielab(image)
+    bg_lab = _bgr_to_cielab_pixel(background_color)
 
-    # Use K-means to find color clusters
-    kmeans = KMeans(n_clusters=max_colors, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(pixels)
-    centers = kmeans.cluster_centers_.astype(np.uint8)
+    # Foreground mask — pixels far enough from background
+    delta_from_bg = np.sqrt(np.sum((lab - bg_lab) ** 2, axis=2))
+    fg_mask = delta_from_bg > background_threshold
 
-    # Count pixels per cluster
-    unique, counts = np.unique(labels, return_counts=True)
+    fg_lab = lab[fg_mask]
+    if len(fg_lab) == 0:
+        return np.array([], dtype=np.uint8).reshape(0, 3), fg_mask
 
-    # Filter out background and small clusters
-    valid_colors = []
-    bg = np.array(background_color, dtype=np.uint8)
+    # Light quantisation in LAB to reduce unique-pixel count for speed.
+    # Clamp to delta_e_threshold so quantisation never exceeds clustering radius.
+    q_step = min(2.0, delta_e_threshold) if delta_e_threshold > 0 else 2.0
+    fg_lab_q = np.round(fg_lab / q_step).astype(np.int32)
+    unique_q, counts = np.unique(fg_lab_q, axis=0, return_counts=True)
+    unique_lab = unique_q.astype(np.float32) * q_step
 
-    for cluster_id, count in zip(unique, counts):
-        color = centers[cluster_id]
-        # Check if this is background (within tolerance)
-        if np.linalg.norm(color.astype(float) - bg.astype(float)) < 30:
+    # Greedy clustering: largest group first, absorb within threshold
+    assigned = np.zeros(len(unique_lab), dtype=bool)
+    clusters: List[Tuple[np.ndarray, int]] = []
+
+    for idx in np.argsort(-counts):
+        if assigned[idx]:
             continue
-        if count >= min_pixel_count:
-            valid_colors.append(color)
+        seed = unique_lab[idx]
+        dists = np.sqrt(np.sum((unique_lab - seed) ** 2, axis=1))
+        in_cluster = (~assigned) & (dists <= delta_e_threshold)
+        if not np.any(in_cluster):
+            continue
 
-    # Create quantized image
-    quantized = centers[labels].reshape(image.shape)
+        c_counts = counts[in_cluster]
+        c_colors = unique_lab[in_cluster]
+        total = int(np.sum(c_counts))
+        center = np.sum(c_colors * c_counts[:, np.newaxis], axis=0) / total
 
-    return np.array(valid_colors), quantized
+        assigned[in_cluster] = True
+        clusters.append((center, total))
+
+    # Filter small clusters, sort largest first
+    clusters = [(c, n) for c, n in clusters if n >= min_pixel_count]
+    clusters.sort(key=lambda x: -x[1])
+
+    if not clusters:
+        return np.array([], dtype=np.uint8).reshape(0, 3), fg_mask
+
+    lab_centers = np.array([c for c, _ in clusters], dtype=np.float32)
+    return _lab_centers_to_bgr(lab_centers), fg_mask
 
 
 def quantize_to_colors(
@@ -240,32 +296,50 @@ def crop_island_as_mask(
 def extract_color_regions(
     image: Union[np.ndarray, str, Path],
     output_dir: Union[str, Path],
-    max_colors: int = 5,
-    min_area_fraction: float = 0.05,
+    max_colors: int = 8,
+    min_area_fraction: float = 0.01,
     background_color: Tuple[int, int, int] = (0, 0, 0),
     quantize: bool = True,
     output_min_size: Optional[int] = 512,
     surface: Optional[Union[np.ndarray, str, Path]] = None,
+    delta_e_threshold: float = 5.0,
+    background_threshold: float = 15.0,
+    merge_same_color: bool = True,
 ) -> Tuple[List[Dict], Path]:
     """
     Extract color regions from a color-segmented image.
 
-    Each distinct color (except background) becomes a single white mask crop,
-    containing ALL pixels of that color (even if disconnected).
+    Colors are discovered automatically via greedy clustering in CIELAB
+    space — no need to know the number of regions upfront.  Each spatially
+    connected component of each detected color becomes its own output region.
+
+    Primary outputs per region:
+        ``region_mask_NNN_color_RRGGBB.png`` — full-resolution binary mask
+        (white pixels = this region, at source image resolution).
+
+    Secondary aid outputs per region:
+        ``region_crop_NNN_color_RRGGBB.png`` — tight crop of the mask,
+        rescaled to ``output_min_size``.
 
     Args:
         image: Color-segmented image (BGR) as numpy array or path
-        output_dir: Directory to save cropped regions
-        max_colors: Maximum number of colors to detect
-        min_area_fraction: Minimum area as fraction of total image (0.0-1.0)
+        output_dir: Directory to save region masks and crops
+        max_colors: Upper cap on number of distinct colors to keep
+        min_area_fraction: Minimum area as fraction of total image (0.0-0.5)
         background_color: Background color to exclude (BGR)
         quantize: Whether to quantize image to clean up artifacts
-        output_min_size: Target size for min(width, height) of output crops.
-                         Crops are rescaled to this size while maintaining aspect ratio.
-                         Set to None to disable rescaling. Default: 512.
+        output_min_size: Target size for min(width, height) of cropped aid
+                         outputs.  Set to None to disable crop generation.
         surface: Optional surface image to extract corresponding crops from.
                  If resolution differs from input, the input is resized to match
                  the surface resolution (surface is treated as ground truth).
+        delta_e_threshold: CIELAB ΔE threshold for merging similar colors.
+                           Lower = more sensitive to subtle differences.
+        background_threshold: CIELAB ΔE from background below which pixels
+                              are treated as background.
+        merge_same_color: If True, all disconnected blobs of the same color
+                          are combined into a single region. If False, each
+                          spatially connected component is a separate region.
 
     Returns:
         Tuple of (list of region info dicts, output directory path)
@@ -304,33 +378,25 @@ def extract_color_regions(
     total_pixels = original_shape[0] * original_shape[1]
     min_area_pixels = int(total_pixels * min_area_fraction)
 
-    # Detect colors
-    colors, quantized = detect_colors(
+    # Detect colors (auto-discovers count via CIELAB greedy clustering)
+    colors, fg_mask = detect_colors(
         img,
-        max_colors=max_colors,
         min_pixel_fraction=min_area_fraction,
         background_color=background_color,
+        background_threshold=background_threshold,
+        delta_e_threshold=delta_e_threshold,
     )
+    colors = colors[:max_colors]
 
     if quantize:
         img = quantize_to_colors(img, colors, background_color)
 
+    # Force near-background pixels to exact background color
+    bg = np.array(background_color, dtype=np.uint8)
+    img[~fg_mask] = bg
+
     # Save quantized image for reference
     cv2.imwrite(str(output_dir / 'quantized.png'), img)
-
-    # --- Export full-resolution masks ---
-    # 01: foreground mask (white for any non-background pixel)
-    bg = np.array(background_color, dtype=np.uint8)
-    foreground_mask = np.any(img != bg, axis=2).astype(np.uint8) * 255
-    cv2.imwrite(str(output_dir / '01_foreground_mask.jpg'), foreground_mask)
-
-    # 02+: per-color masks
-    # Use tolerance=0 after quantization, otherwise 10
-    mask_tolerance = 0 if quantize else 10
-    for i, color in enumerate(colors):
-        color_mask = extract_color_mask(img, color, tolerance=mask_tolerance)
-        filename = f"{i+2:02d}_region_{i+1:02d}_mask.jpg"
-        cv2.imwrite(str(output_dir / filename), color_mask)
 
     # After quantization, pixels should be exact matches (tolerance=0)
     # Without quantization, allow some tolerance for compression artifacts
@@ -339,9 +405,12 @@ def extract_color_regions(
     # Morphological kernel for cleaning thin artifacts
     clean_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
+    img_h, img_w = original_shape
     all_regions = []
 
-    # Process each color
+    # Process each color.  When merge_same_color is True the whole color
+    # mask is one region; otherwise split by connected components.
+    region_counter = 0
     for color_idx, color in enumerate(colors):
         # Extract mask for this color
         mask = extract_color_mask(img, color, tolerance=color_tolerance)
@@ -349,82 +418,93 @@ def extract_color_regions(
         # Clean up thin edge artifacts with morphological opening
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, clean_kernel)
 
-        # Find bounding box of all pixels of this color
-        coords = np.where(mask > 0)
-        if len(coords[0]) == 0:
-            continue
+        if merge_same_color:
+            # Treat all pixels of this color as a single region
+            blobs: List[Tuple[np.ndarray, int, int, int, int, int]] = []
+            area_pixels = int(np.count_nonzero(mask))
+            if area_pixels < min_area_pixels:
+                continue
+            ys, xs = np.where(mask > 0)
+            x_min, y_min = int(xs.min()), int(ys.min())
+            x_max, y_max = int(xs.max()), int(ys.max())
+            width = x_max - x_min + 1
+            height = y_max - y_min + 1
+            blobs.append((mask, area_pixels, x_min, y_min, width, height))
+        else:
+            # Connected components — each spatial blob is its own island
+            num_cc, cc_labels, cc_stats, _ = cv2.connectedComponentsWithStats(
+                mask, connectivity=8
+            )
+            blobs = []
+            for cc_id in range(1, num_cc):
+                area_pixels = int(cc_stats[cc_id, cv2.CC_STAT_AREA])
+                if area_pixels < min_area_pixels:
+                    continue
+                full_mask = (cc_labels == cc_id).astype(np.uint8) * 255
+                blobs.append((
+                    full_mask, area_pixels,
+                    int(cc_stats[cc_id, cv2.CC_STAT_LEFT]),
+                    int(cc_stats[cc_id, cv2.CC_STAT_TOP]),
+                    int(cc_stats[cc_id, cv2.CC_STAT_WIDTH]),
+                    int(cc_stats[cc_id, cv2.CC_STAT_HEIGHT]),
+                ))
 
-        y_min, y_max = coords[0].min(), coords[0].max()
-        x_min, x_max = coords[1].min(), coords[1].max()
+        for full_mask, area_pixels, x_min, y_min, width, height in blobs:
+            color_hex = f"{color[2]:02x}{color[1]:02x}{color[0]:02x}"  # BGR to RGB hex
+            region_counter += 1
 
-        width = x_max - x_min + 1
-        height = y_max - y_min + 1
-        area_pixels = int(np.sum(mask > 0))
+            # --- Primary output: full-resolution mask ---
+            mask_filename = f"region_mask_{region_counter:03d}_color_{color_hex}.png"
+            cv2.imwrite(str(output_dir / mask_filename), full_mask)
 
-        if area_pixels < min_area_pixels:
-            continue
+            # Round source crop dimensions down to multiples of 8
+            crop_w = (width // 8) * 8
+            crop_h = (height // 8) * 8
 
-        # Round source crop dimensions down to multiples of 8
-        width = (width // 8) * 8
-        height = (height // 8) * 8
-        if width < 8 or height < 8:
-            continue
+            region_info = {
+                'region_mask': mask_filename,
+                'source_box': {
+                    'x': x_min,
+                    'y': y_min,
+                    'width': int(crop_w) if crop_w >= 8 else int(width),
+                    'height': int(crop_h) if crop_h >= 8 else int(height),
+                },
+                'area_pixels': area_pixels,
+            }
 
-        # Crop the mask using the rounded dimensions
-        crop = mask[y_min:y_min+height, x_min:x_min+width]
+            # --- Secondary aid output: tight crop (rescaled) ---
+            if output_min_size is not None and crop_w >= 8 and crop_h >= 8:
+                crop = full_mask[y_min:y_min+crop_h, x_min:x_min+crop_w].copy()
 
-        # Compute target output dimensions (used for both mask and surface crops)
-        out_w, out_h = width, height
-        if output_min_size is not None:
-            min_dim = min(width, height)
-            if min_dim > 0:
-                scale = output_min_size / min_dim
-                out_w = int(round(width * scale))
-                out_h = int(round(height * scale))
+                out_w, out_h = crop_w, crop_h
+                min_dim = min(crop_w, crop_h)
+                if min_dim > 0:
+                    scale = output_min_size / min_dim
+                    out_w = int(round(crop_w * scale))
+                    out_h = int(round(crop_h * scale))
 
-        # Ensure dimensions are multiples of 8 (required by many image models)
-        out_w = max(8, (out_w // 8) * 8)
-        out_h = max(8, (out_h // 8) * 8)
+                # Ensure dimensions are multiples of 8
+                out_w = max(8, (out_w // 8) * 8)
+                out_h = max(8, (out_h // 8) * 8)
 
-        # Rescale mask crop to target dimensions
-        if (out_w, out_h) != (width, height):
-            crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-            # Re-threshold to keep it binary after interpolation
-            _, crop = cv2.threshold(crop, 127, 255, cv2.THRESH_BINARY)
+                if (out_w, out_h) != (crop_w, crop_h):
+                    crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+                    _, crop = cv2.threshold(crop, 127, 255, cv2.THRESH_BINARY)
 
-        # Generate filename with color info
-        color_hex = f"{color[2]:02x}{color[1]:02x}{color[0]:02x}"  # BGR to RGB hex
-        filename = f"region_{color_idx+1:03d}_color_{color_hex}.png"
+                crop_filename = f"region_crop_{region_counter:03d}_color_{color_hex}.png"
+                cv2.imwrite(str(output_dir / crop_filename), crop)
+                region_info['crop_filename'] = crop_filename
 
-        # Save crop
-        cv2.imwrite(str(output_dir / filename), crop)
+                # Surface crop (same bbox / scale as the mask crop)
+                if surface_img is not None:
+                    surface_crop = surface_img[y_min:y_min+crop_h, x_min:x_min+crop_w].copy()
+                    if (out_w, out_h) != (crop_w, crop_h):
+                        surface_crop = cv2.resize(surface_crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+                    surface_filename = f"region_crop_{region_counter:03d}_color_{color_hex}_surface.png"
+                    cv2.imwrite(str(output_dir / surface_filename), surface_crop)
+                    region_info['surface_filename'] = surface_filename
 
-        # Save corresponding surface crop if surface image provided
-        surface_filename = None
-        if surface_img is not None:
-            # Crop the same region from surface image (using rounded dimensions)
-            surface_crop = surface_img[y_min:y_min+height, x_min:x_min+width].copy()
-
-            # Rescale to exactly match the mask crop dimensions
-            if (out_w, out_h) != (width, height):
-                surface_crop = cv2.resize(surface_crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-
-            surface_filename = f"region_{color_idx+1:03d}_color_{color_hex}_surface.png"
-            cv2.imwrite(str(output_dir / surface_filename), surface_crop)
-
-        # Build metadata - minimal info needed for reconstruction
-        region_info = {
-            'filename': filename,
-            'source_box': {
-                'x': int(x_min),
-                'y': int(y_min),
-                'width': int(width),
-                'height': int(height),
-            },
-        }
-        if surface_filename is not None:
-            region_info['surface_filename'] = surface_filename
-        all_regions.append(region_info)
+            all_regions.append(region_info)
 
     # Save metadata - minimal info needed for reconstruction
     metadata = {
@@ -628,15 +708,21 @@ def _cli():
     )
     parser.add_argument('input', help='Input image path')
     parser.add_argument('-o', '--output', help='Output directory')
-    parser.add_argument('--max-colors', type=int, default=5,
-                        help='Maximum colors to detect (default: 5)')
-    parser.add_argument('--min-area', type=float, default=0.001,
-                        help='Minimum region area as fraction of image (default: 0.001)')
+    parser.add_argument('--max-colors', type=int, default=8,
+                        help='Upper cap on number of distinct colors (default: 8)')
+    parser.add_argument('--min-area', type=float, default=0.01,
+                        help='Minimum region area as fraction of image (default: 0.01)')
     parser.add_argument('--no-quantize', action='store_true',
                         help='Skip quantization step')
     parser.add_argument('--output-min-size', type=int, default=512,
                         help='Rescale crops so min(w,h)=this value (default: 512, use 0 to disable)')
+    parser.add_argument('--delta-e', type=float, default=15.0,
+                        help='CIELAB deltaE threshold for merging similar colors (default: 15.0)')
+    parser.add_argument('--bg-threshold', type=float, default=15.0,
+                        help='CIELAB deltaE from background to treat as background (default: 15.0)')
     parser.add_argument('--surface', help='Optional surface image to extract corresponding crops from')
+    parser.add_argument('--no-merge', action='store_true',
+                        help='Split same-color disconnected blobs into separate regions')
 
     args = parser.parse_args()
 
@@ -654,13 +740,16 @@ def _cli():
         quantize=not args.no_quantize,
         output_min_size=output_min_size,
         surface=args.surface,
+        delta_e_threshold=args.delta_e,
+        background_threshold=args.bg_threshold,
+        merge_same_color=not args.no_merge,
     )
 
     print(f"Extracted {len(regions)} color regions to {out_path}")
     for region in regions:
         box = region['source_box']
         surface_info = f" + {region['surface_filename']}" if 'surface_filename' in region else ""
-        print(f"  - {region['filename']}{surface_info}: source_box ({box['x']}, {box['y']}, {box['width']}x{box['height']})")
+        print(f"  - {region['region_mask']}{surface_info}: source_box ({box['x']}, {box['y']}, {box['width']}x{box['height']})")
 
 
 if __name__ == '__main__':

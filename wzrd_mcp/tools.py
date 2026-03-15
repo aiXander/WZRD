@@ -409,22 +409,28 @@ async def prepare_surface(
 @logged_tool
 async def extract_color_regions(
     image: str,
-    max_colors: int = 5,
-    min_area_fraction: float = 0.05,
+    max_colors: int = 8,
+    min_area_fraction: float = 0.01,
     surface_image: str = "",
     output_min_size: int = 512,
+    delta_e_threshold: float = 5.0,
+    background_threshold: float = 15.0,
+    merge_same_color: bool = True,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Segment an image into color-based regions (islands) using K-means clustering.
+    """Segment an image into color-based regions (islands) using greedy clustering in CIELAB color space.
 
-    Useful for splitting a surface into zones for independent content projection.
+    Automatically discovers the number of distinct colors. Useful for splitting a surface into zones for independent content projection.
 
     Args:
         image: URL or path to the input image.
-        max_colors: Maximum number of color clusters.
+        max_colors: Upper cap on number of distinct colors to keep.
         min_area_fraction: Minimum region size as fraction of total image area.
         surface_image: Optional surface image to extract corresponding region crops from.
         output_min_size: Minimum output dimension in pixels for each region crop.
+        delta_e_threshold: CIELAB deltaE threshold for merging similar colors. Lower = more sensitive to subtle differences. Default 15.0.
+        background_threshold: CIELAB deltaE from background below which pixels are treated as background. Default 15.0.
+        merge_same_color: If true, all disconnected blobs of the same color are combined into one region. Default true.
     """
     _name = "extract_color_regions"
     t0 = time.time()
@@ -436,7 +442,7 @@ async def extract_color_regions(
         surface_path = resolve_input(surface_image, suffix=".png") if surface_image != "" else None
         out_dir = make_temp_dir()
 
-        log_progress(_name, "Running K-means clustering...")
+        log_progress(_name, "Running CIELAB color clustering...")
         regions, output_dir = _extract_color_regions(
             image=img_path,
             output_dir=out_dir,
@@ -444,6 +450,9 @@ async def extract_color_regions(
             min_area_fraction=min_area_fraction,
             surface=surface_path,
             output_min_size=output_min_size,
+            delta_e_threshold=delta_e_threshold,
+            background_threshold=background_threshold,
+            merge_same_color=merge_same_color,
         )
 
         from pathlib import Path
@@ -454,8 +463,10 @@ async def extract_color_regions(
         published_regions = []
         for region in regions:
             entry: dict = {"source_box": region.get("source_box")}
-            if "filename" in region:
-                entry["mask_path"] = upload(str(out / region["filename"]))
+            if "region_mask" in region:
+                entry["region_mask"] = upload(str(out / region["region_mask"]))
+            if "crop_filename" in region:
+                entry["crop_path"] = upload(str(out / region["crop_filename"]))
             if "surface_filename" in region:
                 entry["surface_path"] = upload(str(out / region["surface_filename"]))
             published_regions.append(entry)
