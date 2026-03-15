@@ -741,12 +741,9 @@ async def texture_flow(
 
         log_progress(_name, f"Calling Modal endpoint ({app_name}/{cls_name})...")
 
-        def _modal_call():
-            cls = modal.Cls.from_name(app_name, cls_name)
-            instance = cls()
-            return instance.run.remote(tool_key="texture_flow", args=args)
-
-        result = await asyncio.to_thread(_modal_call)
+        cls = modal.Cls.from_name(app_name, cls_name)
+        instance = cls()
+        result = await instance.run.remote.aio(tool_key="texture_flow", args=args)
 
         log_progress(_name, "Extracting output URLs...")
 

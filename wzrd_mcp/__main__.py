@@ -42,8 +42,13 @@ def main() -> None:
     _log.DEBUG = args.debug
 
     from .server import mcp
+    from ._log import TimingMiddleware
 
-    mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    asgi_app = mcp.http_app(transport="streamable-http")
+    app = TimingMiddleware(asgi_app)
+
+    import uvicorn
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
