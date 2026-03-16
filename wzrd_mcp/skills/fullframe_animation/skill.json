@@ -1,0 +1,53 @@
+{
+  "name": "fullframe_animation",
+  "description": "Generate a full-frame projection animation from a surface image using Kling video generation, subtract the background, and preview the simulated view.",
+  "tags": ["kling", "cinematic", "animation", "preview"],
+  "inputs": {
+    "surface_image": {
+      "type": "string",
+      "description": "URL or path to the prepared projection surface image (with non-reflective regions blacked out).",
+      "required": true
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Creative prompt describing the desired animation/motion.",
+      "required": true
+    },
+    "duration": {
+      "type": "string",
+      "description": "Video duration in seconds (3-15). Default '5'.",
+      "required": false
+    }
+  },
+  "steps": [
+    {
+      "tool": "kling_v3_image_to_video",
+      "description": "Generate a cinematic video from the surface image using Kling v3.",
+      "params": {
+        "prompt": "{input.prompt}",
+        "start_image_url": "{input.surface_image}",
+        "duration": "{input.duration}",
+        "aspect_ratio": "16:9"
+      },
+      "output_key": "kling_video"
+    },
+    {
+      "tool": "subtract_background_video",
+      "description": "Remove the static surface background to extract only the animated additive light content.",
+      "params": {
+        "video": "{steps.kling_video.output_video}",
+        "background_image": "{input.surface_image}"
+      },
+      "output_key": "projector_output"
+    },
+    {
+      "tool": "simulate_view",
+      "description": "Preview the projection on the actual surface.",
+      "params": {
+        "projector_video": "{steps.projector_output.output_video}",
+        "surface_image": "{input.surface_image}"
+      },
+      "output_key": "preview"
+    }
+  ]
+}

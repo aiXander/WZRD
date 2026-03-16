@@ -3,6 +3,9 @@
 Deploy with:
     modal deploy wzrd_mcp/modal_app.py
 
+Deploy without auth:
+    WZRD_NO_AUTH=1 modal deploy wzrd_mcp/modal_app.py
+
 Authentication:
     Set WZRD_API_KEY in your Modal secret (eve-secrets-PROD).
     Clients must send: Authorization: Bearer <key>
@@ -13,6 +16,8 @@ from __future__ import annotations
 import os
 
 import modal
+
+_NO_AUTH_AT_DEPLOY = os.environ.get("WZRD_NO_AUTH", "0") == "1"
 
 app = modal.App("wzrd-mcp")
 
@@ -28,7 +33,9 @@ image = (
         "numpy>=2.2.0",
         "opencv-python>=4.8.0,<4.11.0",
         "starlette",
+        "fal_client",
     )
+    .env({"WZRD_NO_AUTH": "1" if _NO_AUTH_AT_DEPLOY else "0"})
     .add_local_python_source("wzrd", "wzrd_mcp")
 )
 
@@ -82,7 +89,7 @@ class ApiKeyMiddleware:
     timeout=600,
     secrets=[modal.Secret.from_name("eve-secrets-PROD")],
     enable_memory_snapshot=True,
-    container_idle_timeout=120,
+    scaledown_window=120,
 )
 class McpServer:
     @modal.enter(snap=True)
@@ -94,4 +101,6 @@ class McpServer:
 
     @modal.asgi_app()
     def web(self):
+        if os.environ.get("WZRD_NO_AUTH", "0") == "1":
+            return self._asgi_app
         return ApiKeyMiddleware(self._asgi_app)

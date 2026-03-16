@@ -89,6 +89,8 @@ __all__ = [
     'AlignmentResult',
     # Surface preparation (use: from wzrd.prepare_surface import prepare_surface)
     'prepare_surface',
+    # Simulate view (lazy)
+    'simulate_view',
     # Utils
     'parse_aspect_ratio',
     'get_aspect_ratio',
@@ -132,4 +134,7 @@ def __getattr__(name):
     if name in ('detect_projection_area', 'detect_projection_from_array'):
         from . import detect
         return getattr(detect, name)
+    if name == 'simulate_view':
+        from .simulate_view import simulate_view as _fn
+        return _fn
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

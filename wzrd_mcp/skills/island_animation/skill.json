@@ -1,0 +1,60 @@
+{
+  "name": "island_animation",
+  "description": "Segment a surface into color regions (islands), generate independent animated content for each region, and reproject them back onto the full projection canvas.",
+  "tags": ["islands", "segmentation", "animation", "reproject"],
+  "inputs": {
+    "surface_image": {
+      "type": "string",
+      "description": "URL or path to the prepared (darkened) projection surface image.",
+      "required": true
+    },
+    "style_images": {
+      "type": "array",
+      "description": "1-6 style image URLs for TextureFlow content generation per island.",
+      "required": true
+    },
+    "max_colors": {
+      "type": "integer",
+      "description": "Maximum number of color regions to segment. Default 8.",
+      "required": false
+    }
+  },
+  "steps": [
+    {
+      "tool": "extract_color_regions",
+      "description": "Segment the surface image into distinct color-based regions (islands).",
+      "params": {
+        "image": "{input.surface_image}",
+        "surface_image": "{input.surface_image}",
+        "max_colors": "{input.max_colors}"
+      },
+      "output_key": "regions"
+    },
+    {
+      "tool": "texture_flow",
+      "description": "Generate animated content for each island region using the region mask as a diffusion mask. Repeat this step for each region in the segmentation output.",
+      "params": {
+        "images": "{input.style_images}",
+        "diffusion_mask": "{steps.regions.regions[i].region_mask}",
+        "n_seconds": 5.0,
+        "width": 512,
+        "height": 384
+      },
+      "output_key": "island_videos",
+      "loop_over": "steps.regions.regions"
+    },
+    {
+      "tool": "reproject_video",
+      "description": "Reproject each island video back onto the full projection canvas at its original position. Repeat for each island.",
+      "params": {
+        "video": "{steps.island_videos[i].output_video}",
+        "x": "{steps.regions.regions[i].source_box.x}",
+        "y": "{steps.regions.regions[i].source_box.y}",
+        "width": "{steps.regions.regions[i].source_box.width}",
+        "height": "{steps.regions.regions[i].source_box.height}"
+      },
+      "output_key": "reprojected",
+      "loop_over": "steps.regions.regions"
+    }
+  ]
+}

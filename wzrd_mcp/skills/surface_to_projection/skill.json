@@ -1,0 +1,82 @@
+{
+  "name": "surface_to_projection",
+  "description": "End-to-end pipeline: prepare a projection surface from photos, generate animated content with TextureFlow, subtract the background, and preview the simulated real-world view.",
+  "tags": ["projection", "surface", "animation", "preview"],
+  "inputs": {
+    "night_image": {
+      "type": "string",
+      "description": "URL or path to nighttime photo with projector on (for surface detection).",
+      "required": true
+    },
+    "day_image": {
+      "type": "string",
+      "description": "URL or path to daytime photo of the same surface (triggers full detect+align+darken pipeline). Optional — omit for darken-only.",
+      "required": false
+    },
+    "style_images": {
+      "type": "array",
+      "description": "1-6 style image URLs for TextureFlow content generation.",
+      "required": true
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Creative prompt describing the desired projection content.",
+      "required": false
+    }
+  },
+  "steps": [
+    {
+      "tool": "prepare_surface",
+      "description": "Detect, align, and darken the projection surface from photos.",
+      "params": {
+        "night_image": "{input.night_image}",
+        "day_image": "{input.day_image}",
+        "target_aspect": "16:9",
+        "max_brightness": 0.20
+      },
+      "output_key": "surface"
+    },
+    {
+      "tool": "nano_banana_pro",
+      "description": "Mask out non-reflective regions (sky, etc.) to pure black using the prepared surface.",
+      "params": {
+        "prompt": "Remove all sky and non-reflective regions, replace them with pure black (#000000). Keep the building/surface texture intact.",
+        "image_urls": ["{steps.surface.surface_image}"]
+      },
+      "output_key": "masked_surface"
+    },
+    {
+      "tool": "texture_flow",
+      "description": "Generate animated projection content from style images.",
+      "params": {
+        "images": "{input.style_images}",
+        "n_seconds": 5.0,
+        "width": 512,
+        "height": 384,
+        "use_controlnet1": true,
+        "control_input": "{steps.masked_surface.output_images[0]}",
+        "preprocessor1": "Scribble_XDoG_Preprocessor",
+        "controlnet_strength1": 0.45
+      },
+      "output_key": "generated"
+    },
+    {
+      "tool": "subtract_background_video",
+      "description": "Remove the background from the generated video to get purely additive light output.",
+      "params": {
+        "video": "{steps.generated.output_video}",
+        "background_image": "{steps.masked_surface.output_images[0]}"
+      },
+      "output_key": "projector_output"
+    },
+    {
+      "tool": "simulate_view",
+      "description": "Preview what the projection will look like on the actual surface.",
+      "params": {
+        "projector_video": "{steps.projector_output.output_video}",
+        "surface_image": "{steps.masked_surface.output_images[0]}"
+      },
+      "output_key": "preview"
+    }
+  ]
+}

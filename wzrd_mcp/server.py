@@ -26,6 +26,8 @@ _DEFAULT_TOOLS = {
     "texture_flow": {"enabled": True, "timeout": 1500},
     "kling_v3_image_to_video": {"enabled": True, "timeout": 300},
     "nano_banana_pro": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
+    "simulate_view": {"enabled": True, "timeout": 300},
+    "capture_camera_snapshot": {"enabled": True, "timeout": 30},
 }
 
 
@@ -84,6 +86,7 @@ mcp = FastMCP(
 # This must happen after `mcp` is defined since tools.py imports `mcp` from here.
 from . import tools as _tools  # noqa: E402, F401
 from . import fal_tools as _fal_tools  # noqa: E402, F401
+from . import local_tools as _local_tools  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
 # Filter out disabled tools based on config
@@ -95,7 +98,7 @@ def _apply_tool_config() -> None:
     for name, cfg in TOOL_CONFIG.items():
         if not cfg.get("enabled", True):
             try:
-                mcp.remove_tool(name)
+                mcp.local_provider.remove_tool(name)
             except (KeyError, ValueError):
                 pass
 

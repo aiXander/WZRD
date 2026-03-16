@@ -792,3 +792,90 @@ async def texture_flow(
     except Exception as exc:
         log_error(_name, exc, t0)
         raise ToolError(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Tool 10: simulate_view
+# ---------------------------------------------------------------------------
+@mcp.tool(timeout=get_timeout("simulate_view"))
+@logged_tool
+async def simulate_view(
+    projector_video: str,
+    surface_image: str,
+    surface_weight: float = 0.35,
+    projection_strength: float = 1.0,
+    ambient: float = 0.0,
+    codec: str = "libx264",
+    crf: int = 18,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Simulate the real-world viewing experience of additive projection mapping.
+
+    Composites a projector output video (purely additive light on black background)
+    onto a projection surface image to predict what a human viewer would actually see.
+    Non-reflective regions (sky, etc. turned to black) stay dark — projected light
+    is modulated by surface reflectivity derived from the surface image luminance.
+
+    Use this after generating projector content (via texture_flow, kling, or
+    subtract_background_video) to preview how the projection will look on the
+    actual surface before projecting.
+
+    Args:
+        projector_video: URL or path to the projector output video (additive light
+            content — a background-subtracted kling video or raw textureflow output).
+        surface_image: URL or path to the projection surface image. Ideally
+            pre-processed so non-reflective regions (sky, etc.) are pure black
+            (e.g. via nano_banana_pro masking).
+        surface_weight: How visible the underlying surface texture is (0.0-1.0).
+            Lower = more contrast from projection only, higher = more visible
+            ambient surface detail. Default 0.35.
+        projection_strength: Multiplier for projected light intensity (0.5-2.0).
+            Values > 1.0 simulate a brighter projector. Default 1.0.
+        ambient: Minimum reflectivity floor for non-black surface pixels (0.0-0.3).
+            Adds subtle light bounce on dark (but not black) surface areas.
+        codec: Video codec (e.g. libx264, h264_videotoolbox).
+        crf: Video quality — lower is better (0-51).
+    """
+    _name = "simulate_view"
+    t0 = time.time()
+    try:
+        from wzrd.simulate_view import simulate_view as _simulate_view
+
+        log_progress(_name, "Resolving inputs...")
+        vid_path, surf_path = await asyncio.gather(
+            resolve_input_async(projector_video, suffix=".mp4"),
+            resolve_input_async(surface_image, suffix=".png"),
+        )
+        out_path = make_temp_path(suffix=".mp4")
+
+        log_progress(_name, "Compositing projector video onto surface...")
+        info = await asyncio.to_thread(
+            _simulate_view,
+            projector_video_path=vid_path,
+            surface_image_path=surf_path,
+            output_path=out_path,
+            surface_weight=surface_weight,
+            projection_strength=projection_strength,
+            ambient=ambient,
+            codec=codec,
+            crf=crf,
+        )
+
+        log_progress(_name, "Uploading result...")
+        result = {
+            "simulated_view_video": await upload_async(out_path),
+            "info": {
+                "frames_processed": info.get("frames_processed"),
+                "fps": info.get("fps"),
+                "video_size": info.get("video_size"),
+                "surface_weight": info.get("surface_weight"),
+                "projection_strength": info.get("projection_strength"),
+            },
+        }
+        log_done(_name, t0, result)
+        return result
+    except ToolError:
+        raise
+    except Exception as exc:
+        log_error(_name, exc, t0)
+        raise ToolError(str(exc))
