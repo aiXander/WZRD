@@ -1014,7 +1014,8 @@ def detect_projection_area(
 
     # Save cropped output if path provided
     if output_path is not None:
-        cv2.imwrite(str(output_path), cropped)
+        _params = [cv2.IMWRITE_WEBP_QUALITY, 90] if str(output_path).lower().endswith(".webp") else []
+        cv2.imwrite(str(output_path), cropped, _params)
         info['output_path'] = str(output_path)
 
     # Save preview if path provided

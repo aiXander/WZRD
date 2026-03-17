@@ -396,7 +396,7 @@ def extract_color_regions(
     img[~fg_mask] = bg
 
     # Save quantized image for reference
-    cv2.imwrite(str(output_dir / 'quantized.png'), img)
+    cv2.imwrite(str(output_dir / 'quantized.webp'), img, [cv2.IMWRITE_WEBP_QUALITY, 90])
 
     # After quantization, pixels should be exact matches (tolerance=0)
     # Without quantization, allow some tolerance for compression artifacts
@@ -454,8 +454,8 @@ def extract_color_regions(
             region_counter += 1
 
             # --- Primary output: full-resolution mask ---
-            mask_filename = f"region_mask_{region_counter:03d}_color_{color_hex}.png"
-            cv2.imwrite(str(output_dir / mask_filename), full_mask)
+            mask_filename = f"region_mask_{region_counter:03d}_color_{color_hex}.webp"
+            cv2.imwrite(str(output_dir / mask_filename), full_mask, [cv2.IMWRITE_WEBP_QUALITY, 90])
 
             # Round source crop dimensions down to multiples of 8
             crop_w = (width // 8) * 8
@@ -491,8 +491,8 @@ def extract_color_regions(
                     crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
                     _, crop = cv2.threshold(crop, 127, 255, cv2.THRESH_BINARY)
 
-                crop_filename = f"region_crop_{region_counter:03d}_color_{color_hex}.png"
-                cv2.imwrite(str(output_dir / crop_filename), crop)
+                crop_filename = f"region_crop_{region_counter:03d}_color_{color_hex}.webp"
+                cv2.imwrite(str(output_dir / crop_filename), crop, [cv2.IMWRITE_WEBP_QUALITY, 90])
                 region_info['crop_filename'] = crop_filename
 
                 # Surface crop (same bbox / scale as the mask crop)
@@ -500,8 +500,8 @@ def extract_color_regions(
                     surface_crop = surface_img[y_min:y_min+crop_h, x_min:x_min+crop_w].copy()
                     if (out_w, out_h) != (crop_w, crop_h):
                         surface_crop = cv2.resize(surface_crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-                    surface_filename = f"region_crop_{region_counter:03d}_color_{color_hex}_surface.png"
-                    cv2.imwrite(str(output_dir / surface_filename), surface_crop)
+                    surface_filename = f"region_crop_{region_counter:03d}_color_{color_hex}_surface.webp"
+                    cv2.imwrite(str(output_dir / surface_filename), surface_crop, [cv2.IMWRITE_WEBP_QUALITY, 90])
                     region_info['surface_filename'] = surface_filename
 
             all_regions.append(region_info)
@@ -597,7 +597,8 @@ def reassemble_regions(
         )
 
     if output_path:
-        cv2.imwrite(str(output_path), output)
+        _params = [cv2.IMWRITE_WEBP_QUALITY, 90] if str(output_path).lower().endswith(".webp") else []
+        cv2.imwrite(str(output_path), output, _params)
 
     return output
 
@@ -655,9 +656,9 @@ def save_islands(
 
     for island in islands:
         crop = crop_island(binary_img, island)
-        filename = f"island_{island['id']}.png"
+        filename = f"island_{island['id']}.webp"
         save_path = output_dir / filename
-        cv2.imwrite(str(save_path), crop)
+        cv2.imwrite(str(save_path), crop, [cv2.IMWRITE_WEBP_QUALITY, 90])
         island['filename'] = filename
 
     if save_json:

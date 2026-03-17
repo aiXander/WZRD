@@ -274,7 +274,8 @@ def subtract_background_file(
 
     # Save outputs
     if output_path is not None:
-        creature_img.save(output_path)
+        save_kw = {"quality": 90} if str(output_path).lower().endswith(".webp") else {}
+        creature_img.save(output_path, **save_kw)
         info['output_path'] = str(output_path)
 
     if preview and output_path is not None:

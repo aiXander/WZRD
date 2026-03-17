@@ -40,8 +40,8 @@ def _capture_frame(camera_index: int = 0, warmup_frames: int = 5) -> str:
 
         _CAPTURES_DIR.mkdir(exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = str(_CAPTURES_DIR / f"cam{camera_index}_{stamp}.png")
-        cv2.imwrite(out_path, frame)
+        out_path = str(_CAPTURES_DIR / f"cam{camera_index}_{stamp}.webp")
+        cv2.imwrite(out_path, frame, [cv2.IMWRITE_WEBP_QUALITY, 90])
         return out_path
     finally:
         cap.release()

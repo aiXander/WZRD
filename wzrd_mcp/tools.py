@@ -53,7 +53,7 @@ async def subtract_background_frame(
             resolve_input_async(generated_image, suffix=".png"),
             resolve_input_async(background_image, suffix=".png"),
         )
-        out_path = make_temp_path(suffix=".png")
+        out_path = make_temp_path(suffix=".webp")
 
         log_progress(_name, "Running background subtraction...")
         _creature_img, info = await asyncio.to_thread(
@@ -188,7 +188,7 @@ async def detect_projection_surface(
 
         log_progress(_name, "Resolving input...")
         img_path = await resolve_input_async(image, suffix=".png")
-        out_path = make_temp_path(suffix=".png")
+        out_path = make_temp_path(suffix=".webp")
 
         log_progress(_name, "Detecting projection surface...")
         _cropped, info = await asyncio.to_thread(
@@ -250,7 +250,7 @@ async def align_images(
             resolve_input_async(source_image, suffix=".png"),
             resolve_input_async(target_image, suffix=".png"),
         )
-        out_path = make_temp_path(suffix=".png")
+        out_path = make_temp_path(suffix=".webp")
 
         log_progress(_name, "Running feature matching & alignment...")
         _warped, info = await asyncio.to_thread(
@@ -314,7 +314,7 @@ async def darken_surface(
 
         log_progress(_name, "Resolving input...")
         img_path = await resolve_input_async(image, suffix=".png")
-        out_path = make_temp_path(suffix=".png")
+        out_path = make_temp_path(suffix=".webp")
 
         log_progress(_name, "Running darken pipeline...")
         result = await asyncio.to_thread(
@@ -329,7 +329,7 @@ async def darken_surface(
         )
 
         pil_image = result["image"]
-        await asyncio.to_thread(pil_image.save, out_path)
+        await asyncio.to_thread(pil_image.save, out_path, quality=90)
 
         log_progress(_name, "Uploading result...")
         response: dict = {"darkened_image": await upload_async(out_path)}
@@ -384,7 +384,7 @@ async def prepare_surface(
         resolved = await asyncio.gather(*coros)
         night_path = resolved[0]
         day_path = resolved[1] if len(resolved) > 1 else None
-        out_path = make_temp_path(suffix=".png")
+        out_path = make_temp_path(suffix=".webp")
 
         if day_path:
             log_progress(_name, "Running full pipeline: detect → align → darken...")
@@ -403,7 +403,7 @@ async def prepare_surface(
         )
 
         pil_image = result["image"]
-        await asyncio.to_thread(pil_image.save, out_path)
+        await asyncio.to_thread(pil_image.save, out_path, quality=90)
 
         log_progress(_name, "Uploading result...")
         response: dict = {"surface_image": await upload_async(out_path)}
