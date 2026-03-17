@@ -238,12 +238,22 @@ async def nano_banana_pro(
     """Generate or edit images using Google's Nano Banana Pro model via FAL.
 
     When no image_urls are provided this runs text-to-image generation.
-    When image_urls are provided it switches to image editing mode, using the
-    provided images as references (up to 14).
+    When image_urls are provided it switches to editing/reference mode: the
+    images become named references that the prompt can address as image_1,
+    image_2, … image_N (matching the order they appear in the list, up to 14).
+
+    For example, with two reference images you might write a prompt like:
+    "Place the character from image_1 into the landscape shown in image_2,
+    matching the lighting and color palette of image_2."
 
     Args:
-        prompt: Text description of the desired image(s).
-        image_urls: Optional list of input image URLs to enable editing mode (up to 14).
+        prompt: Text description of the desired image(s). When reference images
+            are provided, use image_1, image_2, … image_N in the prompt to
+            refer to specific input images by their position in the list.
+        image_urls: Optional list of reference image URLs (up to 14). Each URL
+            becomes a named reference: the first URL is image_1, the second is
+            image_2, and so on. The prompt should explicitly mention these
+            references to control how each image influences the output.
         num_images: Number of images to generate (1-4).
         resolution: Output resolution. Choices: "1K", "2K", "4K" (4K costs 2x).
         aspect_ratio: Output aspect ratio. Choices: "auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16".
