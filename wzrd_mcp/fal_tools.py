@@ -58,8 +58,14 @@ def _user_error(error: Exception) -> str:
     return str(error)
 
 
-async def _fal_subscribe(endpoint: str, args: dict, tool_name: str = "") -> dict:
-    """Call fal_client.subscribe in a thread with retry + exponential backoff."""
+async def _fal_subscribe(
+    endpoint: str, args: dict, tool_name: str = "", ctx: Optional[Context] = None,
+) -> dict:
+    """Call fal_client.subscribe in a thread with retry + exponential backoff.
+
+    When *ctx* is provided, sends periodic MCP progress notifications as
+    keepalives so the client connection doesn't time out during long FAL jobs.
+    """
     if not os.getenv("FAL_KEY"):
         raise ValueError("FAL_KEY environment variable is not set")
 
@@ -79,13 +85,35 @@ async def _fal_subscribe(endpoint: str, args: dict, tool_name: str = "") -> dict
                         if tool_name:
                             log_progress(tool_name, f"FAL: {msg}")
 
-            result = await asyncio.to_thread(
-                fal_client.subscribe,
-                endpoint,
-                arguments=args,
-                with_logs=True,
-                on_queue_update=_on_update,
+            # Run subscribe in a thread; meanwhile send keepalive progress
+            # notifications every 15s so the MCP client doesn't drop us.
+            subscribe_task = asyncio.ensure_future(
+                asyncio.to_thread(
+                    fal_client.subscribe,
+                    endpoint,
+                    arguments=args,
+                    with_logs=True,
+                    on_queue_update=_on_update,
+                )
             )
+
+            tick = 0
+            while not subscribe_task.done():
+                await asyncio.sleep(15)
+                if subscribe_task.done():
+                    break
+                tick += 1
+                if ctx:
+                    try:
+                        await ctx.report_progress(
+                            progress=tick,
+                            total=0,
+                            message=f"Waiting for FAL ({tick * 15}s elapsed)…",
+                        )
+                    except Exception:
+                        pass  # best-effort keepalive
+
+            result = await subscribe_task
             return result
 
         except Exception as exc:
@@ -189,7 +217,7 @@ async def kling_v3_image_to_video(
 
         result = await _fal_subscribe(
             "fal-ai/kling-video/v3/standard/image-to-video", fal_args,
-            tool_name=_name,
+            tool_name=_name, ctx=ctx,
         )
 
         urls = _extract_urls(result)
@@ -199,9 +227,19 @@ async def kling_v3_image_to_video(
             raise ToolError(err)
 
         log_progress(_name, "Downloading video from FAL...")
+        if ctx:
+            try:
+                await ctx.report_progress(progress=90, total=100, message="Downloading video from FAL…")
+            except Exception:
+                pass
         video_tmp = await _download_to_tmp(urls[0], suffix=".mp4")
 
         log_progress(_name, "Uploading to S3...")
+        if ctx:
+            try:
+                await ctx.report_progress(progress=95, total=100, message="Uploading to S3…")
+            except Exception:
+                pass
         uploaded_url = await upload_async(video_tmp)
 
         response = {
@@ -283,7 +321,7 @@ async def nano_banana_pro(
         if image_urls:
             fal_args["image_urls"] = image_urls
 
-        result = await _fal_subscribe(endpoint, fal_args, tool_name=_name)
+        result = await _fal_subscribe(endpoint, fal_args, tool_name=_name, ctx=ctx)
 
         urls = _extract_urls(result)
         if not urls:

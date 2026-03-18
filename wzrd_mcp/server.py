@@ -24,7 +24,7 @@ _DEFAULT_TOOLS = {
     "extract_color_regions": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "reproject_video": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "texture_flow": {"enabled": True, "timeout": 1500},
-    "kling_v3_image_to_video": {"enabled": True, "timeout": 300},
+    "kling_v3_image_to_video": {"enabled": True, "timeout": 600},
     "nano_banana_pro": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "simulate_view": {"enabled": True, "timeout": 300},
     "capture_camera_snapshot": {"enabled": True, "timeout": 30},
