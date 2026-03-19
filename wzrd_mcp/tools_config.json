@@ -8,7 +8,8 @@
   "extract_color_regions": {"enabled": true, "timeout": 120},
   "reproject_video": {"enabled": true, "timeout": 300},
   "texture_flow": {"enabled": true, "timeout": 1500},
-  "kling_v3_image_to_video": {"enabled": true, "timeout": 420},
+  "kling_v25_image_to_video": {"enabled": true, "timeout": 420},
+  "kling_v3_image_to_video": {"enabled": false, "timeout": 420},
   "nano_banana_pro": {"enabled": true, "timeout": 180},
   "simulate_view": {"enabled": true, "timeout": 300},
   "capture_camera_snapshot": {"enabled": false, "timeout": 30}

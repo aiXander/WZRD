@@ -20,7 +20,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from .file_io import upload_async
-from ._log import log_call, log_progress, log_done, log_error, logged_tool
+from ._log import log_progress, log_done, log_error, logged_tool
 from .server import mcp, get_timeout
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,103 @@ async def _download_to_tmp(url: str, suffix: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Common FAL tool pipeline
+# ---------------------------------------------------------------------------
+async def _run_fal_tool(
+    tool_name: str,
+    endpoint: str,
+    fal_args: dict,
+    output_type: str,
+    response_info: dict,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Subscribe to FAL endpoint, download result, upload to S3, return response.
+
+    Args:
+        tool_name: Name for logging.
+        endpoint: FAL endpoint path (e.g. "fal-ai/kling-video/v3/...").
+        fal_args: Arguments dict sent to FAL.
+        output_type: "video" (single .mp4) or "images" (one or more .jpg).
+        response_info: Extra metadata included in the response "info" dict.
+        ctx: Optional MCP context for progress reporting.
+    """
+    t0 = time.time()
+    try:
+        result = await _fal_subscribe(endpoint, fal_args, tool_name=tool_name, ctx=ctx)
+
+        urls = _extract_urls(result)
+        if not urls:
+            err = f"No {output_type} URL(s) in FAL response"
+            log_error(tool_name, ValueError(err), t0)
+            raise ToolError(err)
+
+        if output_type == "video":
+            log_progress(tool_name, "Downloading video from FAL...")
+            tmp = await _download_to_tmp(urls[0], suffix=".mp4")
+            uploaded = await upload_async(tmp)
+            response = {"output_video": uploaded, "info": response_info}
+        else:
+            log_progress(tool_name, f"Downloading {len(urls)} image(s) from FAL...")
+            tmps = await asyncio.gather(*[_download_to_tmp(u, suffix=".jpg") for u in urls])
+            uploaded = list(await asyncio.gather(*[upload_async(t) for t in tmps]))
+            response = {"output_images": uploaded, "info": {**response_info, "num_images": len(uploaded)}}
+
+        log_done(tool_name, t0, response)
+        return response
+    except ToolError:
+        raise
+    except Exception as exc:
+        log_error(tool_name, exc, t0)
+        raise ToolError(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Tool: Kling v2.5 Turbo Pro Image-to-Video
+# ---------------------------------------------------------------------------
+@mcp.tool(timeout=get_timeout("kling_v25_image_to_video"))
+@logged_tool
+async def kling_v25_image_to_video(
+    prompt: str,
+    image_url: str,
+    duration: str = "5",
+    tail_image_url: str = "",
+    negative_prompt: str = "blur, distort, and low quality",
+    cfg_scale: float = 0.5,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Generate a 5 or 10 second video from a starting image using Kling v2.5 Turbo Pro via FAL.
+
+    Creates high-quality videos from a single starting image. Optionally provide
+    a tail (end) image for start→end transitions.
+
+    Args:
+        prompt: Text description of the desired video motion and content.
+        image_url: URL of the image to use as the first frame.
+        duration: Video length in seconds. Choices: "5" or "10".
+        tail_image_url: Optional URL of an image for the last frame (start→end transition).
+        negative_prompt: Things to avoid in the generation.
+        cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
+    """
+    fal_args = {
+        "prompt": prompt,
+        "image_url": image_url,
+        "duration": duration,
+        "negative_prompt": negative_prompt,
+        "cfg_scale": cfg_scale,
+    }
+    if tail_image_url:
+        fal_args["tail_image_url"] = tail_image_url
+
+    return await _run_fal_tool(
+        "kling_v25_image_to_video",
+        "fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
+        fal_args, output_type="video",
+        response_info={"duration": duration},
+        ctx=ctx,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool: Kling v3 Image-to-Video
 # ---------------------------------------------------------------------------
 @mcp.tool(timeout=get_timeout("kling_v3_image_to_video"))
@@ -200,62 +297,25 @@ async def kling_v3_image_to_video(
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
         aspect_ratio: Output aspect ratio. Choices: "16:9", "9:16", "1:1".
     """
-    _name = "kling_v3_image_to_video"
-    t0 = time.time()
-    try:
-        fal_args: dict = {
-            "prompt": prompt,
-            "start_image_url": start_image_url,
-            "duration": duration,
-            "generate_audio": generate_audio,
-            "negative_prompt": negative_prompt,
-            "cfg_scale": cfg_scale,
-            "aspect_ratio": aspect_ratio,
-        }
-        if end_image_url != "":
-            fal_args["end_image_url"] = end_image_url
+    fal_args = {
+        "prompt": prompt,
+        "start_image_url": start_image_url,
+        "duration": duration,
+        "generate_audio": generate_audio,
+        "negative_prompt": negative_prompt,
+        "cfg_scale": cfg_scale,
+        "aspect_ratio": aspect_ratio,
+    }
+    if end_image_url:
+        fal_args["end_image_url"] = end_image_url
 
-        result = await _fal_subscribe(
-            "fal-ai/kling-video/v3/standard/image-to-video", fal_args,
-            tool_name=_name, ctx=ctx,
-        )
-
-        urls = _extract_urls(result)
-        if not urls:
-            err = "No video URL in FAL response"
-            log_error(_name, ValueError(err), t0)
-            raise ToolError(err)
-
-        log_progress(_name, "Downloading video from FAL...")
-        if ctx:
-            try:
-                await ctx.report_progress(progress=90, total=100, message="Downloading video from FAL…")
-            except Exception:
-                pass
-        video_tmp = await _download_to_tmp(urls[0], suffix=".mp4")
-
-        log_progress(_name, "Uploading to S3...")
-        if ctx:
-            try:
-                await ctx.report_progress(progress=95, total=100, message="Uploading to S3…")
-            except Exception:
-                pass
-        uploaded_url = await upload_async(video_tmp)
-
-        response = {
-            "output_video": uploaded_url,
-            "info": {
-                "duration": duration,
-                "aspect_ratio": aspect_ratio,
-            },
-        }
-        log_done(_name, t0, response)
-        return response
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    return await _run_fal_tool(
+        "kling_v3_image_to_video",
+        "fal-ai/kling-video/v3/standard/image-to-video",
+        fal_args, output_type="video",
+        response_info={"duration": duration, "aspect_ratio": aspect_ratio},
+        ctx=ctx,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -298,61 +358,27 @@ async def nano_banana_pro(
         enable_web_search: Use web search for current events or real-world references.
         seed: Random seed for reproducibility (0-2147483647).
     """
-    _name = "nano_banana_pro"
+    endpoint = "fal-ai/nano-banana-pro/edit" if image_urls else "fal-ai/nano-banana-pro"
     mode = "edit" if image_urls else "txt2img"
-    t0 = time.time()
-    try:
-        endpoint = (
-            "fal-ai/nano-banana-pro/edit" if image_urls else "fal-ai/nano-banana-pro"
-        )
 
-        fal_args: dict = {
-            "prompt": prompt,
-            "num_images": num_images,
-            "aspect_ratio": aspect_ratio,
-            "output_format": "jpeg",
-        }
-        if resolution:
-            fal_args["resolution"] = resolution
-        if enable_web_search:
-            fal_args["enable_web_search"] = True
-        if seed >= 0:
-            fal_args["seed"] = seed
-        if image_urls:
-            fal_args["image_urls"] = image_urls
+    fal_args: dict = {
+        "prompt": prompt,
+        "num_images": num_images,
+        "aspect_ratio": aspect_ratio,
+        "output_format": "jpeg",
+    }
+    if resolution:
+        fal_args["resolution"] = resolution
+    if enable_web_search:
+        fal_args["enable_web_search"] = True
+    if seed >= 0:
+        fal_args["seed"] = seed
+    if image_urls:
+        fal_args["image_urls"] = image_urls
 
-        result = await _fal_subscribe(endpoint, fal_args, tool_name=_name, ctx=ctx)
-
-        urls = _extract_urls(result)
-        if not urls:
-            err = "No image URLs in FAL response"
-            log_error(_name, ValueError(err), t0)
-            raise ToolError(err)
-
-        log_progress(_name, f"Downloading {len(urls)} image(s) from FAL...")
-        # Download all images concurrently
-        tmp_paths = await asyncio.gather(
-            *[_download_to_tmp(url, suffix=".jpg") for url in urls]
-        )
-        # Upload all to S3 concurrently
-        uploaded = list(await asyncio.gather(
-            *[upload_async(tmp) for tmp in tmp_paths]
-        ))
-
-        log_progress(_name, "Upload complete.")
-        response = {
-            "output_images": uploaded,
-            "info": {
-                "num_images": len(uploaded),
-                "resolution": resolution,
-                "aspect_ratio": aspect_ratio,
-                "mode": mode,
-            },
-        }
-        log_done(_name, t0, response)
-        return response
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    return await _run_fal_tool(
+        "nano_banana_pro", endpoint, fal_args,
+        output_type="images",
+        response_info={"resolution": resolution, "aspect_ratio": aspect_ratio, "mode": mode},
+        ctx=ctx,
+    )
