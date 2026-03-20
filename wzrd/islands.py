@@ -12,6 +12,130 @@ from pathlib import Path
 from typing import Union, Optional, List, Dict, Tuple, Literal
 Connectivity = Literal[4, 8]
 
+# Supported aspect ratios for standardized output (e.g. nano_banana).
+# Each entry is (width, height).  Edit this list to add/remove ratios.
+STANDARD_ASPECT_RATIOS: List[Tuple[int, int]] = [
+    (1, 1),
+    (2, 3),
+    (3, 2),
+    (3, 4),
+    (4, 3),
+    (4, 5),
+    (5, 4),
+    (9, 16),
+    (16, 9),
+    (21, 9),
+]
+
+
+def _closest_standard_aspect(w: int, h: int) -> Tuple[int, int]:
+    """Return the standard aspect ratio (aw, ah) that requires the least padding.
+
+    Always pads — the returned ratio guarantees dimensions >= (w, h).
+    """
+    current_ratio = w / h
+    best = None
+    best_padding = float('inf')
+
+    for aw, ah in STANDARD_ASPECT_RATIOS:
+        target_ratio = aw / ah
+        if current_ratio >= target_ratio:
+            # Current is wider or equal — pad height
+            new_w = w
+            new_h = int(np.ceil(w * ah / aw))
+        else:
+            # Current is taller — pad width
+            new_h = h
+            new_w = int(np.ceil(h * aw / ah))
+        padding = new_w * new_h - w * h
+        if padding < best_padding:
+            best_padding = padding
+            best = (aw, ah)
+
+    return best
+
+
+def _padded_dims(w: int, h: int, aw: int, ah: int, multiple: int = 8) -> Tuple[int, int]:
+    """Compute padded (new_w, new_h) >= (w, h) matching aspect aw:ah, rounded to *multiple*."""
+    target_ratio = aw / ah
+    if w / h >= target_ratio:
+        new_w = w
+        new_h = int(np.ceil(w * ah / aw))
+    else:
+        new_h = h
+        new_w = int(np.ceil(h * aw / ah))
+    # Round UP to nearest multiple
+    new_w = int(np.ceil(new_w / multiple) * multiple)
+    new_h = int(np.ceil(new_h / multiple) * multiple)
+    return new_w, new_h
+
+
+def _center_pad(image: np.ndarray, target_w: int, target_h: int, pad_value: int = 0) -> np.ndarray:
+    """Center-pad an image (grayscale or color) to target dimensions with *pad_value*."""
+    h, w = image.shape[:2]
+    if w >= target_w and h >= target_h:
+        return image
+    pad_left = (target_w - w) // 2
+    pad_right = target_w - w - pad_left
+    pad_top = (target_h - h) // 2
+    pad_bottom = target_h - h - pad_top
+    if len(image.shape) == 3:
+        value = [pad_value] * image.shape[2]
+    else:
+        value = pad_value
+    return cv2.copyMakeBorder(image, pad_top, pad_bottom, pad_left, pad_right,
+                              cv2.BORDER_CONSTANT, value=value)
+
+
+def _extend_surface_crop(
+    source_img: np.ndarray,
+    x: int, y: int, w: int, h: int,
+    target_w: int, target_h: int,
+) -> np.ndarray:
+    """Extend a surface crop to *target_w* x *target_h*, preferring real source pixels.
+
+    1. Compute the expanded bounding box centred on the original (x, y, w, h).
+    2. Clamp to source image bounds and extract what's available.
+    3. Reflection-pad any remaining border that fell outside the source.
+    """
+    img_h, img_w = source_img.shape[:2]
+
+    # How much to add on each side (in source coords)
+    extra_w = target_w - w
+    extra_h = target_h - h
+    pad_left = extra_w // 2
+    pad_right = extra_w - pad_left
+    pad_top = extra_h // 2
+    pad_bottom = extra_h - pad_top
+
+    # Desired region in source coordinates
+    new_x = x - pad_left
+    new_y = y - pad_top
+
+    # Clamp to source bounds
+    src_x1 = max(0, new_x)
+    src_y1 = max(0, new_y)
+    src_x2 = min(img_w, new_x + target_w)
+    src_y2 = min(img_h, new_y + target_h)
+
+    available = source_img[src_y1:src_y2, src_x1:src_x2].copy()
+
+    # If available == target, we're done
+    if available.shape[1] == target_w and available.shape[0] == target_h:
+        return available
+
+    # Reflection-pad the remaining edges
+    ref_pad_left = src_x1 - new_x
+    ref_pad_right = (new_x + target_w) - src_x2
+    ref_pad_top = src_y1 - new_y
+    ref_pad_bottom = (new_y + target_h) - src_y2
+
+    return cv2.copyMakeBorder(
+        available,
+        ref_pad_top, ref_pad_bottom, ref_pad_left, ref_pad_right,
+        cv2.BORDER_REFLECT_101,
+    )
+
 
 def _to_cielab(image: np.ndarray) -> np.ndarray:
     """Convert BGR uint8 image to float CIELAB (L* 0-100, a*/b* -128..127)."""
@@ -305,6 +429,7 @@ def extract_color_regions(
     delta_e_threshold: float = 5.0,
     background_threshold: float = 15.0,
     merge_same_color: bool = True,
+    standardize_output_aspect: bool = True,
 ) -> Tuple[List[Dict], Path]:
     """
     Extract color regions from a color-segmented image.
@@ -340,6 +465,11 @@ def extract_color_regions(
         merge_same_color: If True, all disconnected blobs of the same color
                           are combined into a single region. If False, each
                           spatially connected component is a separate region.
+        standardize_output_aspect: If True, pad output crops to the closest
+                          standard aspect ratio from STANDARD_ASPECT_RATIOS.
+                          Masks are padded with black; surface crops are
+                          extended from source pixels (reflection-padded at
+                          image boundaries).  source_box is updated to match.
 
     Returns:
         Tuple of (list of region info dicts, output directory path)
@@ -487,22 +617,60 @@ def extract_color_regions(
                 out_w = max(8, (out_w // 8) * 8)
                 out_h = max(8, (out_h // 8) * 8)
 
+                # --- Aspect ratio standardization ---
+                if standardize_output_aspect:
+                    aw, ah = _closest_standard_aspect(out_w, out_h)
+                    std_w, std_h = _padded_dims(out_w, out_h, aw, ah, multiple=8)
+                else:
+                    std_w, std_h = out_w, out_h
+
                 if (out_w, out_h) != (crop_w, crop_h):
                     crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
                     _, crop = cv2.threshold(crop, 127, 255, cv2.THRESH_BINARY)
 
+                # Pad mask crop to standardized dimensions (black padding)
+                if (std_w, std_h) != (out_w, out_h):
+                    crop = _center_pad(crop, std_w, std_h, pad_value=0)
+
                 crop_filename = f"region_crop_{region_counter:03d}_color_{color_hex}.webp"
                 cv2.imwrite(str(output_dir / crop_filename), crop, [cv2.IMWRITE_WEBP_QUALITY, 90])
                 region_info['crop_filename'] = crop_filename
+                if standardize_output_aspect and (std_w, std_h) != (out_w, out_h):
+                    region_info['standard_aspect'] = f"{aw}:{ah}"
 
                 # Surface crop (same bbox / scale as the mask crop)
                 if surface_img is not None:
-                    surface_crop = surface_img[y_min:y_min+crop_h, x_min:x_min+crop_w].copy()
-                    if (out_w, out_h) != (crop_w, crop_h):
-                        surface_crop = cv2.resize(surface_crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+                    if standardize_output_aspect and (std_w, std_h) != (out_w, out_h):
+                        # Compute expanded source box and extend from source
+                        src_scale = min_dim / output_min_size if output_min_size > 0 else 1.0
+                        src_target_w = int(round(std_w * src_scale))
+                        src_target_h = int(round(std_h * src_scale))
+                        surface_crop = _extend_surface_crop(
+                            surface_img, x_min, y_min, crop_w, crop_h,
+                            src_target_w, src_target_h,
+                        )
+                        surface_crop = cv2.resize(surface_crop, (std_w, std_h), interpolation=cv2.INTER_LINEAR)
+                    else:
+                        surface_crop = surface_img[y_min:y_min+crop_h, x_min:x_min+crop_w].copy()
+                        if (out_w, out_h) != (crop_w, crop_h):
+                            surface_crop = cv2.resize(surface_crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
                     surface_filename = f"region_crop_{region_counter:03d}_color_{color_hex}_surface.webp"
                     cv2.imwrite(str(output_dir / surface_filename), surface_crop, [cv2.IMWRITE_WEBP_QUALITY, 90])
                     region_info['surface_filename'] = surface_filename
+
+                # Update source_box to reflect padded dimensions for reprojection
+                if standardize_output_aspect and (std_w, std_h) != (out_w, out_h):
+                    src_scale = min_dim / output_min_size if output_min_size > 0 else 1.0
+                    src_std_w = int(round(std_w * src_scale))
+                    src_std_h = int(round(std_h * src_scale))
+                    extra_w = src_std_w - crop_w
+                    extra_h = src_std_h - crop_h
+                    region_info['source_box'] = {
+                        'x': x_min - extra_w // 2,
+                        'y': y_min - extra_h // 2,
+                        'width': src_std_w,
+                        'height': src_std_h,
+                    }
 
             all_regions.append(region_info)
 
@@ -724,6 +892,8 @@ def _cli():
     parser.add_argument('--surface', help='Optional surface image to extract corresponding crops from')
     parser.add_argument('--no-merge', action='store_true',
                         help='Split same-color disconnected blobs into separate regions')
+    parser.add_argument('--no-standardize-aspect', action='store_true',
+                        help='Disable padding crops to standard aspect ratios')
 
     args = parser.parse_args()
 
@@ -744,6 +914,7 @@ def _cli():
         delta_e_threshold=args.delta_e,
         background_threshold=args.bg_threshold,
         merge_same_color=not args.no_merge,
+        standardize_output_aspect=not args.no_standardize_aspect,
     )
 
     print(f"Extracted {len(regions)} color regions to {out_path}")

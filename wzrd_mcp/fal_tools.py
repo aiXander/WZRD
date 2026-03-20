@@ -352,7 +352,7 @@ async def nano_banana_pro(
             becomes a named reference: the first URL is image_1, the second is
             image_2, and so on. The prompt should explicitly mention these
             references to control how each image influences the output.
-        num_images: Number of images to generate (1-4).
+        num_images: Number of images to generate (1-4). You almost always want to do 1 image at a time. When the user asks for multiple images, run multiple toolcalls and tweak the prompt.
         resolution: Output resolution. Choices: "1K", "2K", "4K" (4K costs 2x).
         aspect_ratio: Output aspect ratio. Choices: "auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16".
         enable_web_search: Use web search for current events or real-world references.

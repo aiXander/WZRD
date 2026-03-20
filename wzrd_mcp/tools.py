@@ -433,6 +433,7 @@ async def extract_color_regions(
     delta_e_threshold: float = 5.0,
     background_threshold: float = 15.0,
     merge_same_color: bool = True,
+    standardize_output_aspect: bool = True,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Segment an image into color-based regions (islands) using greedy clustering in CIELAB color space.
@@ -448,6 +449,7 @@ async def extract_color_regions(
         delta_e_threshold: CIELAB deltaE threshold for merging similar colors. Lower = more sensitive to subtle differences. Default 15.0.
         background_threshold: CIELAB deltaE from background below which pixels are treated as background. Default 15.0.
         merge_same_color: If true, all disconnected blobs of the same color are combined into one region. Default true.
+        standardize_output_aspect: If true, pad output crops to the closest standard aspect ratio (1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9). Masks are padded with black; surface crops are extended from source pixels. Default true.
     """
     _name = "extract_color_regions"
     t0 = time.time()
@@ -475,6 +477,7 @@ async def extract_color_regions(
             delta_e_threshold=delta_e_threshold,
             background_threshold=background_threshold,
             merge_same_color=merge_same_color,
+            standardize_output_aspect=standardize_output_aspect,
         )
 
         from pathlib import Path
@@ -687,7 +690,7 @@ async def texture_flow(
         n_seconds: Video length in seconds (2.0-24.0). Scale with number of style images (~3s per image).
         width: Video width in pixels (320-1280, step 32). High values may cause duplication artifacts and are very slow.
         height: Video height in pixels (320-1280, step 32). High values may cause duplication artifacts and are very slow.
-        base_model: SD1.5 checkpoint. Options: "SD15/juggernaut_reborn.safetensors" (realistic, best default), "SD15/darkSushiMixMix_225D.safetensors" (creative/abstract, pastel colors), "SD15/protogenV22Anime_protogenV22.safetensors" (anime/cartoon, flat colors).
+        base_model: SD1.5 checkpoint. Options: "SD15/juggernaut_reborn.safetensors" (realistic, best default), "SD15/darkSushiMixMix_225D.safetensors" (more creative/abstract, softer, pastel colors), "SD15/protogenV22Anime_protogenV22.safetensors" (anime/cartoon, flat colors).
         use_controlnet1: Enable controlnet shape guidance. Requires control_input.
         control_input: URL to an image/video for shape guidance. Used as controlnet input when use_controlnet1=true. Can be a logo, surface photo, motion video, or QR code.
         diffusion_mask: Optional image/video mask URL controlling which regions are affected by diffusion. White regions will get animated, black regions remain black. Use this to generated island videos. Diffusion_mask can also be eg a shape filling video.
