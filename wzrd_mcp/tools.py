@@ -503,7 +503,15 @@ async def extract_color_regions(
 
         upload_results = await asyncio.gather(*upload_tasks)
 
-        published_regions = [{"source_box": r.get("source_box")} for r in regions]
+        published_regions = []
+        for r in regions:
+            entry = {"source_box": r.get("source_box")}
+            if "standard_aspect" in r:
+                entry["aspect_ratio"] = r["standard_aspect"]
+            elif r.get("source_box"):
+                w, h = r["source_box"]["width"], r["source_box"]["height"]
+                entry["aspect_ratio"] = f"{w / h:.3f}"
+            published_regions.append(entry)
         metadata_url = None
         for (idx, key), url in zip(upload_keys, upload_results):
             if idx == -1:
