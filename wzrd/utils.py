@@ -366,6 +366,9 @@ def center_crop_to_aspect(
         # Image is taller than target: crop height
         new_width = img_width
         new_height = int(img_width / target_aspect)
+    # Ensure even dimensions (required for video codecs)
+    new_width -= new_width % 2
+    new_height -= new_height % 2
 
     # Calculate center crop coordinates
     left = (img_width - new_width) // 2
@@ -401,6 +404,9 @@ def resize_to_base_resolution(
     scale = base_resolution / max_dim
     new_width = int(width * scale)
     new_height = int(height * scale)
+    # Ensure even dimensions (required for video codecs)
+    new_width -= new_width % 2
+    new_height -= new_height % 2
 
     return image.resize((new_width, new_height), resample)
 
@@ -591,6 +597,10 @@ def compute_target_dimensions(
         height = base_resolution
         width = round(base_resolution * target_aspect)
 
+    # Ensure even dimensions (required for video codecs)
+    width -= width % 2
+    height -= height % 2
+
     return width, height
 
 
@@ -623,7 +633,9 @@ def downscale_arr(arr: np.ndarray, factor: int) -> np.ndarray:
         Downscaled array.
     """
     h, w = arr.shape[:2]
-    return cv2.resize(arr, (w // factor, h // factor), interpolation=cv2.INTER_AREA)
+    new_w = (w // factor) - ((w // factor) % 2)
+    new_h = (h // factor) - ((h // factor) % 2)
+    return cv2.resize(arr, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
 def upscale_arr(arr: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
