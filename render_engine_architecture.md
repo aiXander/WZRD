@@ -1,5 +1,39 @@
 # WZRD render-engine — system design
 
+> **Implementation status (2026-05-22).** Phases 0–3 are landed in
+> `render-core/`. The standalone Rust+wgpu binary loads a layer pack, parses
+> `scene.json`, ticks a driver bus (clock + OSC-ingested audio features +
+> ui-slider stub), composites masked layers in z-order, applies a final
+> homography pass, and hot-reloads on `scene.json` or `effects/*` edits.
+> Built-in effects shipped: `tint`, `hueCycle`, `flash`, `wobble`. **Inline
+> + project-local user-WGSL effects work end-to-end (D15)** — `naga`
+> pre-validation + swap-on-success keeps the projector running across bad
+> saves. Audio capture was lifted out of the engine into the standalone
+> Realtime Audio Feature Server (separate Python process); `render-core`
+> is now a passive OSC sink for `/audio/lmh` + `/audio/onset/*`
+> (`audio_refactor_plan.md` is implemented as of 2026-05-22 — kept as the
+> design-rationale paper trail). Tauri shell + webview (Phase 4), video paths
+> (Phase 5), and MCP wrapper (Phase 7) are not yet started. Slow-path FBO
+> routing (D5, `layerRef`) is intentionally deferred — no scene has needed
+> it yet.
+>
+> **Post-Phase-3 correctness fixes (architecture review v1).** Compositor
+> blending is now genuinely additive (`One + One`); the composite buffer is
+> `Rgba16Float`; effects return premultiplied RGBA. This is the
+> "scene-aware *additive* projection-mapping" thesis actually showing up in
+> the pixels — the prior `SrcAlpha / OneMinusSrcAlpha` path silently
+> replaced layers instead of summing light. The pack manifest was renamed
+> from `scene.json` to `pack.json` (legacy reads still work with a warning)
+> to stop sharing a filename with the runtime control file. The CPU-side
+> mask atlas drops after GPU upload; the effect rescan tracks per-file
+> mtimes so a single editor save only invalidates the one pipeline that
+> actually changed. The composite texture carries `COPY_SRC` pre-emptively
+> for Phase 4's preview readback. **Still open from the review** — most
+> notably the explicit `Layer` object between `SceneFile` and `Binding`
+> (review #2 + #9): high-impact for scene-authoring ergonomics and the
+> live-perform UI in Phase 4, deferred until those land so we don't churn
+> the schema twice.
+
 ## 1. What we are building
 
 A **scene-aware additive projection-mapping engine**.
@@ -18,7 +52,7 @@ This is the one thing **no existing VJ tool does**. VDMX, Resolume, MadMapper, T
 │        → wzrd.layerpack                 │
 └─────────────────────────────────────────┘
                     │
-                    ▼ layerpack/ (scene.json + masks/*.png + refs)
+                    ▼ layerpack/ (pack.json + masks/*.png + refs)
 ┌─────────────────────────────────────────┐
 │ REALTIME — Tauri app                    │
 │  ┌────────────────────────────────┐     │
@@ -329,16 +363,19 @@ A driver is anything implementing `Driver<T>` — produces a value of type `T` p
 Built-in drivers:
 
 - `clock.bars(n)`, `clock.beats(n)`, `clock.phase(rate)` — BPM-aware transport. `Driver<f32>` in [0,1).
-- `audio.rms()`, `audio.band(low|mid|high)` — `Driver<f32>`.
-- `audio.onset({ band })` — `Driver<Event>`.
-- `audio.fft()` — `Driver<&[f32]>` for spectrum-driven effects.
+- `audio.band(low|mid|high)` — `Driver<f32>`, sourced from the Realtime Audio Feature Server's `/audio/lmh` OSC stream (autoscaled into ~[0, 1] server-side).
+- `audio.onset({ band })` — `Driver<Event>`, sourced from `/audio/onset/{low,mid,high}` triggers, exposed as a decaying envelope on read.
 - `midi.cc(n)`, `midi.note(n)` — `Driver<f32>`.
 - `midi.noteOn(n)` — `Driver<Event>`.
 - `osc.path('/x/y')` — typed by declared path schema.
 - `ui.slider(name, [min, max])` — surfaces a knob in the live UI.
 - `const(value)` — wrapper for literal parameters.
 
-OSC is a flat UDP listener inside the core (no WebSocket bridge needed in native). OSC is also the **expected transport for pre-computed audio features** (RMS, bands, onsets, FFT bins) when an external DAW or audio-analysis process is the source — covers headless runs, recorded shows, and external-mixer setups without forcing the core to ingest the raw audio stream.
+Audio capture and DSP do **not** live in the engine. The Realtime Audio Feature Server (separate Python process) owns capture, autoscaling, soft gating, per-band Schmitt onset detection, and BPM tracking; `render-core` binds a UDP socket on `127.0.0.1:9000` and forwards the decoded features into atomics that the driver bus reads. See `audio_refactor_plan.md` §3.1 for the auto-detect / auto-recover lifecycle (either process can start, stop, or restart at any time without the other knowing) and §4.1 for the OSC ↔ driver mapping. v1 explicitly does not expose `audio.rms`, `audio.bpm`, or `audio.fft` — the engine surfaces exactly what the server emits, and scene authors pick a band when they want "loudness."
+
+`AudioFeatures` also captures two side-channels Phase 4 telemetry leans on directly: **`sample_rate`** (set on `/audio/meta`, today diagnostic-only) and **`is_fresh(stale_after_ms)`** (true iff a packet arrived inside the window; powers the watchdog log and the Phase 4.1 OSC status pill — `audio_freshness` telemetry is one atomic-load per poll, no new core work needed).
+
+OSC remains a flat UDP listener inside the core for non-audio paths (`osc.path('/x/y')`); the same dispatcher will generalise to a `HashMap<String, f32>` for arbitrary OSC inputs in a follow-up (`audio_refactor_plan.md` §10).
 
 **Transport.** A single canonical clock owned by the core. BPM sources for v1: manual (UI), tap-tempo, audio-derived (onset-based estimator). External clock sync (Ableton Link, MTC, MIDI clock) is **explicitly not in v1** — defer until a real show demands it.
 
@@ -409,11 +446,13 @@ The `scene.ts` typed DSL only matters when a human is in the loop — it's a Mon
 
 **Sidecar packaging (deferred).** When shipping to non-developer users, Tauri can spawn `wzrd_mcp` as a sidecar binary (built via `pyinstaller`) so the user sees one app. Not in v1 — Pattern A (two processes) is the v1 model.
 
+**Third sibling process: the audio feature server.** Same Pattern A applies — the Realtime Audio Feature Server (separate Python repo, `Realtime_PyAudio_FFT`) runs as a long-lived localhost process emitting OSC to `127.0.0.1:9000`. `render-core` listens; the Tauri shell will eventually surface a top-bar status pill plus a "open audio server's browser UI" deep-link for tuning DSP. The engine never embeds audio capture; offline tools, live engine, and the audio server are three independent processes sharing files on disk and localhost protocols.
+
 **What changes in the existing Python:**
 
 - `wzrd/` modules: no changes.
 - `wzrd_mcp/server.py`, `tools.py`, `fal_tools.py`: no changes.
-- New module: **`wzrd/layerpack.py`** (Phase 1). Takes `wzrd.islands` output + mask PNGs + a tags JSON, emits `scene.json + masks/ + references/`. Also exposed as an MCP tool (`build_layerpack`) so the agent can call it.
+- New module: **`wzrd/layerpack.py`** (Phase 1). Takes `wzrd.islands` output + mask PNGs + a tags JSON, emits `pack.json + masks/ + references/`. Also exposed as an MCP tool (`build_layerpack`) so the agent can call it.
 - `wzrd_mcp/tools_config.json`: add `build_layerpack` once it exists.
 
 ### 3.11 RPC / IPC surface
@@ -438,7 +477,7 @@ These same methods are the MCP tool surface in Phase 7. The agent does not get a
 
 ## 4. Contracts
 
-### 4.1 Layer pack — `scene.json`
+### 4.1 Layer pack — `pack.json`
 
 ```jsonc
 {
@@ -470,7 +509,7 @@ Directory:
 
 ```
 layerpack-2026-05-01-tree/
-  scene.json
+  pack.json              # layer-pack manifest (was `scene.json` pre-review-v1; renamed to stop colliding with the runtime control file)
   surface.png            # dark/aligned surface (for preview overlay)
   masks/
     000_background.png   # antialiased grayscale, projector-resolution
@@ -552,19 +591,19 @@ JSON-RPC 2.0 method names and schemas in `rpc.schema.json`. Same surface across 
 
 **Guiding principle: get a Rust binary on the projector as fast as possible, with the Tauri/React layer deferred until the core is real.** The webview is a control surface; it isn't load-bearing for "see pixels on the wall." Building it last (a) gives a playable engine in weeks not months, (b) proves the headless agent loop (D13) before any UI exists to lean on, and (c) lets us shape the Tauri layer around a known-good core instead of architecting two halves in parallel.
 
-### Phase 0 — clear the slate (minutes)
+### Phase 0 — clear the slate (minutes) ✅ done
 
 The old `render-engine/` browser-Three.js prototype shared neither language, paradigm, nor problem with the new architecture (3D shader sphere in R3F vs. native wgpu 2D mask compositor). Deleted rather than refactored. The one piece worth preserving — the `organicShader` WGSL string — survives as an idea in this doc.
 
 Concretely: `rm -rf render-engine/`, `cargo new render-core` for the standalone binary. No Tauri yet.
 
-### Phase 1 — `wzrd.layerpack` Python module (half-day)
+### Phase 1 — `wzrd.layerpack` Python module (half-day) ✅ done
 
 Exports the §4.1 format from `wzrd.islands` output + external mask PNGs + a hand-edited tags file. CLI: `python -m wzrd.layerpack <surface> <masks_dir> --tags tags.json -o pack/`. Smoke test in `test.py`. Wrap as MCP tool `build_layerpack` in `wzrd_mcp/tools.py` so the agent can call it. Blocker for everything downstream.
 
 Only new Python work in the build. Everything else in `wzrd/` and `wzrd_mcp/` stays as-is per D14 / §3.10.
 
-### Phase 2 — Minimal playable Rust core, no UI (1 week)
+### Phase 2 — Minimal playable Rust core, no UI (1 week) ✅ done
 
 The fastest path to "see pixels move on the projector." A standalone `render-core` binary with **no Tauri, no webview, no TypeScript on the critical path.**
 
@@ -577,32 +616,149 @@ The fastest path to "see pixels move on the projector." A standalone `render-cor
 - File watcher on `scene.json` → diff bindings by stable `id` → hot-reload.
 - macOS first; verify Linux builds compile.
 
-**Deliverable:** edit `scene.json` in any editor, save, projector updates. Boring on screen (flat tints), but the whole spine — pack loading, mask compositing, scene parsing, hot-reload — is real and the **agent loop is already unblocked**.
+**Deliverable shipped:** edit `scene.json` in any editor, save, projector updates. Boring on screen (flat tints), but the whole spine — pack loading, mask compositing, scene parsing, hot-reload — is real and the agent loop is unblocked.
 
-### Phase 3 — Effects, drivers, user-WGSL (2 weeks)
+### Phase 3 — Effects, drivers, user-WGSL (2 weeks) ✅ done
 
-Build out the effect model so the agent loop becomes genuinely creative. Still no Tauri.
+Built out the effect model so the agent loop is genuinely creative. Still no Tauri.
 
-- Effect discovery from disk (D15): project-local `effects/<name>/{shader.wgsl, descriptor.json}` + inline-WGSL bindings. `naga` validation at load; hot pipeline rebuild on file save.
-- Built-in effect set per §3.6 (`hueCycle`, `flash`, `floodFill` v0, `wobble`, `scrollPattern`, `glow`).
-- Slow-path FBO routing: `layerRef` params bind earlier layers' offscreen textures as `sampler2D` inputs (D5).
-- Driver bus: `clock`, `audio` (cpal — RMS, bands, simple onset), `osc` (rosc — covers MIDI-via-OSC and external feature streams), `ui` (stubbed; wired up properly in Phase 4).
-- Optional JSON-RPC WebSocket server for remote control (same method set as future Tauri IPC).
+**Landed:**
 
-**Deliverable:** §1.2 tree scene runs audio-reactive on the projector with no UI ever opened. An MCP agent (or a human with a text editor) can write/edit `scene.json` and `effects/*.wgsl` and see results immediately. **This is the milestone that proves the architectural thesis.**
+- Effect discovery from disk (D15): project-local `effects/<name>/{shader.wgsl, descriptor.json}` + inline-WGSL bindings. `naga` validation at load; hot pipeline rebuild on file save with swap-on-success (a bad save keeps the previous good pipeline rendering).
+- Driver bus (§3.7): `const`, `clock.bars/beats/phase/time`, `audio.band/onset`, `ui.slider` (stub until Phase 4). Audio features ingested over OSC from the standalone Realtime Audio Feature Server (separate Python process) — `render-core` is a passive sink. Lock-free atomic `AudioFeatures` between the OSC recv thread and the render thread.
+- Built-in effect catalog: `tint`, `hueCycle`, `flash`, `wobble`. Deliberately a small reference set — past v1 the creative path is *authoring new effects* (D15), not adding built-ins.
+- Single `Texture2DArray<R8>` mask atlas, one shared `FrameState` uniform written per frame, one `LayerParams` uniform per binding. Built-in effects share one pipeline with an `effect_id` switch; user effects each get their own pipeline cached by content hash (inline) or file path (project-local).
+- WGSL composer: every effect is compiled as `prelude + body + main`, so user code only writes `fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32>` and accesses `state.*` / `f_param(N)` / `c_param(N)` / `sample_mask(uv)`.
+- File watcher widened to watch the effects directory recursively in addition to the scene file.
 
-### Phase 4 — Tauri shell + webview UI (2 weeks)
+**Deliberately deferred (per "don't overdo it" — add when a real scene demands them):**
 
-Now that the core is real, wrap it with the control UI. The core binary keeps working standalone — Tauri is a second front-end, not a replacement.
+- Slow-path FBO routing (`layerRef`, D5) — no scene has needed cross-layer sampling yet.
+- `floodFill`, `scrollPattern`, `glow` built-ins — easier to author project-local once the use case is concrete.
+- Generic OSC paths beyond `/audio/*` (`osc.path('/x/y')`) — the audio-feature OSC sink is landed; widening the dispatcher to a `HashMap<String, f32>` for non-`/audio/*` paths is a small follow-up.
+- Optional JSON-RPC WebSocket server for remote control — folded into Phase 7's MCP wrapper.
 
-- Tauri project scaffolded around the existing core crate (`pnpm create tauri-app`).
-- Tauri IPC bridges to the same RPC method set as the WebSocket.
-- Webview UI: layer list, binding editor, slider rack, calibration corner drag, **audio-debug visualizer** (the most important live-tuning surface).
-- Monaco editor for `scene.ts`; webview transpiles to `scene.json` on save (D13).
-- Monaco editor for `effects/*.wgsl` with inline `naga` validation.
-- Preview thumbnail stream over IPC.
+**Status:** the §1.2 tree scene primitives all work — palette cycle, audio-onset flash, audio-reactive amplitudes, time-driven UV displacement, user-authored shaders. The architectural thesis ("agent edits text, projector responds, no UI") is proven end-to-end.
 
-**Deliverable:** the operator's laptop runs the webview, the projector display runs the native wgpu window, all from one Tauri process.
+### Phase 4.1 — Tauri shell, minimum viable UI (~3–5 days) ⏳ next
+
+The smallest UI that adds real value over the standalone headless binary. One window, no routes, no structured editors, no panels. The standalone `render-core` binary and the headless `scene.json` + `effects/*.wgsl` agent path stay unchanged — Tauri is an additional front-end, never a replacement.
+
+The two wins over "just edit files in VSCode and watch the projector":
+
+1. **Inline `naga` squiggles in the WGSL editor** — see shader errors at the call site instead of tailing a terminal.
+2. **Glanceable liveness** — one strip says "audio is flowing, frames are rendering, the last save compiled."
+
+That's the value proposition. Everything richer — surface canvas with mask overlays, structured binding inspector, driver rack, audio feature strip, multi-panel debug — lands in Phase 4.2, sized against what 4.1 actually exposes as painful.
+
+**Single-window contents:**
+
+- **Monaco editor** for the currently open `scene.json` plus a flat file picker over `<project>/effects/*/{shader.wgsl, descriptor.json}`. Save (⌘S) on a scene file → `scene.load(json)` over IPC; save on an effect file → existing file watcher picks it up. Inline diagnostics via debounced `wgsl.validate(source)` RPC.
+- **Surface preview thumbnail** in a corner — downsampled composite from the `preview` telemetry channel at ~15 fps jpeg. Confirms the projector is alive without alt-tabbing. No interactivity, no mask overlays — that's the 4.2 surface canvas.
+- **Status strip** (top bar), three pills:
+  - **OSC pill.** Green / amber / red on freshness of the audio-feature-server feed (fresh, stale ≥2s, never-heard-from / bind-failed). Click → opens the audio server's localhost browser UI in the system browser. The single most-glanced indicator during a show; unambiguous at 2m. Audio DSP itself (gates, compression, onset thresholds, BPM smoothing) is tuned on the server's own UI — not duplicated here. Backed by `AudioFeatures::is_fresh(2_000)` (already shipped in `osc.rs`) emitted over the `audio_freshness` telemetry channel — no new DSP code.
+  - **FPS pill.**
+  - **Last-reload outcome.** Compact: `effect 'drift' OK 14ms` / `naga error line 12 col 5 — previous pipeline retained`. Functions as a one-line debug page until 4.2 grows a real one.
+- **Open pack / open scene** as native file pickers in the top bar.
+
+**Design principle for the UI surface — carries through 4.2+:** swap-on-success extends to the UI. A bad WGSL save, a malformed scene edit, a failed RPC — never blanks the projector, never opens a modal. Errors surface inline (Monaco markers + the reload pill); the projector keeps its last good frame.
+
+**Scaffolding:**
+
+- `pnpm create tauri-app` rooted alongside `render-core/`. The existing core becomes a library crate plus the standalone `render-core` binary (kept for headless runs).
+  - **Crate-split mechanics.** `render-core/Cargo.toml` grows a `[lib]` section (`path = "src/lib.rs"`) alongside the existing `[[bin]]`. `src/lib.rs` re-exports the module roots (`pack`, `scene`, `compositor`, `drivers`, `effects`, `gpu`, `osc`, `watch`) and lifts the current `App` / `ApplicationHandler` impl out of `main.rs` into a `pub fn run(cli: Cli)` entry point — `src/main.rs` becomes a 5-line thin wrapper that parses CLI + delegates. `src-tauri/Cargo.toml` then depends on `render-core` as a path-dep library and calls `render_core::run_with_*` variants from its command handlers. The standalone binary stays buildable + headless-agent-runnable through the split.
+- Tauri spawns the wgpu render window via `winit` on the projector display (configurable index, default = secondary if present).
+- **IPC bridge** (`src-tauri/src/rpc.rs`): every Tauri command is a thin wrapper around the same dispatch function the future WebSocket will use (§3.11). TS types codegen'd from `rpc.schema.json`.
+- **Frontend stack:** React + TypeScript + Vite. Plain Tailwind. No design system, no router (one screen). shadcn/ui can come later.
+- **No WebSocket server, no remote/phone access in 4.1.** Tauri IPC only.
+
+**RPC additions:**
+
+- `telemetry.subscribe(channels: string[])` / `telemetry.unsubscribe(channels: string[])` — initial channels only: `preview`, `hot_reload`, `audio_freshness`, `fps`. Other channels (`log`, `frame_stats`, `drivers`, full `audio`, `connectivity`) land with their consumers in 4.2.
+  - `audio_freshness` carries `{ peer, packet_rate, last_packet_age_ms, state: 'fresh' | 'stale' | 'down' }` — enough to colour the OSC pill, nothing more.
+- `wgsl.validate(source: string) → diagnostics` — for inline Monaco squiggles, independent of `effect.upsert`.
+
+Everything else 4.1 needs (`pack.load`, `scene.load`, `effect.upsert`) is already on §3.11.
+
+**Spikes:**
+
+- **Tauri + `winit` cross-window cooperation on macOS secondary display** (carry-over from §6.1). Re-verified on the Tauri-hosted topology, not just `cargo run` standalone. The only real architectural risk in 4.1.
+- **Monaco + WGSL.** Community grammar + `naga` diagnostics mapped to Monaco's marker API.
+
+**Deliverable:** open a pack, edit `scene.json` and `effects/*.wgsl` in Monaco with inline naga errors, glance at the status strip during a show, confirm the projector is alive via the corner thumbnail. Headless agent path unchanged.
+
+### Phase 4.2 — Authoring + perform + debug UI (~1–2 weeks)
+
+Builds the three-route structure on the 4.1 spine, sized against actual pain points from using 4.1. Defer any of the three routes individually if 4.1 covers it well enough.
+
+**Design principles (from `user_design_spec.md`):**
+
+- **Surface-first.** Once a surface canvas exists, the photo + masks + named regions are the primary visual on every page that has one. Panels are chrome.
+- **Surface-language.** Layers are addressed by `id` / `tag` / `group` (D7) in user-facing UI. Mask paths, slice indices, blob numbers live only on the Debug page.
+- **Two modes, one stripped UI.** Prepare/Perform split is real but both routes run on the laptop in 4.2 — no mobile, no showtime-polish yet.
+- **Audio features come from outside; routing happens inside.** Post `audio_refactor_plan.md`, `render-core` is an OSC sink. WZRD's UI is a *routing* tool — which audio feature drives which param on which layer. Don't duplicate the audio server's DSP UI; link out via the OSC pill.
+
+**Top-level navigation:** three routes (`/prepare` ⌘1, `/perform` ⌘2, `/debug` ⌘3), keyboard-switchable. The 4.1 status strip stays in the top bar across all routes.
+
+#### Prepare route
+
+Three columns, ~40 / 35 / 25:
+
+- **Left — surface canvas.** Reference photo with mask overlays as toggleable layers. Clicking a region highlights it and shows its `id` / `tags` / `group` in a small inspector strip. Hovering a binding (right panel) highlights its resolved layer set on the canvas. Read-only; pan + zoom only. No region renaming, no sidecar `identity.json` editing in 4.2.
+- **Middle — editor pane.** Same Monaco from 4.1, now with `scene.json` and `effects/*.wgsl` as proper tabs.
+- **Right — binding inspector.** Structured editor for the binding currently selected. Monaco stays the source of truth; this panel exposes dropdowns / sliders / pickers that mutate the JSON and write back.
+
+**Binding inspector — visual driver routing.** Per selected binding:
+
+- **Selector row.** Dropdown for selector kind (`id` / `tag` / `group` / `all`), second dropdown populated from the loaded pack. "→ N layers" chip; click to highlight on the surface canvas.
+- **Effect row.** Dropdown of built-ins + project-local + "inline WGSL". Inline reveals an embedded textarea or jumps the middle pane to a fresh Effects tab.
+- **Param rows** — one per input declared in the effect's descriptor. Editor shape by type: `float` → numeric input + driver picker; `color` → swatch; `bool` → toggle; `color[]` → reorderable swatches; `vec2` / `image` → text input.
+- **Driver picker** (for any `float` param): `const(value)`, `clock.bars(n)` / `beats(n)` / `phase(rate)` / `time`, `audio.band(low | mid | high)`, `audio.onset(band, decay)`, `ui.slider(name, [min, max])`. Each driver-bound row shows the driver's *live value* as a small filled bar — confirms the audio is moving while you author.
+- **"Add binding"** at the top of the binding list — opens a fresh row defaulting to `{ select: all, effect: tint, color: white }`.
+
+Both surfaces round-trip cleanly: Monaco save → core hot-reload; inspector edit → JSON updated in Monaco → save → core hot-reload. One state.
+
+#### Perform route
+
+- **Top — surface preview** (expanded from 4.1's corner thumbnail).
+- **Middle — audio feature strip.** Three vertical bars for `audio.band(low/mid/high)` + three onset-flash indicators with current decay envelopes. Powered by `telemetry.subscribe(['audio'])`. This *is* the post-refactor audio-debug viz — no full FFT in v1 (per `audio_refactor_plan.md` §10), no broadband RMS. Tuning happens on the audio server's UI (click OSC pill).
+- **Bottom — driver rack.** Single scrollable list of every driver-bound param in the active scene. Per row: `binding_id · param_name`, source pill (compact: `audio.onset(mid, 0.3)`, `clock.bars(8)`, `ui.slider("warmth")`, `const(0.4)`), live value bar, inline control if applicable (`ui.slider` → knob; `audio.onset` → decay slider; `clock.bars/beats` → `n` stepper; `audio.band` → informational), "→ N layers" affects chip.
+
+All edits fire `param.set(...)` or the driver-replace RPC. Ephemeral by default; explicit "save to scene" writes back to `scene.json`.
+
+#### Debug route
+
+Dev-time tool. Vertical stack of collapsible panels — kept dense because this is the page that lets me debug the build. Designed as a self-contained route that can be cut without touching Prepare or Perform. Gated behind `WZRD_DEBUG_UI` so release builds can hide it.
+
+- **Connectivity.** OSC audio feed (bind addr, peer, packet rate, last-packet age, dispatcher histogram of `/audio/lmh` and `/audio/onset/*` counts, last `/audio/meta`), file watcher, Tauri IPC, `wzrd_mcp` reachability (ping `GET /health` every 5s). Each row green/amber/red.
+- **Render stats.** Frame time (p50/p95/p99 over 10s), FPS, mask atlas slice count, active pipeline count, pass-plan length. ~4 Hz updates.
+- **Driver bus snapshot.** Live values of every active driver. 30 Hz telemetry channel.
+- **Hot-reload events.** Scrollable log of every effect/scene reload attempt with outcome. The panel I'll stare at most while iterating on shaders.
+- **Log stream.** Structured `log::*` events from the core. Filter by level + target. Capped at 2000 lines in the UI; disk log unchanged.
+- **Pack & scene state.** Read-only dump of currently loaded `pack.json`, active `scene.json`, compiled effects, resolved layer sets per binding.
+
+**RPC additions on top of 4.1:** widen `telemetry.subscribe` channels to include `log`, `frame_stats`, `drivers`, full `audio` (post-refactor `{ band_low/mid/high, onset_low/mid/high }`), `connectivity`. The §3.11 method set (`param.set`, `param.bind`, `binding.*`, `transport.*`, `calibration.set`) is already there.
+
+**Deliverable:** the three-route Tauri app that makes "wire audio band X to param Y on layer Z" a few-clicks operation, with a working Debug page for the build phase.
+
+### Phase 4.3+ — UI polish (deferred)
+
+Add against demand, not the spec. Currently deferred:
+
+- **Layer → audio matrix sidebar** (rows = layers, cols = bands; cell intensity = live driver value). Redundant with the binding inspector for everyday work — add only if scenes get dense enough to warrant the transposed view.
+- **Driver-rack grouping / filter chips** (`all · audio · clock · ui-slider`).
+- **Per-binding modulation depth slider** — would require wrapping driver expressions in `{ driver, depth, base }` in the scene schema. Design after a few real shows expose what shape it needs to take. Today's workarounds: effect params authored with sensible ranges, a `ui.slider` driver wrapping the audio-driven value inside the effect's own WGSL, or tuning the audio server's gain/compression.
+- Mobile / phone access (Perform on iPhone over WebSocket).
+- Master "audio listen" fader, panic blackout button, scene chooser grid + scene save-as, binding mute toggles, scene crossfade, auto-pilot chain.
+- Calibration UI (4-corner drag) + re-shoot flow.
+- Region inspector with sidecar `identity.json` editing and re-author flow.
+- AI co-author panel (lands properly in Phase 7).
+- `scene.ts` Monaco surface (JSON-only through 4.2).
+- shadcn/ui or any real design system pass.
+- Debug RPC trace panel + manual JSON-RPC console + GPU memory readout.
+- FFT-bin spectrum viz / `audio.fft` driver (waits on server-side `osc.send_fft` per `audio_refactor_plan.md` §10).
+- Audio-server control passthrough (tunneling the server's gates / compression / onset thresholds through WZRD — explicit anti-feature; "click OSC pill → open server UI" is simpler).
+- Recording, video export — out of scope for v1 generally.
 
 ### Phase 5 — Video (1–2 weeks)
 
@@ -654,14 +810,25 @@ The hardware target. If a 200-line Rust+wgpu prototype playing 10 HAP files into
 
 Two paths to validate, in order:
 
-1. **Headless (Phase 2).** Run the standalone `render-core` binary with no UI. Edit `scene.json` in any editor → file watcher fires → core diffs against current state → projector updates within one frame budget. This is the agent's critical path; it must work before the webview exists.
-2. **Webview (Phase 4).** Edit `scene.ts` in Monaco → webview transpiles to JSON on save → IPC → same diff/apply path. Same result, ergonomic surface for humans.
+1. **Headless (Phase 2). ✅ validated.** Run the standalone `render-core` binary with no UI. Edit `scene.json` in any editor → file watcher fires → core diffs against current state → projector updates within one frame budget. This is the agent's critical path; it must work before the webview exists.
+2. **Webview JSON round-trip (Phase 4.1/4.2).** Edit `scene.json` in Monaco → save → `scene.load(json)` over Tauri IPC → same diff/apply path. JSON-only through 4.2; the `scene.ts` typed-DSL surface (transpile-on-save) is deferred to 4.3+ (see "UI polish (deferred)").
 
-If headless works and webview works, the agent loop is unblocked end-to-end.
+If headless works and the JSON round-trip works, the agent loop is unblocked end-to-end.
 
-### 6.6 User-authored WGSL effect hot-reload (D15)
+### 6.6 User-authored WGSL effect hot-reload (D15) ✅ validated (Phase 3)
 
-Drop `effects/shimmer/{shader.wgsl, descriptor.json}` into a project folder, bind it from `scene.json`, edit the WGSL file, watch the pipeline rebuild without an engine restart. `naga` validation errors should surface as a UI/CLI message, not a crash, and not blank the projector — the previous good pipeline keeps running until the new one is valid. This is the LLM's primary creative surface; verify it actually feels good before promising it.
+Drop `effects/<name>/{shader.wgsl, descriptor.json}` into a project folder, bind it from `scene.json`, edit the WGSL file, watch the pipeline rebuild without an engine restart. `naga` pre-validates the composed source (`prelude + body + main`); errors surface as `log::error!` messages, not crashes, and the previous good pipeline keeps rendering until the new one validates. Inline-WGSL bindings (content-hashed pipeline keys) share the same path. Verified end-to-end in `render-core/examples/phase3_smoke.scene.json` + `render-core/examples/effects/drift/`.
+
+### 6.7 `wgsl.validate(source)` IPC shape (Phase 4.1)
+
+Two viable implementations of the inline-WGSL Monaco squiggles:
+
+1. **Validate-in-core.** Tauri command bounces source over IPC → core composes `prelude + body + main`, calls `naga::front::wgsl::parse_str`, maps the `ParseError` span back to a `{line, col, message, severity}` list → returns over IPC. One `naga` (already a core dep), perfect parity with the live pipeline path. Cost: every keystroke (debounced) round-trips through IPC.
+2. **Validate-in-webview.** Build `naga` as a WASM module, load it in the renderer process, run synchronous validation in the Monaco worker. Zero IPC latency. Cost: a second `naga` build configuration, divergence risk if the WASM version drifts from the Rust crate version, larger webview bundle.
+
+Lean: pick (1) for 4.1 — the IPC cost is negligible vs. the parity win, and `naga::front::wgsl::parse_str` is already what compositor.rs calls. Only spike (2) if the keystroke-debounce experience genuinely feels laggy at the projector.
+
+Spike acceptance: a deliberately bad shader (missing semicolon, undeclared identifier, wrong return type) surfaces a Monaco marker on the right line within ~150ms of the keystroke, on the same source the engine would compile.
 
 ---
 
@@ -696,7 +863,7 @@ Not blockers for Phase 0–2; flagged for later decision.
 3. **macOS-first or Linux-first ship.** Lean macOS first (dev machine), Linux parity later.
 4. **HAP-Q vs HAP plain.** HAP-Q better quality, larger files, slower decode. The "10× 1080p" target is for HAP plain; HAP-Q probably caps lower.
 5. **ISF importer subset.** No-multipass / no-persistent-buffer is the obvious v0. Audio-input ISFs (`audioFFT`, `audio`) translate naturally to our driver bus. `IMG_PIXEL` / `IMG_NORM_PIXEL` / passthrough macros are a follow-up call.
-6. **Audio loopback on macOS without user setup.** Currently requires BlackHole / Loopback. Apple makes a system tap hard. *Lean: document BlackHole, don't bundle a tap.*
+6. ~~**Audio loopback on macOS without user setup.**~~ **Resolved.** Audio capture moved out of `render-core` into the standalone Realtime Audio Feature Server (separate Python process). Any system-loopback dance (BlackHole / Loopback / system tap) is now the audio server's problem, and tunable from its own browser UI. `render-core` just listens for OSC features — no mic permission prompt on macOS first run.
 7. **Remote control over a tunnel for collaboration / demo.** Trivial to enable later (the WS surface is already remote-ready), but auth/ACL is real work. Not in v1.
 8. **Multi-projector / edge-blending.** Not in v1, but the architecture (one composite buffer per output, per-output homography) supports it. Don't accidentally hard-code single-output.
 9. **Scene reload granularity.** Hot-swapping a single binding's params is cheap; re-running the entire scene is more honest. The middle path (diff by stable binding `id`, re-init only changed ones) is what Phase 2 targets — every binding has a stable `id` from day one (§4.2).
@@ -712,7 +879,6 @@ Carried forward from prior plan §8, still relevant:
 - **Texture-array upload cost.** Uploading ~100 antialiased masks at load time may be slow even under the 256-slice cap (D4). Mitigation: lazy-load mask slices, or pack masks more tightly. Measure before optimizing.
 - **User-WGSL validation surface.** D15 lets the LLM ship arbitrary shader code. `naga` catches syntax/type errors at load, but pathological shaders (infinite loops in compute, huge buffer reads, GPU hangs) can still kill a frame. Mitigation: keep effects to fragment-only initially, set conservative pipeline timeouts where the backend supports them, and isolate the previous-good pipeline so a bad load never blanks the projector.
 - **Color banding under many additive blends.** 8-bit-per-channel render targets band fast under flash + glow + flood-fill stacks. Plan for an opt-in 16-bit-float intermediate composite buffer.
-- **Audio onset detection.** Raw FFT is easy; good onset detection is library work. Plan to swap implementations if the first one feels sluggish. `aubio` (FFI), or a hand-rolled high-frequency-flux detector, are the options.
 - **HMR + GPU resource cleanup.** With effects added/removed live, leaks compound fast. Addressed structurally by the swap-on-success pipeline lifecycle in §3.6 — every pipeline / bind group / pass plan has a single owner and an explicit replacement protocol from day one, not retrofitted after the first leak. Specific failure modes to watch: textures held by stale bind groups after a pipeline swap, decoder staging slots from a closed video stream, FBO targets from a deleted slow-path layer, and `naga` module handles retained after an effect is removed from the project. The Phase 6.6 spike must exercise these (rapid edit/save loops on inline WGSL, video stream stop/start, scene reload mid-frame) and verify GPU memory plateaus, not climbs.
 - **Layer-pack format evolution.** `version: 1` from day one, loader refuses unknown majors, bump on breaking changes.
 - **Calibration drift after physical bumps.** Handled by the re-shoot flow (§3.9), but the workflow itself needs to be smooth enough that users actually use it.

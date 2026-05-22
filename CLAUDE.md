@@ -39,7 +39,7 @@ No linting, formatting, or CI pipelines are configured. No pytest — tests use 
 - `wzrd_mcp/` — FastMCP server layer wrapping wzrd functions as tools
 
 **One Rust crate** at the repo root:
-- `render-core/` — Realtime additive projection-mapping engine (wgpu + winit). Standalone binary (`render-core --scene scene.json`) that consumes a layer pack produced by `wzrd.layerpack`. Phase 2 of `render_engine_architecture.md` lives here. See `render-core/README.md`.
+- `render-core/` — Realtime additive projection-mapping engine (wgpu + winit). Standalone binary (`render-core --scene scene.json`) that consumes a layer pack produced by `wzrd.layerpack`. Phases 0–3 of `render_engine_architecture.md` are landed: pack loader, scene-aware compositor, homography pass, driver bus (clock + audio via OSC + ui-slider stub), built-in effect catalog (`tint`, `hueCycle`, `flash`, `wobble`), **inline + project-local user-WGSL effects with `naga`-validated swap-on-success hot-reload (D15)**. Project-local effects live in `<scene_dir>/effects/<name>/{shader.wgsl, descriptor.json}`. Audio features (`audio.band`, `audio.onset`) arrive over OSC from the standalone Realtime Audio Feature Server (separate Python repo at `~/Documents/GitHub/Realtime_PyAudio_FFT`) — bind defaults to `127.0.0.1:9000`, override with `--osc-addr`, skip with `--no-osc`. No `audio.rms`/`audio.bpm`/`audio.fft` in v1. Phase 4 (Tauri shell) is next. See `render-core/README.md` and `audio_refactor_plan.md`.
 
 ### wzrd/ package
 

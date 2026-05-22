@@ -89,7 +89,7 @@ def test_layerpack():
     )
     assert scene["version"] == 1
     assert scene["surface"] == "surface.png"
-    assert os.path.isfile(os.path.join(pack_dir, "scene.json"))
+    assert os.path.isfile(os.path.join(pack_dir, "pack.json"))
     assert os.path.isfile(os.path.join(pack_dir, "surface.png"))
     assert any(layer["id"] == "primary" for layer in scene["layers"]), \
         "tags mapping did not apply"

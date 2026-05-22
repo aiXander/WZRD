@@ -823,7 +823,7 @@ async def build_layerpack(
     include_background: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Build a WZRD layer pack (scene.json + masks/ + references/) for the realtime render-core.
+    """Build a WZRD layer pack (pack.json + masks/ + references/) for the realtime render-core.
 
     Takes a set of semantic mask images (typically the output of `extract_color_regions`,
     possibly hand-edited / SAM-refined) and an optional per-mask tags structure, and
@@ -935,7 +935,7 @@ async def build_layerpack(
         )
 
         log_progress(_name, f"Uploading pack ({len(scene['layers'])} layers)...")
-        # Upload masks and the surface in parallel; rewrite scene.json with URLs.
+        # Upload masks and the surface in parallel; rewrite pack.json with URLs.
         files_to_upload: list[tuple[str, Path]] = []
         for layer in scene["layers"]:
             files_to_upload.append((f"layer:{layer['id']}", pack_dir / layer["mask"]))
@@ -954,9 +954,9 @@ async def build_layerpack(
         if scene.get("source_capture"):
             scene["source_capture_url"] = url_map["source_capture"]
 
-        # Persist the rewritten scene.json and publish it too.
+        # Persist the rewritten pack.json and publish it too.
         import json as _json
-        scene_path = pack_dir / "scene.json"
+        scene_path = pack_dir / "pack.json"
         scene_path.write_text(_json.dumps(scene, indent=2))
         scene_url = await upload_async(str(scene_path))
 

@@ -7,7 +7,7 @@ and a small hand-authored tags file, and emits a self-contained directory
 that the realtime render-core consumes:
 
     layerpack-<name>/
-      scene.json            # §4.1 layer-pack schema, version 1
+      pack.json             # §4.1 layer-pack schema, version 1
       surface.png           # darkened / aligned surface (for preview overlay)
       masks/
         000_<id>.png        # antialiased grayscale, projector-resolution
@@ -258,7 +258,7 @@ def build_layerpack(
             complement of the union of all input masks.
 
     Returns:
-        The serialised ``scene.json`` content as a dict.
+        The serialised ``pack.json`` manifest content as a dict.
     """
     masks_dir = Path(masks_dir)
     output_dir = Path(output_dir)
@@ -420,7 +420,7 @@ def build_layerpack(
     if ref_canny_rel:
         scene["references"] = {"canny": ref_canny_rel}
 
-    with open(output_dir / "scene.json", "w") as f:
+    with open(output_dir / "pack.json", "w") as f:
         json.dump(scene, f, indent=2)
 
     return scene

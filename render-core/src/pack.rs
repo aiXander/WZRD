@@ -69,7 +69,11 @@ pub struct LoadedPack {
     #[allow(dead_code)]
     pub pack_dir: PathBuf,
     pub manifest: PackManifest,
-    /// One contiguous `width*height*N` R8 buffer, slice-major.
+    /// One contiguous `width*height*N` R8 buffer, slice-major. Owns the
+    /// mask bytes only until [`crate::gpu::GpuContext::new`] uploads them to
+    /// the `Texture2DArray<R8>` — at that point the caller is expected to
+    /// drop the Vec (the GPU has the canonical copy). See the post-init
+    /// block in `main.rs::resumed`.
     pub mask_atlas: Vec<u8>,
     pub atlas_width: u32,
     pub atlas_height: u32,
@@ -84,11 +88,33 @@ pub struct LoadedPack {
 
 impl LoadedPack {
     pub fn load(pack_dir: &Path) -> Result<Self> {
-        let manifest_path = pack_dir.join("scene.json");
-        let raw = fs::read_to_string(&manifest_path)
-            .with_context(|| format!("reading layer-pack manifest {}", manifest_path.display()))?;
+        // `pack.json` is the canonical manifest name; we also accept the
+        // legacy `scene.json` (Phase 1/2 wrote it under that name and shared
+        // the filename with the runtime control file, which was a footgun —
+        // see architecture review v1 issue #5).
+        let manifest_path = pack_dir.join("pack.json");
+        let raw = if manifest_path.exists() {
+            fs::read_to_string(&manifest_path)
+                .with_context(|| format!("reading layer-pack manifest {}", manifest_path.display()))?
+        } else {
+            let legacy = pack_dir.join("scene.json");
+            if legacy.exists() {
+                log::warn!(
+                    "pack at {} uses legacy `scene.json` manifest name; \
+                     rename to `pack.json` (this fallback will be removed in a future build)",
+                    pack_dir.display()
+                );
+                fs::read_to_string(&legacy)
+                    .with_context(|| format!("reading legacy layer-pack manifest {}", legacy.display()))?
+            } else {
+                bail!(
+                    "no layer-pack manifest found in {} (expected pack.json)",
+                    pack_dir.display()
+                );
+            }
+        };
         let manifest: PackManifest = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing layer-pack manifest {}", manifest_path.display()))?;
+            .with_context(|| format!("parsing layer-pack manifest under {}", pack_dir.display()))?;
 
         if manifest.version != PACK_VERSION {
             bail!(

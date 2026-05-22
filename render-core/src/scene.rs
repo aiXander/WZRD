@@ -64,23 +64,15 @@ pub enum SelectorSpec {
     Group { group: String },
 }
 
-/// Effect reference. Phase 2 only handles the built-in-name form; inline WGSL
-/// (D15) lands in Phase 3 once we have the effect loader.
+/// Effect reference. The string form points at a built-in or
+/// project-local effect by name. The object form is an inline WGSL spec
+/// (D15) — fields are parsed lazily by `effects::InlineEffectSpec` so we
+/// don't pin its surface here.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum EffectRef {
     Named(String),
-    /// Inline WGSL effect (D15). Phase 2 rejects these — kept in the type
-    /// surface so existing scene.json files can already declare them and the
-    /// Phase 3 effect loader plugs straight in.
-    Inline(#[allow(dead_code)] InlineEffect),
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct InlineEffect {
-    pub inline: bool,
-    pub wgsl: String,
+    Inline(serde_json::Value),
 }
 
 impl SceneFile {

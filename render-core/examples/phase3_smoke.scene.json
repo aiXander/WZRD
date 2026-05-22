@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "pack": "../../test_results/layerpack/pack",
+  "transport": { "bpm": 120 },
+  "bindings": [
+    {
+      "id": "bg",
+      "select": { "id": "background" },
+      "effect": "tint",
+      "params": { "color": "#0a0610" }
+    },
+    {
+      "id": "primary_palette",
+      "select": { "id": "primary" },
+      "effect": "hueCycle",
+      "params": {
+        "phase":  { "driver": "clock.bars", "n": 8 },
+        "color0": "#0a3322",
+        "color1": "#3c5544",
+        "color2": "#7ee355",
+        "color3": "#5a2266"
+      }
+    },
+    {
+      "id": "primary_flash",
+      "select": { "id": "primary" },
+      "effect": "flash",
+      "params": {
+        "envelope": { "driver": "audio.onset", "band": "low", "decay": 0.18 },
+        "base":     { "driver": "audio.band", "band": "low" },
+        "color":    "#ffffff"
+      }
+    },
+    {
+      "id": "wobble_demo",
+      "select": { "tag": "test" },
+      "effect": "wobble",
+      "params": {
+        "amp":   0.012,
+        "freq":  18.0,
+        "time":  { "driver": "clock.time" },
+        "color": "#ff66aa"
+      }
+    },
+    {
+      "id": "inline_ripple",
+      "select": { "id": "region_mask_003_color_fefd00" },
+      "effect": {
+        "inline": true,
+        "name": "ripple",
+        "wgsl": "fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32> { let r = length(uv - vec2<f32>(0.5, 0.5)); let w = 0.5 + 0.5 * sin(r * 30.0 - state.time * 3.0); let a = w * mask; return vec4<f32>(0.2 * a, 0.7 * w * a, 0.9 * a, a); }",
+        "inputs": []
+      },
+      "params": {}
+    },
+    {
+      "id": "audio_drift",
+      "select": { "id": "region_mask_004_color_fd0800" },
+      "effect": "drift",
+      "params": {
+        "amount": { "driver": "audio.band", "band": "mid" },
+        "color":  "#ff5522"
+      }
+    }
+  ],
+  "post": [],
+  "projectorCalibration": null
+}

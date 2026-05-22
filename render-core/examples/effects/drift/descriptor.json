@@ -1,0 +1,7 @@
+{
+  "name": "drift",
+  "inputs": [
+    { "name": "amount", "type": "float", "default": 0.0 },
+    { "name": "color",  "type": "color", "default": "#ffffff" }
+  ]
+}

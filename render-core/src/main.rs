@@ -1,21 +1,27 @@
-//! `render-core` — WZRD's realtime engine (Phase 2 skeleton).
+//! `render-core` — WZRD's realtime engine.
 //!
 //! Usage:
 //!     render-core --scene path/to/scene.json
 //!     render-core --scene scene.json --pack path/to/layerpack/
+//!     render-core --scene scene.json --effects path/to/effects/
 //!     render-core --scene scene.json --display 1
 //!     render-core --scene scene.json --windowed
 //!
-//! Headless agent loop: edit `scene.json`, save, projector window updates
-//! within one frame budget — no UI process required (D13).
+//! Headless agent loop: edit `scene.json` or any file under `effects/` and
+//! the projector window updates within one frame budget. No UI process
+//! required (D13). The Tauri shell lands in Phase 4 as a *second* front-end
+//! on top of this binary — not a replacement.
 
 mod compositor;
+mod drivers;
 mod effects;
 mod gpu;
+mod osc;
 mod pack;
 mod scene;
 mod watch;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -27,15 +33,18 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::compositor::PassPlan;
+use crate::drivers::Transport;
+use crate::effects::EffectRegistry;
 use crate::gpu::GpuContext;
+use crate::osc::{try_spawn, AudioFeatures, OscListener};
 use crate::pack::LoadedPack;
 use crate::scene::SceneFile;
-use crate::watch::SceneWatcher;
+use crate::watch::{ChangeKind, SceneWatcher};
 
 #[derive(Parser, Debug)]
 #[command(name = "render-core", version, about = "WZRD realtime engine")]
 struct Cli {
-    /// Path to a layer pack directory (containing scene.json + masks/).
+    /// Path to a layer pack directory (containing pack.json + masks/).
     /// Defaults to the `pack` field inside `--scene`.
     #[arg(long)]
     pack: Option<PathBuf>,
@@ -45,6 +54,11 @@ struct Cli {
     #[arg(long)]
     scene: PathBuf,
 
+    /// Path to a project-local effects directory holding user-authored WGSL
+    /// effects (D15). Defaults to `<scene_dir>/effects/` if it exists.
+    #[arg(long)]
+    effects: Option<PathBuf>,
+
     /// Monitor index to fullscreen onto. Defaults to the primary monitor.
     #[arg(long)]
     display: Option<usize>,
@@ -53,11 +67,20 @@ struct Cli {
     /// on a single-display laptop while iterating on a scene.
     #[arg(long)]
     windowed: bool,
+
+    /// Disable OSC ingest entirely. The engine still runs (clocks tick,
+    /// audio.* drivers return 0) but no audio features arrive.
+    #[arg(long)]
+    no_osc: bool,
+
+    /// UDP address the OSC receiver binds to. Must match the audio
+    /// server's `osc.destinations[*].port`. Default 127.0.0.1:9000.
+    /// Use 0.0.0.0:9000 when the server runs on another machine.
+    #[arg(long, default_value = "127.0.0.1:9000")]
+    osc_addr: SocketAddr,
 }
 
 fn main() -> Result<()> {
-    // Default: render-core at info, wgpu internals at warn. Override with
-    // RUST_LOG, e.g. `RUST_LOG=render_core=debug,wgpu_core=info`.
     env_logger::Builder::from_env(
         env_logger::Env::default()
             .default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"),
@@ -73,12 +96,19 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Top-level app state. `winit` calls into here for window + event handling.
 struct App {
     cli: Cli,
     pack: LoadedPack,
     scene: SceneFile,
     scene_path: PathBuf,
+    effects_dir: Option<PathBuf>,
+    registry: EffectRegistry,
+    transport: Transport,
+    audio_state: Arc<AudioFeatures>,
+    /// Owned by the app so the OSC recv thread stays alive. Stays `None`
+    /// if the UDP bind failed (port in use, permission denied) or the
+    /// operator passed `--no-osc`.
+    _osc_listener: Option<OscListener>,
 
     // Lazily initialised once `resumed` fires (winit 0.30 contract).
     gpu: Option<GpuContext>,
@@ -108,11 +138,45 @@ impl App {
             pack.atlas_height,
         );
 
+        // Effects dir: explicit CLI > <scene_dir>/effects/ if it exists > none.
+        let effects_dir = match &cli.effects {
+            Some(p) => Some(p.clone()),
+            None => {
+                let default = scene_path
+                    .parent()
+                    .map(|p| p.join("effects"))
+                    .unwrap_or_else(|| PathBuf::from("effects"));
+                if default.exists() {
+                    Some(default)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(d) = &effects_dir {
+            log::info!("watching effects dir {}", d.display());
+        }
+        let registry = EffectRegistry::new(effects_dir.clone());
+
+        let transport = Transport::new(scene.transport.bpm);
+        let audio_state = AudioFeatures::new();
+        let osc_listener = if cli.no_osc {
+            log::info!("OSC ingest disabled (--no-osc)");
+            None
+        } else {
+            try_spawn(Arc::clone(&audio_state), cli.osc_addr)
+        };
+
         Ok(Self {
             cli,
             pack,
             scene,
             scene_path,
+            effects_dir,
+            registry,
+            transport,
+            audio_state,
+            _osc_listener: osc_listener,
             gpu: None,
             plan: None,
             watcher: None,
@@ -120,20 +184,24 @@ impl App {
     }
 
     fn rebuild_plan(&mut self) {
-        let Some(gpu) = self.gpu.as_ref() else {
+        let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        match PassPlan::build(gpu, &self.pack, &self.scene) {
+        match PassPlan::build(gpu, &self.pack, &self.scene, &self.registry) {
             Ok(plan) => {
                 log::info!("scene plan built ({} layer passes)", plan.layer_passes.len());
                 self.plan = Some(plan);
             }
             Err(err) => {
                 log::error!("rejecting scene update: {err:#}");
-                // Keep the previous good plan rendering (swap-on-success, §3.6).
+                // Keep the previous good plan rendering (§3.6 swap-on-success).
             }
         }
-        gpu.set_homography(self.scene.projector_calibration);
+        // BPM may have shifted in the new scene file.
+        self.transport.set_bpm(self.scene.transport.bpm);
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.set_homography(self.scene.projector_calibration);
+        }
     }
 
     fn reload_scene(&mut self) {
@@ -149,6 +217,22 @@ impl App {
                 );
             }
         }
+    }
+
+    fn reload_effects(&mut self) {
+        let changed = self.registry.rescan_disk();
+        if changed.is_empty() {
+            // Notify often emits 2–3 events per atomic save; the mtime check
+            // in `rescan_disk` filters out spurious bursts.
+            return;
+        }
+        log::info!("effect pipelines invalidated: {:?}", changed);
+        if let Some(gpu) = self.gpu.as_mut() {
+            for key in &changed {
+                gpu.pipeline_cache.remove(key);
+            }
+        }
+        self.rebuild_plan();
     }
 
     fn build_window(&self, event_loop: &ActiveEventLoop) -> Result<Window> {
@@ -176,9 +260,8 @@ impl App {
                 self.pack.atlas_height,
             ));
         } else {
-            // Per §6.1: borderless fullscreen sized to the target monitor is
-            // the stable fallback on macOS where true exclusive fullscreen
-            // misbehaves under operator interaction.
+            // §6.1: borderless fullscreen is the macOS-stable fallback under
+            // operator interaction.
             attrs = attrs
                 .with_decorations(false)
                 .with_fullscreen(Some(Fullscreen::Borderless(Some(target_monitor.clone()))));
@@ -212,9 +295,13 @@ impl ApplicationHandler for App {
             }
         };
         self.gpu = Some(gpu);
+        // The CPU-side mask atlas was a one-shot upload buffer — the GPU now
+        // owns the canonical copy. Drop the bytes (architecture review v1 #6).
+        self.pack.mask_atlas = Vec::new();
+        self.pack.mask_atlas.shrink_to_fit();
         self.rebuild_plan();
 
-        match SceneWatcher::new(&self.scene_path) {
+        match SceneWatcher::new(&self.scene_path, self.effects_dir.as_deref()) {
             Ok(w) => self.watcher = Some(w),
             Err(err) => log::warn!("hot-reload disabled: {err:#}"),
         }
@@ -235,6 +322,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let (Some(gpu), Some(plan)) = (self.gpu.as_ref(), self.plan.as_ref()) {
+                    plan.tick(gpu, &self.transport, &self.audio_state);
                     match plan.record_and_submit(gpu) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -261,15 +349,18 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Hot-reload poll. The watcher debounces editor save bursts; we only
-        // hit `reload_scene` on the trailing event.
-        let needs_reload = self
+        // Hot-reload poll. The watcher debounces editor save bursts; we
+        // process each change kind in order.
+        let changes = self
             .watcher
             .as_mut()
             .map(|w| w.poll())
-            .unwrap_or(false);
-        if needs_reload {
-            self.reload_scene();
+            .unwrap_or_default();
+        for change in changes {
+            match change {
+                ChangeKind::Effects => self.reload_effects(),
+                ChangeKind::Scene => self.reload_scene(),
+            }
         }
         if let Some(gpu) = self.gpu.as_ref() {
             gpu.window.request_redraw();

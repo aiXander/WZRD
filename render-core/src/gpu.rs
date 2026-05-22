@@ -1,9 +1,19 @@
 //! wgpu state: surface, device, queue, mask-atlas texture, pipelines.
 //!
-//! Phase 2 lives entirely inside this one file — there's only the per-layer
-//! `tint` pipeline plus the final homography pass. The compositor in
-//! `compositor.rs` consumes this state and issues the per-frame work.
+//! Phase 3 widens what Phase 2 had:
+//!
+//! - Two uniforms instead of one — a per-frame `FrameState` (time, audio,
+//!   transport phase) shared by every binding, and a per-binding
+//!   `LayerParams` (effect_id, slice, scalar / colour slots).
+//! - A pipeline cache keyed by effect "pipeline_key" (D15). Built-ins share
+//!   one pipeline; each user-authored WGSL effect gets its own.
+//! - A WGSL composer that stitches `prelude + effect_body + main` so user
+//!   code only writes `fn effect(uv, mask) -> vec4<f32>`.
+//!
+//! The compositor in `compositor.rs` owns the pass plan and ticks
+//! `FrameState` each frame; this file just exposes the bricks.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -11,22 +21,97 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::effects::{MAX_COLOR_PARAMS, MAX_SCALAR_PARAMS};
 use crate::pack::LoadedPack;
 
 /// Format for the offscreen composite buffer.
 ///
-/// `Rgba8UnormSrgb` keeps the output gamma-correct in the projector path.
-/// We'll move to 16-bit-float when we add additive stacks (§9 colour banding).
-pub const COMPOSITE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// `Rgba16Float` is the right home for true additive stacks: contributions
+/// can overshoot 1.0 without banding, and the swapchain (sRGB UNORM) clamps
+/// + gamma-encodes on the final write — which is exactly what "white soup"
+/// looks like on a physical projector (architecture review v1 #1 + #11).
+pub const COMPOSITE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+const PRELUDE_WGSL: &str = include_str!("shaders/effect_prelude.wgsl");
+const MAIN_WGSL: &str = include_str!("shaders/effect_main.wgsl");
+const BUILTIN_BODY_WGSL: &str = include_str!("shaders/builtin_effects.wgsl");
+const HOMOGRAPHY_WGSL: &str = include_str!("shaders/homography.wgsl");
+
+/// Pipeline cache key for the bundled built-in effects. User effects get
+/// content- or path-derived keys (see `effects::EffectKind::User`).
+pub const BUILTIN_PIPELINE_KEY: &str = "builtin";
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct LayerUniforms {
-    pub color: [f32; 4],
+pub struct FrameStateGpu {
+    pub time: f32,
+    pub bar_phase: f32,
+    pub beat_phase: f32,
+    pub bpm: f32,
+    pub audio_low: f32,
+    pub audio_mid: f32,
+    pub audio_high: f32,
+    pub onset_low: f32,
+    pub onset_mid: f32,
+    pub onset_high: f32,
+    // Two scalars of padding to hit std140 16-byte alignment ahead of
+    // `resolution` (vec4). Keep both — the prelude struct mirrors this.
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub resolution: [f32; 4],
+}
+
+impl FrameStateGpu {
+    pub fn zeroed(width: u32, height: u32) -> Self {
+        Self {
+            time: 0.0,
+            bar_phase: 0.0,
+            beat_phase: 0.0,
+            bpm: 120.0,
+            audio_low: 0.0,
+            audio_mid: 0.0,
+            audio_high: 0.0,
+            onset_low: 0.0,
+            onset_mid: 0.0,
+            onset_high: 0.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            resolution: [width as f32, height as f32, 0.0, 0.0],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct LayerParamsGpu {
     pub slice: u32,
+    pub effect_id: u32,
     pub _pad0: u32,
     pub _pad1: u32,
-    pub _pad2: u32,
+    /// 8 scalar slots packed as two vec4 lanes.
+    pub params_f: [[f32; 4]; 2],
+    pub params_c: [[f32; 4]; MAX_COLOR_PARAMS],
+}
+
+impl LayerParamsGpu {
+    pub fn build(slice: u32, effect_id: u32, scalars: &[f32], colors: &[[f32; 4]]) -> Self {
+        let mut params_f = [[0.0f32; 4]; 2];
+        for (i, v) in scalars.iter().enumerate().take(MAX_SCALAR_PARAMS) {
+            params_f[i / 4][i % 4] = *v;
+        }
+        let mut params_c = [[0.0f32; 4]; MAX_COLOR_PARAMS];
+        for (i, c) in colors.iter().enumerate().take(MAX_COLOR_PARAMS) {
+            params_c[i] = *c;
+        }
+        Self {
+            slice,
+            effect_id,
+            _pad0: 0,
+            _pad1: 0,
+            params_f,
+            params_c,
+        }
+    }
 }
 
 #[repr(C)]
@@ -65,19 +150,33 @@ pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
 
+    /// Held to keep the wgpu resource alive; not sampled directly.
+    #[allow(dead_code)]
     pub composite_texture: wgpu::Texture,
     pub composite_view: wgpu::TextureView,
+    /// Bound through the homography bind group; not sampled directly.
+    #[allow(dead_code)]
     pub composite_sampler: wgpu::Sampler,
     pub composite_width: u32,
     pub composite_height: u32,
 
+    /// Held to keep the wgpu resource alive; not sampled directly.
+    #[allow(dead_code)]
     pub mask_atlas: wgpu::Texture,
     pub mask_atlas_view: wgpu::TextureView,
     pub mask_sampler: wgpu::Sampler,
 
     pub layer_bind_group_layout: wgpu::BindGroupLayout,
-    pub layer_pipeline: wgpu::RenderPipeline,
+    pub layer_pipeline_layout: wgpu::PipelineLayout,
+    /// Shared per-frame uniform. Written each frame; read by every pass.
+    pub frame_state_buffer: wgpu::Buffer,
 
+    /// Pipeline cache keyed by `pipeline_key`. Built-ins share
+    /// `BUILTIN_PIPELINE_KEY`; user effects each get their own slot.
+    pub pipeline_cache: HashMap<String, wgpu::RenderPipeline>,
+
+    /// Held to keep the wgpu resource alive — bind group referencing it stays valid.
+    #[allow(dead_code)]
     pub homography_bind_group_layout: wgpu::BindGroupLayout,
     pub homography_pipeline: wgpu::RenderPipeline,
     pub homography_buffer: wgpu::Buffer,
@@ -136,7 +235,6 @@ impl GpuContext {
         };
         surface.configure(&device, &surface_config);
 
-        // Composite buffer sized to the pack's projector_resolution.
         let composite_width = pack.atlas_width;
         let composite_height = pack.atlas_height;
         let (composite_texture, composite_view, composite_sampler) =
@@ -144,12 +242,32 @@ impl GpuContext {
 
         let (mask_atlas, mask_atlas_view, mask_sampler) = upload_mask_atlas(&device, &queue, pack);
 
-        let (layer_bind_group_layout, layer_pipeline) =
-            create_layer_pipeline(&device, COMPOSITE_FORMAT);
+        let layer_bind_group_layout = create_layer_bind_group_layout(&device);
+        let layer_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("layer pipeline layout"),
+            bind_group_layouts: &[&layer_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let frame_state_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("frame state uniform"),
+            contents: bytemuck::bytes_of(&FrameStateGpu::zeroed(composite_width, composite_height)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let mut pipeline_cache = HashMap::new();
+        let builtin_pipeline = build_effect_pipeline(
+            &device,
+            &layer_pipeline_layout,
+            "builtin",
+            BUILTIN_BODY_WGSL,
+        )
+        .context("compiling built-in effect pipeline")?;
+        pipeline_cache.insert(BUILTIN_PIPELINE_KEY.to_string(), builtin_pipeline);
+
         let (homography_bind_group_layout, homography_pipeline) =
             create_homography_pipeline(&device, surface_config.format);
 
-        // Identity homography by default; calibration UI overwrites later.
         let homography_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("homography uniform"),
             contents: bytemuck::bytes_of(&HomographyUniforms::identity()),
@@ -189,7 +307,9 @@ impl GpuContext {
             mask_atlas_view,
             mask_sampler,
             layer_bind_group_layout,
-            layer_pipeline,
+            layer_pipeline_layout,
+            frame_state_buffer,
+            pipeline_cache,
             homography_bind_group_layout,
             homography_pipeline,
             homography_buffer,
@@ -215,51 +335,76 @@ impl GpuContext {
             .write_buffer(&self.homography_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
-    /// Replace the mask atlas after a pack hot-reload. Recreates the texture
-    /// because the slice count may change.
-    ///
-    /// Not wired to the file watcher in Phase 2 — pack changes still require
-    /// a process restart. Hook into the watcher in Phase 3 once the slow-path
-    /// FBO bookkeeping needs the same swap-on-success protocol.
-    #[allow(dead_code)]
-    pub fn replace_mask_atlas(&mut self, pack: &LoadedPack) {
-        let (atlas, view, sampler) = upload_mask_atlas(&self.device, &self.queue, pack);
-        self.mask_atlas = atlas;
-        self.mask_atlas_view = view;
-        self.mask_sampler = sampler;
-        // The composite buffer is also sized to projector_resolution; resize
-        // if the pack changed it.
-        if pack.atlas_width != self.composite_width || pack.atlas_height != self.composite_height {
-            let (tex, view, samp) =
-                create_composite(&self.device, pack.atlas_width, pack.atlas_height);
-            self.composite_texture = tex;
-            self.composite_view = view;
-            self.composite_sampler = samp;
-            self.composite_width = pack.atlas_width;
-            self.composite_height = pack.atlas_height;
-
-            // Recreate the homography bind group since it references composite_view.
-            self.homography_bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("homography bind group (rebuilt)"),
-                    layout: &self.homography_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&self.composite_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.homography_buffer.as_entire_binding(),
-                        },
-                    ],
-                });
-        }
+    pub fn write_frame_state(&self, state: &FrameStateGpu) {
+        self.queue
+            .write_buffer(&self.frame_state_buffer, 0, bytemuck::bytes_of(state));
     }
+
+    /// Compile (or recompile) a user-authored effect pipeline. Caller is
+    /// responsible for keeping the cache key stable across hot-reloads.
+    ///
+    /// Validates the WGSL with `naga` first so a bad shader surfaces as an
+    /// error rather than crashing the device (§3.6 swap-on-success).
+    pub fn upsert_user_pipeline(&mut self, pipeline_key: &str, wgsl: &str) -> Result<()> {
+        let body = wgsl;
+        let pipeline = build_effect_pipeline(
+            &self.device,
+            &self.layer_pipeline_layout,
+            pipeline_key,
+            body,
+        )?;
+        self.pipeline_cache
+            .insert(pipeline_key.to_string(), pipeline);
+        Ok(())
+    }
+}
+
+fn create_layer_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("layer bind group layout"),
+        entries: &[
+            // 0: mask atlas (Texture2DArray<R8>)
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // 1: mask sampler
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // 2: FrameState (shared)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // 3: LayerParams (per pass)
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
 }
 
 fn create_composite(
@@ -278,7 +423,13 @@ fn create_composite(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: COMPOSITE_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // COPY_SRC is here pre-emptively for Phase 4's preview-thumbnail
+        // readback (architecture review v1 #14) — no readback consumer yet,
+        // but adding the flag now means the texture doesn't have to be
+        // recreated when one lands.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -350,56 +501,31 @@ fn upload_mask_atlas(
     (texture, view, sampler)
 }
 
-fn create_layer_pipeline(
+/// Stitch prelude + effect body + main into one shader source, run it
+/// through `naga` for early validation (gives nicer errors than wgpu's
+/// internal panic path), then create the render pipeline.
+fn build_effect_pipeline(
     device: &wgpu::Device,
-    output_format: wgpu::TextureFormat,
-) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("layer bind group layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
+    pipeline_layout: &wgpu::PipelineLayout,
+    label: &str,
+    effect_body: &str,
+) -> Result<wgpu::RenderPipeline> {
+    let source = compose_shader(effect_body);
+
+    // naga pre-validation. Gives a clean error with file:line, without
+    // device-level wgpu panic on a malformed module.
+    naga::front::wgsl::parse_str(&source).map_err(|e| {
+        anyhow::anyhow!("WGSL parse failure in {label}: {}", e.emit_to_string(&source))
+    })?;
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("layer shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/layer.wgsl").into()),
+        label: Some(&format!("effect shader [{label}]")),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
     });
 
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("layer pipeline layout"),
-        bind_group_layouts: &[&bgl],
-        push_constant_ranges: &[],
-    });
-
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("layer pipeline"),
-        layout: Some(&layout),
+    Ok(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(&format!("effect pipeline [{label}]")),
+        layout: Some(pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: "vs_main",
@@ -410,18 +536,24 @@ fn create_layer_pipeline(
             module: &shader,
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
-                format: output_format,
-                // Standard alpha-over blending. Switches to premultiplied
-                // alpha once we have effects that emit pre-multiplied output.
+                format: COMPOSITE_FORMAT,
+                // Additive blending — the load-bearing decision behind the
+                // whole "scene-aware additive projection-mapping" thesis
+                // (architecture review v1 #1). Effects return premultiplied
+                // RGBA — i.e. `vec4(rgb * a, a)` — and the GPU accumulates
+                // `dst += src` so dark pixels stay dark on the projector and
+                // stacked layers genuinely add light. The Rgba16Float
+                // composite (see `COMPOSITE_FORMAT`) makes overdrive safe;
+                // the final sRGB swapchain write clamps to [0, 1].
                 blend: Some(wgpu::BlendState {
                     color: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::SrcAlpha,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
                         operation: wgpu::BlendOperation::Add,
                     },
                     alpha: wgpu::BlendComponent {
                         src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        dst_factor: wgpu::BlendFactor::One,
                         operation: wgpu::BlendOperation::Add,
                     },
                 }),
@@ -437,8 +569,17 @@ fn create_layer_pipeline(
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
         cache: None,
-    });
-    (bgl, pipeline)
+    }))
+}
+
+pub fn compose_shader(effect_body: &str) -> String {
+    let mut s = String::with_capacity(PRELUDE_WGSL.len() + effect_body.len() + MAIN_WGSL.len() + 4);
+    s.push_str(PRELUDE_WGSL);
+    s.push('\n');
+    s.push_str(effect_body);
+    s.push('\n');
+    s.push_str(MAIN_WGSL);
+    s
 }
 
 fn create_homography_pipeline(
@@ -479,7 +620,7 @@ fn create_homography_pipeline(
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("homography shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/homography.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(HOMOGRAPHY_WGSL.into()),
     });
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
