@@ -1,0 +1,36 @@
+[package]
+name = "wzrd-app"
+version = "0.1.0"
+description = "Phase 4 Tauri shell for WZRD render-core."
+edition = "2021"
+rust-version = "1.85"
+
+[lib]
+name = "wzrd_app_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "wzrd-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+crossbeam-channel = "0.5"
+env_logger = "0.11"
+log = "0.4"
+parking_lot = "0.12"
+render-core = { path = "../../render-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tungstenite = "0.21"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

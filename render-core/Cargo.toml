@@ -2,8 +2,12 @@
 name = "render-core"
 version = "0.1.0"
 edition = "2021"
-description = "WZRD realtime additive projection-mapping engine (Phase 2 skeleton)."
+description = "WZRD realtime additive projection-mapping engine."
 rust-version = "1.85"
+
+[lib]
+name = "render_core"
+path = "src/lib.rs"
 
 [[bin]]
 name = "render-core"
@@ -11,9 +15,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+crossbeam-channel = "0.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 log = "0.4"
 env_logger = "0.11"
 naga = { version = "22", features = ["wgsl-in"] }
@@ -23,6 +29,7 @@ rosc = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
+tungstenite = "0.21"
 wgpu = "22"
 winit = "0.30"
 

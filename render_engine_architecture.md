@@ -1,21 +1,43 @@
 # WZRD render-engine — system design
 
-> **Implementation status (2026-05-22).** Phases 0–3 are landed in
-> `render-core/`. The standalone Rust+wgpu binary loads a layer pack, parses
-> `scene.json`, ticks a driver bus (clock + OSC-ingested audio features +
-> ui-slider stub), composites masked layers in z-order, applies a final
-> homography pass, and hot-reloads on `scene.json` or `effects/*` edits.
-> Built-in effects shipped: `tint`, `hueCycle`, `flash`, `wobble`. **Inline
-> + project-local user-WGSL effects work end-to-end (D15)** — `naga`
-> pre-validation + swap-on-success keeps the projector running across bad
-> saves. Audio capture was lifted out of the engine into the standalone
-> Realtime Audio Feature Server (separate Python process); `render-core`
-> is now a passive OSC sink for `/audio/lmh` + `/audio/onset/*`
-> (`audio_refactor_plan.md` is implemented as of 2026-05-22 — kept as the
-> design-rationale paper trail). Tauri shell + webview (Phase 4), video paths
-> (Phase 5), and MCP wrapper (Phase 7) are not yet started. Slow-path FBO
-> routing (D5, `layerRef`) is intentionally deferred — no scene has needed
-> it yet.
+> **Implementation status (2026-05-22).** Phases 0–4.2 are landed.
+> `render-core/` is a Rust crate (`[lib] + [[bin]]`) whose standalone binary
+> still drives the projector headlessly; the new `wzrd-app/` Tauri shell
+> spawns the same binary as a sidecar with `--ws-addr 127.0.0.1:9123` and
+> proxies the §3.11 RPC surface through Tauri commands into a React +
+> TypeScript + Vite + Tailwind webview. Three routes ship — Prepare (surface
+> canvas + Monaco editor + binding inspector), Perform (preview hero +
+> audio strip + driver rack), Debug (collapsible panels for connectivity,
+> render stats, driver bus, hot-reload events, log stream, pack & scene
+> state). Phase 4.1's status strip (OSC/Engine/FPS/Reload pills) sits in
+> the top bar across every route. Inline `naga`-validated WGSL squiggles
+> work in Monaco via `wgsl.validate` IPC. The 4.1 preview thumbnail is
+> implemented as a periodic GPU readback of the composite buffer
+> (`Rgba16Float` → CPU f16 decode → JPEG → base64) emitted on the
+> `preview` telemetry channel at ~15 fps. Audio capture remains in the
+> separate Realtime Audio Feature Server (separate Python process);
+> `render-core` is a passive OSC sink for `/audio/lmh` + `/audio/onset/*`
+> (`audio_refactor_plan.md` kept as the design-rationale paper trail).
+> Video paths (Phase 5) and MCP wrapper (Phase 7) are not yet started.
+> Slow-path FBO routing (D5, `layerRef`) is intentionally deferred — no
+> scene has needed it yet.
+>
+> **Phase 4 architectural choice — subprocess + WS, not in-process winit.**
+> The original spec envisioned Tauri + winit sharing one event loop in one
+> process (§6.1). On macOS that's a real spike (NSApp main thread; exclusive
+> fullscreen interactions with webview focus changes; cross-window
+> ownership). Rather than fight it, Phase 4 lands as **Tauri shell ↔
+> `render-core` subprocess over localhost JSON-RPC WebSocket**. This:
+>   - keeps the headless agent path (`render-core --scene foo.json`) byte-
+>     identical and unblocks every Phase 7 use case from one code path;
+>   - reuses the *exact* method set Phase 7 will expose to MCP — the only
+>     thing remote MCP needs is to point at the same WS surface;
+>   - matches Pattern A (§3.10) — the audio server already lives next door
+>     as a sibling process over OSC; render-core becomes a third sibling
+>     over JSON-RPC. Same model, same operator mental load.
+>   - resolves §6.1 by sidestepping it. The shell never opens the projector
+>     window itself; the subprocess does, and the two halves communicate
+>     only through frames on a wire.
 >
 > **Post-Phase-3 correctness fixes (architecture review v1).** Compositor
 > blending is now genuinely additive (`One + One`); the composite buffer is
@@ -446,7 +468,9 @@ The `scene.ts` typed DSL only matters when a human is in the loop — it's a Mon
 
 **Sidecar packaging (deferred).** When shipping to non-developer users, Tauri can spawn `wzrd_mcp` as a sidecar binary (built via `pyinstaller`) so the user sees one app. Not in v1 — Pattern A (two processes) is the v1 model.
 
-**Third sibling process: the audio feature server.** Same Pattern A applies — the Realtime Audio Feature Server (separate Python repo, `Realtime_PyAudio_FFT`) runs as a long-lived localhost process emitting OSC to `127.0.0.1:9000`. `render-core` listens; the Tauri shell will eventually surface a top-bar status pill plus a "open audio server's browser UI" deep-link for tuning DSP. The engine never embeds audio capture; offline tools, live engine, and the audio server are three independent processes sharing files on disk and localhost protocols.
+**Third sibling process: the audio feature server.** Same Pattern A applies — the Realtime Audio Feature Server (separate Python repo, `Realtime_PyAudio_FFT`) runs as a long-lived localhost process emitting OSC to `127.0.0.1:9000`. `render-core` listens; the Tauri shell surfaces a top-bar status pill that deep-links to the audio server's browser UI for tuning DSP (clicking the OSC pill opens `http://127.0.0.1:8765/`). The engine never embeds audio capture; offline tools, live engine, and the audio server are three independent processes sharing files on disk and localhost protocols.
+
+**Fourth sibling process (as of Phase 4.1): the Tauri shell.** The Tauri shell process spawns `render-core` as a *child* with `--ws-addr 127.0.0.1:9123` and proxies the §3.11 RPC surface through Tauri commands into the React webview. Same Pattern A — restartable independently, communicates only over wires (JSON-RPC over WS in this case). Phase 7's MCP wrapper will connect to the *same* WS surface; the shell isn't a privileged client, just the first one. The standalone `render-core --scene foo.json` (no `--ws-addr`) stays the headless agent target.
 
 **What changes in the existing Python:**
 
@@ -640,7 +664,7 @@ Built out the effect model so the agent loop is genuinely creative. Still no Tau
 
 **Status:** the §1.2 tree scene primitives all work — palette cycle, audio-onset flash, audio-reactive amplitudes, time-driven UV displacement, user-authored shaders. The architectural thesis ("agent edits text, projector responds, no UI") is proven end-to-end.
 
-### Phase 4.1 — Tauri shell, minimum viable UI (~3–5 days) ⏳ next
+### Phase 4.1 — Tauri shell, minimum viable UI (~3–5 days) ✅ done
 
 The smallest UI that adds real value over the standalone headless binary. One window, no routes, no structured editors, no panels. The standalone `render-core` binary and the headless `scene.json` + `effects/*.wgsl` agent path stay unchanged — Tauri is an additional front-end, never a replacement.
 
@@ -670,7 +694,7 @@ That's the value proposition. Everything richer — surface canvas with mask ove
 - Tauri spawns the wgpu render window via `winit` on the projector display (configurable index, default = secondary if present).
 - **IPC bridge** (`src-tauri/src/rpc.rs`): every Tauri command is a thin wrapper around the same dispatch function the future WebSocket will use (§3.11). TS types codegen'd from `rpc.schema.json`.
 - **Frontend stack:** React + TypeScript + Vite. Plain Tailwind. No design system, no router (one screen). shadcn/ui can come later.
-- **No WebSocket server, no remote/phone access in 4.1.** Tauri IPC only.
+- **WS lives between Tauri and render-core, not between webview and remote clients.** "Tauri IPC only" still holds at the *webview* boundary (the React app talks `invoke()`); remote/phone access stays out of 4.1.
 
 **RPC additions:**
 
@@ -682,12 +706,22 @@ Everything else 4.1 needs (`pack.load`, `scene.load`, `effect.upsert`) is alread
 
 **Spikes:**
 
-- **Tauri + `winit` cross-window cooperation on macOS secondary display** (carry-over from §6.1). Re-verified on the Tauri-hosted topology, not just `cargo run` standalone. The only real architectural risk in 4.1.
-- **Monaco + WGSL.** Community grammar + `naga` diagnostics mapped to Monaco's marker API.
+- **Tauri + `winit` cross-window cooperation on macOS secondary display** (carry-over from §6.1). Re-verified on the Tauri-hosted topology, not just `cargo run` standalone. — **Resolved by sidestepping**: 4.1 ships render-core as a sibling subprocess (see top-of-doc status block + below "as built"), so the Tauri process never owns a wgpu window and the cohabitation question is moot. The cross-process boundary is JSON-RPC over localhost WS.
+- **Monaco + WGSL.** Community grammar + `naga` diagnostics mapped to Monaco's marker API. — **Done.** Hand-rolled Monarch grammar in `wzrd-app/src/components/MonacoPanel.tsx`; engine-side `wgsl.validate` (`render-core/src/rpc.rs`) runs `naga::front::wgsl::parse_str` on the composed `prelude + body + main` source and remaps spans back into user-source line/column space before returning.
 
 **Deliverable:** open a pack, edit `scene.json` and `effects/*.wgsl` in Monaco with inline naga errors, glance at the status strip during a show, confirm the projector is alive via the corner thumbnail. Headless agent path unchanged.
 
-### Phase 4.2 — Authoring + perform + debug UI (~1–2 weeks)
+**As built (2026-05-22).**
+
+- **Crate split landed.** `render-core/Cargo.toml` carries both `[lib]` (`name = "render_core"`) and `[[bin]]`. The lib re-exports nine module roots; `App` + `ApplicationHandler` lifted into `src/app.rs`; `src/main.rs` is now an 18-line CLI wrapper around `render_core::run`. `wzrd-app/src-tauri/` consumes the lib by path-dep.
+- **Subprocess + WS, not in-process winit.** The engine spawns its own winit window. The Tauri shell launches `render-core --ws-addr 127.0.0.1:9123` from its `setup` hook. The shell's `src-tauri/src/engine.rs` owns a single I/O thread that does request-reply demux + telemetry fan-out (request envelopes carry a u64 `id`; replies route via per-id oneshot; `telemetry.event` notifications emit on the Tauri `engine:telemetry` event channel).
+- **Engine-side WS server.** `render-core/src/ws.rs` (sync `tungstenite`, thread-per-connection). State-mutating methods (`scene.load`, `effect.upsert`, `effect.remove`) queue an `EngineCommand` and the WS worker thread blocks on a reply oneshot until the render thread drains the queue in `about_to_wait`. Read-only methods (`pack.info`, `scene.getState`, `wgsl.validate`, `telemetry.channels`) resolve inline.
+- **Telemetry.** `render-core/src/telemetry.rs` defines a clone-able `Bus` with bounded per-subscriber channels + a sticky-replay store for late subscribers. Channels live now: `preview`, `hot_reload`, `audio_freshness`, `fps`, `frame_stats`. `log`, `drivers`, `audio`, `connectivity` exist as channel names + payload types but the engine doesn't yet emit on them (4.2's UI surfaces them as "no data yet" until a follow-up wires emitters).
+- **Preview readback.** `PreviewSampler` in `telemetry.rs` schedules `copy_texture_to_buffer` from the composite (`Rgba16Float`) every ~66 ms, maps the buffer, manually decodes f16 to f32 (avoids a `half` dep), downsamples to ~320 px wide, JPEG-encodes (`image::codecs::jpeg`), base64-encodes, and emits on `preview`. `COPY_SRC` was pre-emptively set on the composite texture for exactly this in the post-Phase-3 review.
+- **`wgsl.validate` shape.** Picked option (1) from §6.7 (validate-in-core, IPC-bounced). One naga instance, perfect parity with the live pipeline path. Latency is fine under the debounce window.
+- **Status strip pills.** OSC / Engine / FPS / Reload land verbatim. Clicking the OSC pill opens `http://127.0.0.1:8765/` (audio server browser UI) via `@tauri-apps/plugin-shell`.
+
+### Phase 4.2 — Authoring + perform + debug UI (~1–2 weeks) ✅ done
 
 Builds the three-route structure on the 4.1 spine, sized against actual pain points from using 4.1. Defer any of the three routes individually if 4.1 covers it well enough.
 
@@ -741,6 +775,20 @@ Dev-time tool. Vertical stack of collapsible panels — kept dense because this 
 
 **Deliverable:** the three-route Tauri app that makes "wire audio band X to param Y on layer Z" a few-clicks operation, with a working Debug page for the build phase.
 
+**As built (2026-05-22).**
+
+- **Three routes live**, keyboard-switchable via ⌘1/⌘2/⌘3 in `wzrd-app/src/App.tsx`. Status strip persists across all three.
+- **Prepare.** Three columns 40/35/25:
+  - `SurfaceCanvas.tsx` reads the pack via `pack.info`, fetches each layer's mask PNG over a `read_mask_png` Tauri command (b64-encoded), draws masks tinted by per-layer hue on an HTML canvas. Live preview JPEG underlays the masks so the canvas doubles as a live performance view. Hover/click pick layers via bbox lookup. Overlays toggle. Read-only — region renaming + identity.json editing stay deferred to 4.3+ as spec'd.
+  - `MonacoPanel.tsx` opens `scene.json` + every `effects/<name>/shader.wgsl` as tabs. Hand-rolled Monarch WGSL grammar registered on mount (Monaco bundles JSON but not WGSL). ⌘S on the scene tab: round-trips through `scene.load(json)` (immediate engine reload) *and* writes to disk so the headless watcher path stays consistent. ⌘S on an effect tab: `effect.upsert` writes to disk + invalidates the pipeline.
+  - `BindingInspector.tsx` is the structured editor. Mutations write the modified scene JSON back through `scene.load` AND `write_scene_file` — both Monaco and the inspector edit the *same* scene JSON, no second source of truth. Selector / effect / driver dropdowns implemented; "+ Add" creates a fresh binding skeleton.
+- **Perform.** `PreviewThumbnail` (variant=`fill`) + `AudioStrip` + `DriverRack`. The audio strip renders L/M/H band bars and onset-decay indicators directly from the `audio` telemetry payload (when emitted). The driver rack merges scene-parsed rows with live `drivers` telemetry — if `drivers` events arrive, live values overlay the scene rows; otherwise the rack still lists every driver-bound param with static-source info.
+- **Debug.** Six collapsible panels per the spec. Each panel is independent — cuttable without touching Prepare/Perform. Log stream caps at 2000 lines (matches the spec); level filter `all` / `warn` / `error`. Pack & scene state dumps are read-only `<pre>` blocks of JSON.
+- **State model.** Single Zustand store (`src/state/store.ts`). Every telemetry channel has its own slice plus an append-style buffer where it makes sense (log, hot-reload history). Sticky channels (`hot_reload`, `audio_freshness`, `connectivity`, `fps`) get replayed to new subscribers Rust-side and re-applied Tauri-side, so a route change never wipes the pills.
+- **Open as known gaps.**
+  - The engine doesn't yet emit `drivers`, `audio`, `log`, `connectivity`, or `frame_stats` regularly — channel names + bus + UI consumers are all wired, just no engine-side emitter beyond `fps` + `frame_stats` percentiles + the `audio_freshness` heartbeat. The UI degrades gracefully ("waiting for…" placeholders). Next on the list for a Phase 4.2 follow-up; both halves are designed so wiring an emitter is a single-file change.
+  - `param.set`, `param.bind`, `transport.setBpm`, `calibration.set` from §3.11 are not yet exposed as Tauri commands — the inspector currently mutates `scene.json` directly via `scene.load` + `write_scene_file`. Same effective behaviour, less plumbing; the structured RPCs land when the cue editor in Phase 6+ needs them.
+
 ### Phase 4.3+ — UI polish (deferred)
 
 Add against demand, not the spec. Currently deferred:
@@ -788,11 +836,15 @@ The MCP tool surface *is* the RPC surface. Add an MCP server that proxies the do
 
 Each small enough to do as a one-session spike before committing the surrounding decisions.
 
-### 6.1 Tauri + wgpu native window on a non-primary display (Mac + Linux)
+### 6.1 Tauri + wgpu native window on a non-primary display (Mac + Linux) — resolved by subprocess split
 
-Confirm we can have one Tauri app process own (a) a webview window on the operator's display and (b) a native wgpu fullscreen window on the projector display, with no compositor frame on the projector path. `winit` claims to handle this; verify on both OSes.
+Original question: can one Tauri app process own both (a) a webview window on the operator's display and (b) a native wgpu fullscreen window on the projector display, with no compositor frame on the projector path? `winit` claims to handle it; verify on both OSes — especially the macOS focus-change failure modes (exclusive fullscreen pulled out, Spaces reshuffle, frame stutter when the React webview takes focus).
 
-**Must explicitly test live cross-window interaction**, not just static "two windows up at once." On macOS specifically, exclusive-fullscreen wgpu windows on a secondary display interact badly with focus changes — clicking sliders in the React webview can pull the projector window out of fullscreen, cause Spaces to reshuffle, or introduce frame stutter on the projector path. The spike must drag a webview slider for ~30s while watching the projector window for focus-loss, mode-flip, or stutter. **Fallback plan if true exclusive fullscreen misbehaves:** a borderless, non-resizable, non-decorated `winit` window sized to the projector display's screen bounds. Loses any "real exclusive fullscreen" compositor-bypass wins on macOS, but stays stable under operator interaction — which is the actual production constraint.
+**Resolution (Phase 4 build, 2026-05-22).** Sidestepped rather than spiked. The Phase-4 implementation runs render-core as a **sibling subprocess** of the Tauri shell and bridges them over a localhost JSON-RPC WebSocket (`127.0.0.1:9123`). The Tauri process never opens a wgpu window; the engine subprocess does. Cross-window-on-one-process is therefore moot for v1. Trade-offs taken:
+
+- **Wins.** Headless agent path stays byte-identical (`render-core --scene foo.json` with no `--ws-addr`). Same RPC surface Phase 7's MCP wrapper uses — single contract, two transports. macOS NSApp / Spaces / focus interactions reduce to "two normal processes each running their own event loop" with no shared state.
+- **Costs.** A second process to launch + supervise (the Tauri shell does this in `setup`; window close kills the child). One extra hop in the request path (Tauri command → in-process WS client → render-core WS server → render thread). Latency is unmeasured but the only path that goes through it is human-scale (slider drags, ⌘S saves, debounced WGSL validation).
+- **Reopen condition.** If a future scene wants OS-level exclusive fullscreen on a secondary display *and* the borderless-fullscreen fallback (now the default in `App::build_window`) starts hitting limits — re-spike. The borderless mode is what's stable today and matches the §6.1 fallback plan verbatim.
 
 ### 6.2 HAP-on-Rust reality check
 
@@ -811,7 +863,7 @@ The hardware target. If a 200-line Rust+wgpu prototype playing 10 HAP files into
 Two paths to validate, in order:
 
 1. **Headless (Phase 2). ✅ validated.** Run the standalone `render-core` binary with no UI. Edit `scene.json` in any editor → file watcher fires → core diffs against current state → projector updates within one frame budget. This is the agent's critical path; it must work before the webview exists.
-2. **Webview JSON round-trip (Phase 4.1/4.2).** Edit `scene.json` in Monaco → save → `scene.load(json)` over Tauri IPC → same diff/apply path. JSON-only through 4.2; the `scene.ts` typed-DSL surface (transpile-on-save) is deferred to 4.3+ (see "UI polish (deferred)").
+2. **Webview JSON round-trip (Phase 4.1/4.2). ✅ validated.** Edit `scene.json` in Monaco → ⌘S → Tauri command `scene_load` → in-process WS client posts `scene.load` over `ws://127.0.0.1:9123` → engine WS server queues an `EngineCommand` → render thread drains it in `about_to_wait` → diff/apply via the same `apply_scene_json` path the file watcher uses → next composite frame reflects the edit. The TS transpile surface (`scene.ts`) is deferred to 4.3+ per "UI polish (deferred)".
 
 If headless works and the JSON round-trip works, the agent loop is unblocked end-to-end.
 
@@ -887,7 +939,7 @@ Carried forward from prior plan §8, still relevant:
 
 ## 10. Summary
 
-- **One realtime engine, shipped in two stages.** A standalone Rust+wgpu `render-core` binary (Phases 0–3) becomes playable in ~3–4 weeks with no UI at all. The Tauri shell + React/TS webview (Phase 4+) wraps it later as a control front-end — native fullscreen on the projector display, control UI on the operator's display.
+- **One realtime engine, shipped in two stages.** A standalone Rust+wgpu `render-core` binary (Phases 0–3) is playable with no UI at all. The Tauri shell + React/TS webview (Phase 4+) wraps it as a control front-end — and runs the engine as a *subprocess* over localhost JSON-RPC WebSocket, so the projector window stays owned by the engine and the operator UI is a separate process. Same model the audio feature server uses (§3.10) — three sibling processes, each restartable, communicating over wires.
 - **One offline service.** Existing Python `wzrd_mcp` (FastMCP) runs separately — local subprocess or Modal — for segmentation, surface prep, and cloud content generation. No port to Rust.
 - **Two contracts.** Layer pack (offline data) and `scene.json` + RPC (live control). The optional `scene.ts` DSL is a typed ergonomic mirror of `scene.json`, never canonical.
 - **One scene model.** Selectors over semantic regions, flat per-layer effect stacks with inter-layer FBO sampling, ISF-shaped effect schema, drivers as the universal binding source.

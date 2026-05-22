@@ -92,6 +92,19 @@ impl AudioFeatures {
         self.now_ms().saturating_sub(stamp) <= stale_after_ms
     }
 
+    /// Engine-local timestamp of the most-recently-dispatched OSC packet
+    /// (millis since `AudioFeatures::new`). `0` until the first packet
+    /// arrives. Used by the Phase 4 audio_freshness telemetry channel.
+    pub fn last_packet_ms(&self) -> u64 {
+        self.last_packet_ms.load(Ordering::Relaxed)
+    }
+
+    /// `/audio/meta`-reported sample rate. `0` until the audio server sends
+    /// one. Diagnostic-only; not used in render math.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate.load(Ordering::Relaxed)
+    }
+
     fn now_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
     }

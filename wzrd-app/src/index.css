@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Make Monaco play nice inside a Tailwind flex container. */
+.monaco-editor, .monaco-editor .overflow-guard {
+  border-radius: 4px;
+}
+
+/* Hide focus-rings inside Monaco — we have our own visual language. */
+.monaco-editor textarea:focus {
+  outline: none !important;
+}
+
+/* Bar charts for audio bands. */
+.bar-stack {
+  display: flex;
+  gap: 4px;
+  align-items: flex-end;
+  height: 100%;
+}
+.bar-stack > .bar {
+  width: 32px;
+  background: linear-gradient(180deg, #b78cff 0%, #73b6ff 100%);
+  border-radius: 2px;
+  transition: height 60ms linear;
+}
+
+/* Pill base. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  background: #161922;
+  border: 1px solid #2a2f3e;
+}
+.pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
