@@ -6,6 +6,7 @@
   "darken_surface": {"enabled": false, "timeout": 120},
   "prepare_surface": {"enabled": true, "timeout": 120},
   "extract_color_regions": {"enabled": true, "timeout": 120},
+  "build_layerpack": {"enabled": true, "timeout": 120},
   "reproject_video": {"enabled": true, "timeout": 300},
   "texture_flow": {"enabled": true, "timeout": 1500},
   "kling_v25_image_to_video": {"enabled": true, "timeout": 420},

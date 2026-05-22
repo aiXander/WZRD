@@ -42,3 +42,6 @@ creatures/
 test_results/
 test_imgs/
 captures/
+
+# Rust build artefacts (render-core)
+render-core/target/

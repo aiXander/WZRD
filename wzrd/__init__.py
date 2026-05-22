@@ -91,6 +91,8 @@ __all__ = [
     'prepare_surface',
     # Simulate view (lazy)
     'simulate_view',
+    # Layer pack (lazy)
+    'build_layerpack',
     # Utils
     'parse_aspect_ratio',
     'get_aspect_ratio',
@@ -136,5 +138,8 @@ def __getattr__(name):
         return getattr(detect, name)
     if name == 'simulate_view':
         from .simulate_view import simulate_view as _fn
+        return _fn
+    if name == 'build_layerpack':
+        from .layerpack import build_layerpack as _fn
         return _fn
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -52,6 +52,56 @@ def test_islands():
     assert isinstance(regions, list), "islands did not return a list"
 
 
+def test_layerpack():
+    from wzrd import islands, layerpack
+    import json
+    _require(TEST_SEGMAP, TEST_DAY_IMAGE)
+    out_dir = _result_dir("layerpack")
+    _copy_input(TEST_SEGMAP, out_dir)
+    # First produce some masks via the islands pipeline.
+    regions_dir = os.path.join(out_dir, "regions")
+    regions, _ = islands.extract_color_regions(TEST_SEGMAP, regions_dir)
+    assert regions, "islands produced no regions"
+    # Hand-author a tiny tags file mapping a couple of masks to semantic ids.
+    tags = {
+        "layers": {
+            regions[0]["region_mask"]: {
+                "id": "primary",
+                "label": "primary region",
+                "tags": ["test", "alpha"],
+                "z": 2,
+            },
+        },
+        "groups": [{"id": "test_group", "members": ["primary"]}],
+        "background": True,
+    }
+    tags_path = os.path.join(out_dir, "tags.json")
+    with open(tags_path, "w") as f:
+        json.dump(tags, f)
+    pack_dir = os.path.join(out_dir, "pack")
+    scene = layerpack.build_layerpack(
+        masks_dir=regions_dir,
+        output_dir=pack_dir,
+        surface=TEST_DAY_IMAGE,
+        tags=tags_path,
+        feather_px=1,
+        include_background=True,
+    )
+    assert scene["version"] == 1
+    assert scene["surface"] == "surface.png"
+    assert os.path.isfile(os.path.join(pack_dir, "scene.json"))
+    assert os.path.isfile(os.path.join(pack_dir, "surface.png"))
+    assert any(layer["id"] == "primary" for layer in scene["layers"]), \
+        "tags mapping did not apply"
+    assert any(layer["id"] == "background" for layer in scene["layers"]), \
+        "background slice missing"
+    for layer in scene["layers"]:
+        mask_path = os.path.join(pack_dir, layer["mask"])
+        assert os.path.isfile(mask_path), f"mask missing: {mask_path}"
+    assert any(g["id"] == "test_group" for g in scene["groups"]), \
+        "test_group not emitted"
+
+
 def test_reproject():
     from wzrd import reproject
     _require(TEST_VIDEO)
@@ -132,6 +182,7 @@ TESTS = {
     "prepare_surface_full": test_prepare_surface_full,
     "subtract_video": test_subtract_video,
     "islands": test_islands,
+    "layerpack": test_layerpack,
     "reproject": test_reproject,
 }
 

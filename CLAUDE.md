@@ -34,9 +34,12 @@ No linting, formatting, or CI pipelines are configured. No pytest — tests use 
 
 ## Architecture
 
-**Two packages** defined in `pyproject.toml`:
+**Two Python packages** defined in `pyproject.toml`:
 - `wzrd/` — Core image/video processing library
 - `wzrd_mcp/` — FastMCP server layer wrapping wzrd functions as tools
+
+**One Rust crate** at the repo root:
+- `render-core/` — Realtime additive projection-mapping engine (wgpu + winit). Standalone binary (`render-core --scene scene.json`) that consumes a layer pack produced by `wzrd.layerpack`. Phase 2 of `render_engine_architecture.md` lives here. See `render-core/README.md`.
 
 ### wzrd/ package
 
@@ -54,6 +57,7 @@ No linting, formatting, or CI pipelines are configured. No pytest — tests use 
 - `islands.py` — KMeans color clustering + connected components (requires scikit-learn)
 - `reproject.py` — Layer compositing for island videos
 - `prepare_surface.py` — Full surface prep pipeline (detect → align → darken). Returns dict with `'image'` (PIL Image) and optional `'video'` (alignment aid)
+- `layerpack.py` — Authors the offline ↔ runtime layer pack (`scene.json` + `masks/` + `references/`) consumed by the realtime `render-core` engine. CLI: `python -m wzrd.layerpack <masks_dir> --surface ... --tags tags.json -o pack/`
 
 ### wzrd_mcp/ package
 

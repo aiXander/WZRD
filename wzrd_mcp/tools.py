@@ -806,6 +806,176 @@ async def texture_flow(
 
 
 # ---------------------------------------------------------------------------
+# Tool: build_layerpack
+# ---------------------------------------------------------------------------
+@mcp.tool(timeout=get_timeout("build_layerpack"))
+@logged_tool
+async def build_layerpack(
+    masks: list[str],
+    surface_image: str = "",
+    mask_ids: list[str] | None = None,
+    tags: dict | None = None,
+    projector_width: int = 0,
+    projector_height: int = 0,
+    source_capture: str = "",
+    canny: str = "",
+    feather_px: int = 1,
+    include_background: bool = False,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Build a WZRD layer pack (scene.json + masks/ + references/) for the realtime render-core.
+
+    Takes a set of semantic mask images (typically the output of `extract_color_regions`,
+    possibly hand-edited / SAM-refined) and an optional per-mask tags structure, and
+    emits a self-contained layer pack the realtime engine consumes.
+
+    Per-layer identity (id, tags, group, parent) is stable across re-shoots and
+    re-segmentations — bindings target ids, not mask filenames.
+
+    Args:
+        masks: List of mask image URLs/paths. Each becomes one layer slice
+            (R8 grayscale, projector-resolution). Hard cap: 256 layers.
+        surface_image: URL/path to the darkened/aligned surface image used as
+            preview overlay and to derive projector_resolution if not given.
+        mask_ids: Optional parallel list of semantic ids (length must match `masks`).
+            Required if you want stable ids; otherwise ids default to mask stems.
+        tags: Optional structured tags dict: {
+            "layers": {
+                "<mask_filename_or_id>": {
+                    "label": "...", "tags": ["..."], "parent": "...", "z": 1
+                }
+            },
+            "groups": [{"id": "...", "members": ["..."]}]
+        }
+        projector_width: Width in px. Defaults to surface image width.
+        projector_height: Height in px. Defaults to surface image height.
+        source_capture: Optional original photo URL/path (copied into references/).
+        canny: Optional canny/edge aid URL/path (copied into references/).
+        feather_px: Mask edge feathering radius (default 1; 0 = hard edges).
+        include_background: If true, auto-generates `000_background.png` as the
+            complement of all input masks.
+    """
+    _name = "build_layerpack"
+    t0 = time.time()
+    try:
+        from wzrd.layerpack import build_layerpack as _build
+
+        log_progress(_name, "Resolving inputs...")
+        mask_coros = [resolve_input_async(m, suffix=".png") for m in masks]
+        extra_coros: list = []
+        if surface_image:
+            extra_coros.append(resolve_input_async(surface_image, suffix=".png"))
+        if source_capture:
+            extra_coros.append(resolve_input_async(source_capture, suffix=".png"))
+        if canny:
+            extra_coros.append(resolve_input_async(canny, suffix=".png"))
+        resolved_masks = await asyncio.gather(*mask_coros)
+        resolved_extras = await asyncio.gather(*extra_coros)
+
+        extras_iter = iter(resolved_extras)
+        surf_path = next(extras_iter) if surface_image else None
+        src_path = next(extras_iter) if source_capture else None
+        cny_path = next(extras_iter) if canny else None
+
+        if mask_ids and len(mask_ids) != len(resolved_masks):
+            raise ToolError("mask_ids length must match masks length")
+
+        # Stage masks in a temp dir with stable, ordered filenames so the
+        # layerpack discovery sees them in the order the caller supplied.
+        from pathlib import Path
+        staging = Path(make_temp_dir())
+        masks_dir = staging / "masks_in"
+        masks_dir.mkdir()
+        from shutil import copyfile
+        ordered_filenames: list[str] = []
+        for i, src in enumerate(resolved_masks):
+            stem = mask_ids[i] if mask_ids else f"layer_{i:03d}"
+            dest_name = f"{i:03d}_{stem}.png"
+            copyfile(src, masks_dir / dest_name)
+            ordered_filenames.append(dest_name)
+
+        # If caller supplied per-mask metadata under tags["layers"], rekey it to
+        # match our deterministic staging filenames (so it actually applies).
+        rekeyed_tags = dict(tags or {})
+        if mask_ids and rekeyed_tags.get("layers"):
+            src_layers = rekeyed_tags["layers"]
+            new_layers: dict = {}
+            for i, stem in enumerate(mask_ids):
+                if stem in src_layers:
+                    entry = dict(src_layers[stem])
+                    entry.setdefault("id", stem)
+                    new_layers[ordered_filenames[i]] = entry
+                else:
+                    new_layers[ordered_filenames[i]] = {"id": stem}
+            rekeyed_tags["layers"] = new_layers
+        elif mask_ids:
+            rekeyed_tags["layers"] = {
+                ordered_filenames[i]: {"id": mask_ids[i]}
+                for i in range(len(mask_ids))
+            }
+
+        projector_resolution = None
+        if projector_width > 0 and projector_height > 0:
+            projector_resolution = (projector_width, projector_height)
+
+        pack_dir = staging / "pack"
+
+        log_progress(_name, "Building layer pack...")
+        scene = await asyncio.to_thread(
+            _build,
+            masks_dir=str(masks_dir),
+            output_dir=str(pack_dir),
+            surface=surf_path,
+            tags=rekeyed_tags,
+            projector_resolution=projector_resolution,
+            source_capture=src_path,
+            canny=cny_path,
+            feather_px=feather_px,
+            include_background=include_background,
+        )
+
+        log_progress(_name, f"Uploading pack ({len(scene['layers'])} layers)...")
+        # Upload masks and the surface in parallel; rewrite scene.json with URLs.
+        files_to_upload: list[tuple[str, Path]] = []
+        for layer in scene["layers"]:
+            files_to_upload.append((f"layer:{layer['id']}", pack_dir / layer["mask"]))
+        if scene.get("surface"):
+            files_to_upload.append(("surface", pack_dir / scene["surface"]))
+        if scene.get("source_capture"):
+            files_to_upload.append(("source_capture", pack_dir / scene["source_capture"]))
+
+        upload_urls = await asyncio.gather(*(upload_async(str(p)) for _, p in files_to_upload))
+
+        url_map = dict(zip([k for k, _ in files_to_upload], upload_urls))
+        for layer in scene["layers"]:
+            layer["mask_url"] = url_map[f"layer:{layer['id']}"]
+        if scene.get("surface"):
+            scene["surface_url"] = url_map["surface"]
+        if scene.get("source_capture"):
+            scene["source_capture_url"] = url_map["source_capture"]
+
+        # Persist the rewritten scene.json and publish it too.
+        import json as _json
+        scene_path = pack_dir / "scene.json"
+        scene_path.write_text(_json.dumps(scene, indent=2))
+        scene_url = await upload_async(str(scene_path))
+
+        result = {
+            "scene": scene,
+            "scene_url": scene_url,
+            "layer_count": len(scene["layers"]),
+            "projector_resolution": scene["projector_resolution"],
+        }
+        log_done(_name, t0, result)
+        return result
+    except ToolError:
+        raise
+    except Exception as exc:
+        log_error(_name, exc, t0)
+        raise ToolError(str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Tool 10: simulate_view
 # ---------------------------------------------------------------------------
 @mcp.tool(timeout=get_timeout("simulate_view"))
