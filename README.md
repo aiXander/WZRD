@@ -2,6 +2,99 @@
 
 A Python toolkit for additive projection mapping. Extracts animated elements from static backgrounds so only the changing regions get projected — unchanged areas stay invisible, making characters appear to inhabit real surfaces.
 
+WZRD has **two halves**:
+
+1. **Offline Python pipeline** (`wzrd/`) — prep tools that turn a photo of your surface + generated animations into a **layer pack** (`pack.json` + masks + surface). This is everything in the [Modules](#modules) / [Python API](#python-api) sections below.
+2. **Realtime render engine + GUI** (`render-core/` Rust crate, `wzrd-app/` Tauri shell) — plays that layer pack live on a projector, audio-reactive, with WGSL effects that hot-reload on save. This is the [Realtime Render Engine & GUI](#realtime-render-engine--gui) section — jump there if you just want to *run the visuals*.
+
+---
+
+## Realtime Render Engine & GUI
+
+> **The one gotcha:** there is no `render-core` command on your PATH. `cargo build` only writes the binary into `render-core/target/`. Always launch it with `cargo run --` or the explicit binary path `./target/release/render-core`. Typing bare `render-core` gives `command not found` — that's expected.
+
+There are **two ways to run** the engine, plus an optional audio server that feeds both:
+
+| | What runs | When to use |
+|---|---|---|
+| **Headless engine** | `render-core` alone, a single projector window | Live shows, agent deployment, quick iteration on a scene/shader |
+| **GUI shell** | Tauri app (`wzrd-app`) that spawns `render-core` as a subprocess | Authoring: Monaco editor, mask overlays, binding inspector, live telemetry |
+
+### Prerequisites (one-time)
+
+```bash
+# 1. Rust 1.85+ toolchain (wgpu 22 / winit 0.30). Install via https://rustup.rs
+# 2. Build the example layer pack the sample scene points at:
+python test.py layerpack        # writes test_results/layerpack/pack/
+```
+
+### Option A — Headless engine (fastest path to pixels)
+
+```bash
+cd render-core
+
+# Debug build is fine for iterating; --release is smoother for live shows.
+cargo run -- --scene examples/phase3_smoke.scene.json --windowed --no-osc
+```
+
+- `--windowed` — run in a window instead of borderless-fullscreen (drop it to go fullscreen on the primary display; add `--display 1` to pick a monitor).
+- `--no-osc` — **skip the audio server**. Clocks still tick and all `clock.*` effects animate; `audio.*` drivers just return 0 (so the audio-reactive `flash`/`drift` layers sit at their defaults). Start the audio server (below) and drop `--no-osc` to make them react.
+- The scene's `pack` field (resolved relative to the scene file) points at the layer pack. Override with `--pack path/to/pack/`.
+- Any WGSL under `render-core/examples/effects/<name>/` and inline WGSL in the scene hot-reload the instant you save.
+
+Prefer the prebuilt binary over `cargo run` once compiled:
+
+```bash
+./target/release/render-core --scene examples/phase3_smoke.scene.json --windowed --no-osc
+```
+
+### Option B — GUI control shell (authoring)
+
+The Tauri app spawns `render-core` for you over a JSON-RPC WebSocket, so you get the projector window **plus** the Prepare/Perform/Debug UI.
+
+```bash
+# 1. Build the engine binary the shell will spawn (debug is what it looks for by default):
+(cd render-core && cargo build)
+
+# 2. Launch the shell, pointing it at a scene:
+cd wzrd-app
+pnpm install        # one-time
+WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
+```
+
+- Routes switch with `⌘1` (Prepare) / `⌘2` (Perform) / `⌘3` (Debug).
+- The shell finds the engine via `WZRD_ENGINE_EXE` → `target/{debug,release}/render-core` → `../../render-core/target/debug/render-core`. If it can't spawn it, rebuild step 1.
+- `pnpm tauri dev` runs the engine **with OSC enabled**, so `audio.*` layers stay at defaults until the audio server is up. See below.
+
+### Optional — Realtime Audio Feature Server (makes `audio.*` drivers react)
+
+`render-core` does **not** capture audio itself. Audio features (`audio.band`, `audio.onset`) arrive over OSC from a separate project, [`Realtime_PyAudio_FFT`](https://github.com/xandersteenbrugge/Realtime_PyAudio_FFT), listening on `127.0.0.1:9000` by default.
+
+```bash
+# In its own terminal, from the audio server repo:
+cd ~/Documents/GitHub/Realtime_PyAudio_FFT
+uv run audio-server --open      # starts the server + opens its browser UI
+```
+
+Start it before (or during — it auto-connects mid-flight) either run option, and drop `--no-osc`. The engine binds the UDP socket at startup whether or not the server is running, so packets flow the moment it comes up and freeze if it stops.
+
+**Full live-show stack, three terminals:**
+
+```bash
+# Terminal 1 — audio
+cd ~/Documents/GitHub/Realtime_PyAudio_FFT && uv run audio-server --open
+
+# Terminal 2 — engine (fullscreen on projector = display 1)
+cd render-core && cargo run --release -- --scene examples/phase3_smoke.scene.json --display 1
+
+# ...or Terminal 2 alternative — GUI shell instead of headless engine
+cd wzrd-app && WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
+```
+
+See [`render-core/README.md`](render-core/README.md) for the effect/driver catalog and WGSL prelude, and [`wzrd-app/README.md`](wzrd-app/README.md) for the shell's routes and telemetry channels.
+
+---
+
 ## Installation
 
 ```bash

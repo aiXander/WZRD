@@ -5,7 +5,7 @@
 //! methods (`wgsl.validate`, `pack.info`, `scene.getState`), and queues
 //! state-mutating methods (`scene.load`, `effect.upsert`, `effect.remove`)
 //! as `EngineCommand`s that the render thread drains at frame boundary in
-//! `App::about_to_wait`. Same method names, same params, same error shapes —
+//! `Core::poll_inbound`. Same method names, same params, same error shapes —
 //! Phase 7's MCP wrapper proxies the same surface unchanged.
 
 use std::path::PathBuf;
@@ -16,7 +16,8 @@ use crossbeam_channel::Sender;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::app::App;
+use crate::core::Core;
+use crate::drivers::SliderBank;
 use crate::pack::LoadedPack;
 use crate::telemetry::Bus;
 
@@ -64,6 +65,10 @@ pub struct RpcContext {
     pub scene_state: Arc<parking_lot_lite::SwapValue>,
     pub effects_dir: Option<PathBuf>,
     pub bus: Bus,
+    /// Live `ui.slider` values. `param.set` writes here directly (no
+    /// render-thread hop) — the render thread reads it on its next tick, so
+    /// knob latency is bounded by one frame.
+    pub sliders: Arc<SliderBank>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -175,6 +180,35 @@ pub fn dispatch(
             Ok(json!({ "channels": crate::telemetry::ALL_CHANNELS }))
         }
 
+        // Live tuning surface (§4 of the design spec — "tune by feel, not by
+        // re-prompting"). Sets a named ui.slider value; every param bound to
+        // `{"driver": "ui.slider", "name": ...}` picks it up on the next
+        // frame. No scene rebuild, no shader recompile.
+        "param.set" => {
+            #[derive(Deserialize)]
+            struct Params {
+                name: String,
+                value: f32,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            if !p.value.is_finite() {
+                return Err(RpcError::message("value must be finite"));
+            }
+            ctx.sliders.set(&p.name, p.value);
+            Ok(json!({ "ok": true, "name": p.name, "value": p.value }))
+        }
+
+        "param.list" => {
+            let values: serde_json::Map<String, Value> = ctx
+                .sliders
+                .snapshot()
+                .into_iter()
+                .map(|(k, v)| (k, json!(v)))
+                .collect();
+            Ok(json!({ "sliders": values }))
+        }
+
         "scene.load" => {
             #[derive(Deserialize)]
             struct Params {
@@ -261,19 +295,19 @@ pub fn dispatch(
 
 /// Process an [`EngineCommand`] on the render thread. Sends the reply via
 /// the embedded channel so the WS worker can unblock.
-pub fn handle(app: &mut App, cmd: EngineCommand) {
+pub fn handle(core: &mut Core, cmd: EngineCommand) {
     match cmd {
         EngineCommand::SceneLoad { json, reply } => {
-            let res = app
+            let res = core
                 .apply_scene_json(&json)
                 .map(|_| json!({ "ok": true }))
                 .map_err(|e| format!("{e:#}"));
             let _ = reply.send(res);
         }
         EngineCommand::SceneReload { reply } => {
-            match std::fs::read_to_string(app.scene_path()) {
+            match std::fs::read_to_string(core.scene_path()) {
                 Ok(raw) => {
-                    let res = app
+                    let res = core
                         .apply_scene_json(&raw)
                         .map(|_| json!({ "ok": true }))
                         .map_err(|e| format!("{e:#}"));
@@ -289,7 +323,7 @@ pub fn handle(app: &mut App, cmd: EngineCommand) {
             wgsl,
             descriptor,
             reply,
-        } => match write_effect(app, &name, &wgsl, descriptor.as_ref()) {
+        } => match write_effect(core, &name, &wgsl, descriptor.as_ref()) {
             Ok(()) => {
                 let _ = reply.send(Ok(json!({ "ok": true, "name": name })));
             }
@@ -297,7 +331,7 @@ pub fn handle(app: &mut App, cmd: EngineCommand) {
                 let _ = reply.send(Err(format!("{e:#}")));
             }
         },
-        EngineCommand::EffectRemove { name, reply } => match remove_effect(app, &name) {
+        EngineCommand::EffectRemove { name, reply } => match remove_effect(core, &name) {
             Ok(()) => {
                 let _ = reply.send(Ok(json!({ "ok": true, "name": name })));
             }
@@ -308,8 +342,8 @@ pub fn handle(app: &mut App, cmd: EngineCommand) {
     }
 }
 
-fn write_effect(app: &mut App, name: &str, wgsl: &str, descriptor: Option<&Value>) -> Result<()> {
-    let dir = app
+fn write_effect(core: &mut Core, name: &str, wgsl: &str, descriptor: Option<&Value>) -> Result<()> {
+    let dir = core
         .effects_dir()
         .ok_or_else(|| anyhow!("no effects directory bound — re-run with --effects"))?
         .to_path_buf();
@@ -325,8 +359,8 @@ fn write_effect(app: &mut App, name: &str, wgsl: &str, descriptor: Option<&Value
     Ok(())
 }
 
-fn remove_effect(app: &mut App, name: &str) -> Result<()> {
-    let dir = app
+fn remove_effect(core: &mut Core, name: &str) -> Result<()> {
+    let dir = core
         .effects_dir()
         .ok_or_else(|| anyhow!("no effects directory bound — re-run with --effects"))?
         .to_path_buf();

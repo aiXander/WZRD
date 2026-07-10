@@ -7,7 +7,7 @@
 // "Add binding" button at the top opens a fresh row with sensible defaults.
 
 import { useMemo } from 'react';
-import { sceneLoad, writeSceneFile } from '../api/ipc';
+import { commitSceneText } from '../state/sceneCommit';
 import { useStore } from '../state/store';
 
 const BUILTIN_EFFECTS = ['tint', 'hueCycle', 'flash', 'wobble'];
@@ -39,8 +39,6 @@ function parseScene(json: string): any | null {
 
 export function BindingInspector() {
   const sceneJson = useStore((s) => s.sceneJson);
-  const setSceneJson = useStore((s) => s.setSceneJson);
-  const setSceneDirty = useStore((s) => s.setSceneDirty);
   const pack = useStore((s) => s.pack);
   const selected = useStore((s) => s.selectedBindingId);
   const setSelected = useStore((s) => s.setSelectedBindingId);
@@ -57,11 +55,9 @@ export function BindingInspector() {
   function commit(mutator: (s: any) => any) {
     const next = mutator(structuredClone(scene));
     const text = JSON.stringify(next, null, 2);
-    setSceneJson(text);
-    setSceneDirty(true);
-    // Push to engine + persist.
-    sceneLoad(text).catch((e) => console.error('scene apply:', e));
-    writeSceneFile(text).catch((e) => console.error('scene persist:', e));
+    // Optimistic local update + debounced engine push / disk write — rapid
+    // keystrokes and slider drags collapse into one plan rebuild.
+    commitSceneText(text);
   }
 
   function addBinding() {

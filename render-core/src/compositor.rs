@@ -14,8 +14,9 @@
 use anyhow::{anyhow, Result};
 use wgpu::util::DeviceExt;
 
-use crate::drivers::{ScalarValue, Transport};
+use crate::drivers::{ScalarValue, SliderBank, Transport};
 use crate::osc::AudioFeatures;
+use crate::telemetry::DriverRow;
 use crate::effects::{
     EffectBinding, EffectDef, EffectKind, EffectRegistry, InlineEffectSpec,
 };
@@ -29,7 +30,6 @@ use crate::scene::{resolve_selector, BindingSpec, EffectRef, SceneFile};
 /// bind group; the pipeline lives in the gpu pipeline cache, keyed by
 /// `pipeline_key`.
 pub struct LayerPass {
-    #[allow(dead_code)]
     pub binding_id: String,
     pub pipeline_key: String,
     pub effect_id: u32,
@@ -38,7 +38,13 @@ pub struct LayerPass {
     /// Resolved per-binding params. Re-evaluated each frame because some
     /// may be driver-bound (clock, audio).
     pub scalars: Vec<ScalarValue>,
+    /// Declared names for `scalars`, parallel by index. Used by the
+    /// `drivers` telemetry snapshot so the UI can label live values.
+    pub scalar_names: Vec<String>,
     pub colors: Vec<[f32; 4]>,
+    /// How many mask slices this pass's parent binding resolved to (the
+    /// "affects" count surfaced in the driver rack).
+    pub sibling_count: u32,
 
     pub layer_buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
@@ -70,7 +76,18 @@ impl PassPlan {
             let resolved = EffectBinding::from_params(def, &binding.params)
                 .map_err(|e| anyhow!("binding {:?}: {e:#}", binding.id))?;
 
+            let scalar_names: Vec<String> = resolved
+                .def
+                .inputs
+                .iter()
+                .filter_map(|i| match i {
+                    crate::effects::InputSlot::Scalar { name, .. } => Some(name.clone()),
+                    crate::effects::InputSlot::Color { .. } => None,
+                })
+                .collect();
+
             let slices = resolve_selector(&binding.select, pack)?;
+            let sibling_count = slices.len() as u32;
             for slice in slices {
                 let z = pack.manifest.layers[slice as usize].z;
                 let initial = LayerParamsGpu::build(
@@ -117,7 +134,9 @@ impl PassPlan {
                     slice,
                     z,
                     scalars: resolved.scalars.clone(),
+                    scalar_names: scalar_names.clone(),
                     colors: resolved.colors.clone(),
+                    sibling_count,
                     layer_buffer,
                     bind_group,
                 });
@@ -136,8 +155,14 @@ impl PassPlan {
     /// Evaluate every driver-bound scalar against the current transport +
     /// audio state and write the result + per-binding colours into each
     /// pass's uniform buffer.
-    pub fn tick(&self, gpu: &GpuContext, transport: &Transport, audio: &AudioFeatures) {
-        let ctx = transport.frame_context(audio);
+    pub fn tick(
+        &self,
+        gpu: &GpuContext,
+        transport: &Transport,
+        audio: &AudioFeatures,
+        sliders: &SliderBank,
+    ) {
+        let ctx = transport.frame_context(audio, sliders);
         let frame = FrameStateGpu {
             time: ctx.elapsed_sec,
             bar_phase: phase01(ctx.bar_time()),
@@ -170,6 +195,60 @@ impl PassPlan {
         }
     }
 
+    /// Encode the per-layer composite pass into `encoder`. Shared by the
+    /// presented path and the occluded/offscreen path.
+    fn encode_composite(&self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("composite pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &gpu.composite_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(self.clear_color),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        // Avoid redundant pipeline switches when consecutive layers share one.
+        let mut bound: Option<&str> = None;
+        for layer in &self.layer_passes {
+            let pipeline = match gpu.pipeline_cache.get(&layer.pipeline_key) {
+                Some(p) => p,
+                None => {
+                    // Pipeline went missing (effect removed). Skip the
+                    // pass; the previous frame's output stays on screen
+                    // until the next plan rebuild.
+                    continue;
+                }
+            };
+            if bound != Some(layer.pipeline_key.as_str()) {
+                pass.set_pipeline(pipeline);
+                bound = Some(layer.pipeline_key.as_str());
+            }
+            pass.set_bind_group(0, &layer.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
+    /// Render the composite buffer only — no swapchain interaction at all.
+    /// Used while the projector window is occluded: on macOS an occluded
+    /// window's `get_current_texture()` blocks for up to ~1s per frame
+    /// (compositor throttling), which used to stall the entire render thread
+    /// (IPC, preview, hot-reload). The composite keeps updating so the
+    /// operator preview stays live.
+    pub fn render_offscreen(&self, gpu: &GpuContext) {
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("offscreen frame encoder"),
+            });
+        self.encode_composite(gpu, &mut encoder);
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     pub fn record_and_submit(&self, gpu: &GpuContext) -> Result<(), wgpu::SurfaceError> {
         let frame = gpu.surface.get_current_texture()?;
         let swap_view = frame
@@ -183,41 +262,7 @@ impl PassPlan {
             });
 
         // 1) Per-layer passes into the composite buffer.
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("composite pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &gpu.composite_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            // Avoid redundant pipeline switches when consecutive layers share one.
-            let mut bound: Option<&str> = None;
-            for layer in &self.layer_passes {
-                let pipeline = match gpu.pipeline_cache.get(&layer.pipeline_key) {
-                    Some(p) => p,
-                    None => {
-                        // Pipeline went missing (effect removed). Skip the
-                        // pass; the previous frame's output stays on screen
-                        // until the next plan rebuild.
-                        continue;
-                    }
-                };
-                if bound != Some(layer.pipeline_key.as_str()) {
-                    pass.set_pipeline(pipeline);
-                    bound = Some(layer.pipeline_key.as_str());
-                }
-                pass.set_bind_group(0, &layer.bind_group, &[]);
-                pass.draw(0..3, 0..1);
-            }
-        }
+        self.encode_composite(gpu, &mut encoder);
 
         // 2) Final homography pass onto the swapchain.
         {
@@ -243,6 +288,40 @@ impl PassPlan {
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
+    }
+
+    /// Snapshot every scalar param across the plan's bindings for the
+    /// `drivers` telemetry channel. Slices belonging to the same binding
+    /// share params, so rows are deduped by binding id.
+    pub fn driver_rows(
+        &self,
+        transport: &Transport,
+        audio: &AudioFeatures,
+        sliders: &SliderBank,
+    ) -> Vec<DriverRow> {
+        let ctx = transport.frame_context(audio, sliders);
+        let mut seen = std::collections::HashSet::new();
+        let mut rows = Vec::new();
+        for pass in &self.layer_passes {
+            if !seen.insert(pass.binding_id.as_str()) {
+                continue;
+            }
+            for (i, scalar) in pass.scalars.iter().enumerate() {
+                let name = pass
+                    .scalar_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("param_{i}"));
+                rows.push(DriverRow {
+                    binding_id: pass.binding_id.clone(),
+                    param_name: name,
+                    source: scalar.describe(),
+                    value: scalar.eval(&ctx),
+                    affects: pass.sibling_count,
+                });
+            }
+        }
+        rows
     }
 }
 

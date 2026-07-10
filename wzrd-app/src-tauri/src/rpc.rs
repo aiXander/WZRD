@@ -50,6 +50,20 @@ pub fn scene_reload(state: State<AppState>) -> Result<Value, String> {
         .map_err(|e| format!("{e:#}"))
 }
 
+/// Live knob path — sets a named `ui.slider` value inside the engine. No
+/// scene rebuild, no disk write; the bound params pick it up next frame.
+#[tauri::command]
+pub fn param_set(state: State<AppState>, name: String, value: f64) -> Result<Value, String> {
+    state
+        .engine
+        .request(
+            "param.set",
+            json!({ "name": name, "value": value }),
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 pub fn wgsl_validate(state: State<AppState>, source: String) -> Result<Value, String> {
     state
@@ -146,15 +160,27 @@ pub fn write_scene_file(state: State<AppState>, contents: String) -> Result<(), 
 #[tauri::command]
 pub fn read_mask_png(state: State<AppState>, mask_path: String) -> Result<String, String> {
     use std::path::PathBuf;
-    // mask_path is relative to the pack directory.
-    let pack_dir = match state.engine.request("pack.info", json!({}), DEFAULT_TIMEOUT) {
-        Ok(v) => v
-            .get("pack_dir")
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-            .ok_or_else(|| "pack.info missing pack_dir".to_string())?,
-        Err(e) => return Err(format!("{e:#}")),
-    };
+    // mask_path is relative to the pack directory. The pack dir is static
+    // for the engine's lifetime, so resolve it once and cache it instead of
+    // paying one RPC round trip per mask load.
+    let pack_dir = state
+        .pack_dir
+        .get_or_init(|| {
+            state
+                .engine
+                .request("pack.info", json!({}), DEFAULT_TIMEOUT)
+                .ok()
+                .and_then(|v| {
+                    v.get("pack_dir")
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_default()
+        })
+        .clone();
+    if pack_dir.as_os_str().is_empty() {
+        return Err("pack.info unavailable — engine not ready".to_string());
+    }
     let full = pack_dir.join(&mask_path);
     let bytes = std::fs::read(&full).map_err(|e| format!("reading {}: {e}", full.display()))?;
     use base64::Engine;

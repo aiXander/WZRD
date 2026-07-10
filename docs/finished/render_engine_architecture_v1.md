@@ -1,4 +1,12 @@
-# WZRD render-engine — system design
+# WZRD render-engine — system design (v1, RETIRED)
+
+> **RETIRED 2026-07-04** (moved to `docs/finished/` 2026-07-10). This was the
+> original build plan (phases 0–4.2, all landed). It is superseded by
+> `docs/reference/render-engine.md` (current system state, contracts, the
+> 2026-07 performance/telemetry pass) + `docs/TODO/render-engine-roadmap.md`
+> (the structural roadmap). Everything load-bearing was promoted there; this
+> file holds only historical rationale behind decisions D1–D15 and the
+> phase-by-phase build notes.
 
 > **Implementation status (2026-05-22).** Phases 0–4.2 are landed.
 > `render-core/` is a Rust crate (`[lib] + [[bin]]`) whose standalone binary

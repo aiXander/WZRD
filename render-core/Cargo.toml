@@ -33,6 +33,11 @@ tungstenite = "0.21"
 wgpu = "22"
 winit = "0.30"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already in winit's dependency tree — used directly for the App Nap /
+# timer-coalescing opt-out (NSProcessInfo activity assertion).
+objc2-foundation = { version = "0.2", features = ["NSProcessInfo", "NSString"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

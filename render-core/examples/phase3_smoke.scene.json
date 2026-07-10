@@ -37,7 +37,7 @@
       "select": {
         "id": "primary"
       },
-      "effect": "hueCycle",
+      "effect": "flash",
       "params": {
         "envelope": {
           "driver": "audio.onset",
@@ -58,12 +58,12 @@
       },
       "effect": "wobble",
       "params": {
-        "amp": 0.012,
-        "freq": 18,
+        "amp": 0.015,
+        "freq": 12.24,
         "time": {
           "driver": "clock.time"
         },
-        "color": "#00364a"
+        "color": "#ffffff"
       }
     },
     {
@@ -88,9 +88,9 @@
       "params": {
         "amount": {
           "driver": "audio.band",
-          "band": "mid"
+          "band": "low"
         },
-        "color": "#ff5522"
+        "color": "#e32400"
       }
     }
   ],

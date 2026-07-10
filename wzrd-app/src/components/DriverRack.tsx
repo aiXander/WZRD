@@ -1,63 +1,56 @@
-// Driver rack — single scrollable list of every driver-bound param in the
-// active scene. Per row: `binding_id · param_name`, source pill, live value
-// bar, inline control if applicable. Phase 4.2 ships read-only-with-live
-// values; param mutation goes through the binding inspector for now.
+// Driver rack — every param in the active scene, playable.
 //
-// The list is built from two sources:
-//   - the *engine-emitted* `drivers` telemetry channel (authoritative live
-//     values, includes the `affects` chip);
-//   - the parsed scene.json (covers params not currently being driven, so a
-//     `const(0.4)` row still shows).
+// Row control depends on what the param is:
+//   - `ui.slider` driver  → live slider → `param.set` RPC (no rebuild, next
+//     frame). This is the "knobs" path from the design spec.
+//   - literal number      → slider + numeric field → debounced scene commit
+//     (engine push ~150ms trailing, disk write ~800ms trailing).
+//   - colour string       → colour picker → debounced scene commit.
+//   - clock./audio. driver→ read-only live value bar (the source drives it).
+//
+// Live values arrive on the `drivers` telemetry channel (~10 Hz).
 
-import { useMemo } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import { paramSet } from '../api/ipc';
+import { commitSceneMutation } from '../state/sceneCommit';
 import { useStore, type DriverRow } from '../state/store';
 
-type Row = DriverRow & { fromScene?: boolean };
-
-function describeSource(source: string): string {
-  return source;
+// Trailing throttle so slider drags don't flood the IPC bridge.
+const throttleTimers: Record<string, number> = {};
+function sendParam(name: string, value: number) {
+  if (throttleTimers[name] != null) window.clearTimeout(throttleTimers[name]);
+  throttleTimers[name] = window.setTimeout(() => {
+    delete throttleTimers[name];
+    paramSet(name, value).catch((e) => console.warn('param.set', name, e));
+  }, 25);
 }
 
-function valueBar(v: number) {
-  const pct = Math.min(100, Math.max(0, v * 100));
-  return (
-    <div className="h-1 w-full bg-ink-700 rounded overflow-hidden">
-      <div
-        className="h-full bg-accent-violet"
-        style={{ width: `${pct}%` }}
-      />
-    </div>
-  );
-}
+type SceneParam = {
+  binding_id: string;
+  param_name: string;
+  raw: any; // the JSON value in scene.json
+};
+
+type Row = {
+  key: string;
+  binding_id: string;
+  param_name: string;
+  raw: any;
+  live: DriverRow | null;
+};
 
 export function DriverRack() {
   const sceneJson = useStore((s) => s.sceneJson);
   const drivers = useStore((s) => s.drivers);
+  const selectedBinding = useStore((s) => s.selectedBindingId);
 
-  const fromScene = useMemo<Row[]>(() => {
+  const sceneParams = useMemo<SceneParam[]>(() => {
     try {
       const scene = JSON.parse(sceneJson);
-      const out: Row[] = [];
+      const out: SceneParam[] = [];
       for (const b of scene.bindings ?? []) {
         for (const [name, v] of Object.entries(b.params ?? {})) {
-          let source = 'const';
-          let value = 0;
-          if (typeof v === 'number') {
-            source = `const(${v})`;
-            value = v;
-          } else if (v && typeof v === 'object' && (v as any).driver) {
-            source = (v as any).driver;
-          } else if (typeof v === 'string') {
-            source = 'color';
-          }
-          out.push({
-            binding_id: b.id,
-            param_name: name,
-            source,
-            value,
-            affects: 0,
-            fromScene: true,
-          });
+          out.push({ binding_id: b.id, param_name: name, raw: v });
         }
       }
       return out;
@@ -66,52 +59,241 @@ export function DriverRack() {
     }
   }, [sceneJson]);
 
-  // Merge: any row present in `drivers` overrides the scene one (it has live values).
-  const merged: Row[] = useMemo(() => {
-    const liveKey = (r: { binding_id: string; param_name: string }) =>
-      `${r.binding_id}::${r.param_name}`;
-    const liveMap = new Map(drivers.map((d) => [liveKey(d), d]));
-    return fromScene.map((r) => {
-      const live = liveMap.get(liveKey(r));
-      return live ? { ...live, fromScene: false } : r;
+  const rows = useMemo<Row[]>(() => {
+    const liveMap = new Map(
+      drivers.map((d) => [`${d.binding_id}::${d.param_name}`, d])
+    );
+    return sceneParams.map((p) => {
+      const key = `${p.binding_id}::${p.param_name}`;
+      return { key, ...p, live: liveMap.get(key) ?? null };
     });
-  }, [drivers, fromScene]);
+  }, [sceneParams, drivers]);
+
+  if (rows.length === 0) {
+    return (
+      <div className="text-xs text-zinc-500">
+        no params in the current scene — add a binding in Prepare (⌘1)
+      </div>
+    );
+  }
 
   return (
-    <div className="flex flex-col gap-2">
-      <header className="text-xs text-zinc-500">
-        Drivers · {merged.length} param{merged.length === 1 ? '' : 's'}
+    <div className="flex flex-col gap-1">
+      <header className="text-xs text-zinc-500 pb-1">
+        Drivers · {rows.length} param{rows.length === 1 ? '' : 's'}
       </header>
-      <div className="grid grid-cols-[1fr_1fr_2fr_auto] gap-x-3 gap-y-2 text-xs">
-        <div className="text-zinc-500">binding · param</div>
-        <div className="text-zinc-500">source</div>
-        <div className="text-zinc-500">value</div>
-        <div className="text-zinc-500 text-right">affects</div>
-        {merged.map((r) => (
-          <RowView key={`${r.binding_id}:${r.param_name}`} row={r} />
+      <div className="flex flex-col divide-y divide-ink-700/60">
+        {rows.map((r) => (
+          <RowView key={r.key} row={r} highlight={r.binding_id === selectedBinding} />
         ))}
       </div>
     </div>
   );
 }
 
-function RowView({ row }: { row: Row }) {
+function RowView({ row, highlight }: { row: Row; highlight: boolean }) {
+  const { raw } = row;
+  const isDriver = raw && typeof raw === 'object' && 'driver' in raw;
+  const driverKind: string | null = isDriver ? raw.driver : null;
+
+  let control: React.ReactNode;
+  let sourceLabel: string;
+
+  if (driverKind === 'ui.slider') {
+    sourceLabel = `ui.slider(${raw.name ?? row.param_name})`;
+    control = (
+      <UiSliderControl
+        sliderName={raw.name ?? row.param_name}
+        defaultValue={raw.default ?? 0}
+        liveValue={row.live?.value}
+      />
+    );
+  } else if (isDriver) {
+    sourceLabel = row.live?.source ?? driverKind ?? '?';
+    control = <LiveBar value={row.live?.value ?? 0} />;
+  } else if (typeof raw === 'number') {
+    sourceLabel = 'const';
+    control = (
+      <ConstControl
+        bindingId={row.binding_id}
+        paramName={row.param_name}
+        value={raw}
+      />
+    );
+  } else if (typeof raw === 'string') {
+    sourceLabel = 'color';
+    control = (
+      <ColorControl
+        bindingId={row.binding_id}
+        paramName={row.param_name}
+        value={raw}
+      />
+    );
+  } else {
+    sourceLabel = 'unknown';
+    control = <span className="text-zinc-500 text-xs">—</span>;
+  }
+
   return (
-    <>
+    <div
+      className={
+        'grid grid-cols-[16rem_11rem_1fr_4rem] items-center gap-x-3 py-1.5 text-xs ' +
+        (highlight ? 'bg-ink-800/60 rounded' : '')
+      }
+    >
       <div className="truncate">
         <span className="text-zinc-100">{row.binding_id}</span>
         <span className="text-zinc-500"> · {row.param_name}</span>
       </div>
-      <div className="truncate text-zinc-300">{describeSource(row.source)}</div>
-      <div className="flex items-center gap-2">
-        <div className="w-12 text-right font-mono text-zinc-300">
-          {row.value.toFixed(2)}
-        </div>
-        <div className="flex-1">{valueBar(row.value)}</div>
+      <div className="truncate text-zinc-400">{sourceLabel}</div>
+      <div className="min-w-0">{control}</div>
+      <div className="text-right text-zinc-500">
+        {row.live && row.live.affects > 0 ? `→ ${row.live.affects}` : ''}
       </div>
-      <div className="text-right text-zinc-400">
-        {row.affects > 0 ? `→ ${row.affects}` : '—'}
-      </div>
-    </>
+    </div>
   );
+}
+
+/** Live, zero-rebuild knob: param.set → engine picks it up next frame. */
+function UiSliderControl({
+  sliderName,
+  defaultValue,
+  liveValue,
+}: {
+  sliderName: string;
+  defaultValue: number;
+  liveValue: number | undefined;
+}) {
+  // Local value wins while (and after) dragging so the knob never jumps
+  // under the finger when a stale telemetry frame arrives.
+  const [local, setLocal] = useState<number | null>(null);
+  const shown = local ?? liveValue ?? defaultValue;
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.005}
+        value={shown}
+        className="flex-1 accent-violet-400"
+        onChange={(e) => {
+          const v = parseFloat(e.target.value);
+          setLocal(v);
+          sendParam(sliderName, v);
+        }}
+      />
+      <span className="w-10 text-right font-mono text-zinc-200">
+        {shown.toFixed(2)}
+      </span>
+    </div>
+  );
+}
+
+/** Literal scene value: slider + numeric field via debounced scene commit. */
+function ConstControl({
+  bindingId,
+  paramName,
+  value,
+}: {
+  bindingId: string;
+  paramName: string;
+  value: number;
+}) {
+  // Slider bounds adapt to the value's magnitude so both a 0..1 intensity
+  // and a freq=18 stay draggable. Bounds are sticky per mount so the scale
+  // doesn't warp mid-drag.
+  const boundsRef = useRef<{ min: number; max: number } | null>(null);
+  if (!boundsRef.current) {
+    const mag = Math.abs(value);
+    const max = mag <= 1 ? 1 : Math.ceil(mag * 2);
+    boundsRef.current = { min: value < 0 ? -max : 0, max };
+  }
+  const { min, max } = boundsRef.current;
+
+  function commit(v: number) {
+    if (!Number.isFinite(v)) return;
+    commitSceneMutation((scene) => {
+      const b = (scene.bindings ?? []).find((b: any) => b.id === bindingId);
+      if (b) b.params = { ...(b.params ?? {}), [paramName]: v };
+      return scene;
+    });
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={(max - min) / 200}
+        value={value}
+        className="flex-1 accent-violet-400"
+        onChange={(e) => commit(parseFloat(e.target.value))}
+      />
+      <input
+        type="number"
+        step="0.01"
+        value={value}
+        className="w-16 bg-ink-900 px-1 py-0.5 rounded border border-ink-600 font-mono text-right"
+        onChange={(e) => commit(parseFloat(e.target.value))}
+      />
+    </div>
+  );
+}
+
+function ColorControl({
+  bindingId,
+  paramName,
+  value,
+}: {
+  bindingId: string;
+  paramName: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="color"
+        value={normalizeHex(value)}
+        className="h-6 w-10 bg-transparent cursor-pointer"
+        onChange={(e) =>
+          commitSceneMutation((scene) => {
+            const b = (scene.bindings ?? []).find((b: any) => b.id === bindingId);
+            if (b) b.params = { ...(b.params ?? {}), [paramName]: e.target.value };
+            return scene;
+          })
+        }
+      />
+      <span className="font-mono text-zinc-400">{value}</span>
+    </div>
+  );
+}
+
+/** Read-only bar for clock./audio.-driven params (the source drives them). */
+function LiveBar({ value }: { value: number }) {
+  const inUnit = value >= 0 && value <= 1;
+  const pct = Math.min(100, Math.max(0, value * 100));
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 flex-1 bg-ink-700 rounded overflow-hidden">
+        {inUnit && (
+          <div className="h-full bg-accent-violet" style={{ width: `${pct}%` }} />
+        )}
+      </div>
+      <span className="w-12 text-right font-mono text-zinc-300">
+        {value.toFixed(2)}
+      </span>
+    </div>
+  );
+}
+
+function normalizeHex(s: string): string {
+  // <input type=color> only accepts #rrggbb.
+  const raw = s.startsWith('#') ? s.slice(1) : s;
+  if (raw.length === 3) {
+    return '#' + raw.split('').map((c) => c + c).join('');
+  }
+  if (raw.length >= 6) return '#' + raw.slice(0, 6);
+  return '#ffffff';
 }

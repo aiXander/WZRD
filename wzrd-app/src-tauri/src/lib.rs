@@ -22,6 +22,9 @@ pub struct AppState {
     pub engine: Arc<EngineHandle>,
     pub scene_path: PathBuf,
     pub effects_dir: Option<PathBuf>,
+    /// Lazily-resolved pack directory (from `pack.info`), cached so mask
+    /// loads don't pay an RPC round trip each.
+    pub pack_dir: std::sync::OnceLock<PathBuf>,
 }
 
 /// Resolve `--scene` from process args, env var `WZRD_SCENE`, or fall back
@@ -149,6 +152,7 @@ pub fn run() {
                 engine: handle,
                 scene_path,
                 effects_dir,
+                pack_dir: std::sync::OnceLock::new(),
             });
             Ok(())
         })
@@ -158,6 +162,7 @@ pub fn run() {
             rpc::scene_get_state,
             rpc::scene_load,
             rpc::scene_reload,
+            rpc::param_set,
             rpc::wgsl_validate,
             rpc::effect_upsert,
             rpc::effect_remove,

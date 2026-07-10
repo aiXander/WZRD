@@ -11,7 +11,12 @@
 import { create } from 'zustand';
 import type { PackInfo } from '../api/ipc';
 
-export type FpsPayload = { fps: number; frame_time_ms: number };
+export type FpsPayload = {
+  fps: number;
+  frame_time_ms: number;
+  /** false ⇒ projector window occluded; engine self-paces offscreen (~30 Hz) by design. */
+  presenting?: boolean;
+};
 export type AudioFreshness = {
   state: 'fresh' | 'stale' | 'down';
   last_packet_ms: number;
@@ -38,6 +43,8 @@ export type FrameStats = {
   mask_slice_count: number;
   pipeline_count: number;
   pass_count: number;
+  /** false ⇒ occluded, intentional offscreen self-pacing. */
+  presenting?: boolean;
 };
 export type DriverRow = {
   binding_id: string;
@@ -119,6 +126,12 @@ interface Store {
   // selected binding (Phase 4.2 inspector)
   selectedBindingId: string | null;
   setSelectedBindingId: (id: string | null) => void;
+
+  // selected *layer* (surface canvas region) — distinct from bindings: a
+  // layer is a mask region in the pack; a binding is a scene entry whose
+  // selector may resolve to several layers.
+  selectedLayerId: string | null;
+  setSelectedLayerId: (id: string | null) => void;
 }
 
 const LOG_CAP = 2000;
@@ -187,4 +200,7 @@ export const useStore = create<Store>((set) => ({
 
   selectedBindingId: null,
   setSelectedBindingId: (id) => set({ selectedBindingId: id }),
+
+  selectedLayerId: null,
+  setSelectedLayerId: (id) => set({ selectedLayerId: id }),
 }));

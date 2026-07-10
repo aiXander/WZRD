@@ -7,13 +7,53 @@
 //! consumed as decaying envelopes by `audio.onset`; full discrete-event
 //! plumbing waits for Phase 6+ cue editing.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 
 use crate::osc::{AudioBand, AudioFeatures};
+
+/// Live values for `ui.slider` drivers, keyed by slider name. Written by the
+/// IPC layer (`param.set`, handled inline on the WS thread — no render-thread
+/// hop, so knob latency is one frame at most) and read once per frame per
+/// bound slider by the render thread.
+#[derive(Default)]
+pub struct SliderBank {
+    values: RwLock<HashMap<String, f32>>,
+}
+
+impl SliderBank {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn set(&self, name: &str, value: f32) {
+        self.values
+            .write()
+            .expect("slider bank lock")
+            .insert(name.to_string(), value);
+    }
+
+    pub fn get(&self, name: &str) -> Option<f32> {
+        self.values
+            .read()
+            .expect("slider bank lock")
+            .get(name)
+            .copied()
+    }
+
+    pub fn snapshot(&self) -> Vec<(String, f32)> {
+        self.values
+            .read()
+            .expect("slider bank lock")
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+}
 
 /// Scalar (f32) parameter value — either a literal or a driver.
 #[derive(Debug, Clone)]
@@ -43,6 +83,13 @@ impl ScalarValue {
             ScalarValue::Driver(d) => d.eval(frame),
         }
     }
+
+    pub fn describe(&self) -> String {
+        match self {
+            ScalarValue::Const(v) => format!("const({v})"),
+            ScalarValue::Driver(d) => d.describe(),
+        }
+    }
 }
 
 /// All built-in drivers. Each evaluates to a single f32 in (loosely) [0,1] or
@@ -65,12 +112,9 @@ pub enum DriverSpec {
         band: AudioBand,
         decay: f32,
     },
-    /// UI slider — stubbed in Phase 3 (no webview yet), returns `default`.
-    UiSlider {
-        #[allow(dead_code)]
-        name: String,
-        default: f32,
-    },
+    /// UI slider — reads the live value from the [`SliderBank`] (fed by the
+    /// `param.set` RPC); falls back to `default` until first touched.
+    UiSlider { name: String, default: f32 },
 }
 
 impl DriverSpec {
@@ -131,8 +175,35 @@ impl DriverSpec {
             DriverSpec::ClockTime => frame.elapsed_sec,
             DriverSpec::AudioBand(b) => frame.audio.band(*b),
             DriverSpec::AudioOnset { band, decay } => frame.audio.onset_envelope(*band, *decay),
-            DriverSpec::UiSlider { default, .. } => *default,
+            DriverSpec::UiSlider { name, default } => {
+                frame.sliders.get(name).unwrap_or(*default)
+            }
         }
+    }
+
+    /// Short human-readable source label for telemetry ("clock.bars(8)",
+    /// "audio.band(low)", "ui.slider(glow)"). Shown in the UI driver rack.
+    pub fn describe(&self) -> String {
+        match self {
+            DriverSpec::Const(v) => format!("const({v})"),
+            DriverSpec::ClockBars { n } => format!("clock.bars({n})"),
+            DriverSpec::ClockBeats { n } => format!("clock.beats({n})"),
+            DriverSpec::ClockPhase { rate } => format!("clock.phase({rate})"),
+            DriverSpec::ClockTime => "clock.time".to_string(),
+            DriverSpec::AudioBand(b) => format!("audio.band({})", band_name(*b)),
+            DriverSpec::AudioOnset { band, .. } => {
+                format!("audio.onset({})", band_name(*band))
+            }
+            DriverSpec::UiSlider { name, .. } => format!("ui.slider({name})"),
+        }
+    }
+}
+
+fn band_name(b: AudioBand) -> &'static str {
+    match b {
+        AudioBand::Low => "low",
+        AudioBand::Mid => "mid",
+        AudioBand::High => "high",
     }
 }
 
@@ -159,6 +230,7 @@ pub struct FrameContext<'a> {
     pub elapsed_sec: f32,
     pub bpm: f32,
     pub audio: &'a AudioFeatures,
+    pub sliders: &'a SliderBank,
 }
 
 impl<'a> FrameContext<'a> {
@@ -195,11 +267,16 @@ impl Transport {
         self.start.elapsed().as_secs_f32()
     }
 
-    pub fn frame_context<'a>(&self, audio: &'a AudioFeatures) -> FrameContext<'a> {
+    pub fn frame_context<'a>(
+        &self,
+        audio: &'a AudioFeatures,
+        sliders: &'a SliderBank,
+    ) -> FrameContext<'a> {
         FrameContext {
             elapsed_sec: self.elapsed_sec(),
             bpm: self.bpm,
             audio,
+            sliders,
         }
     }
 }

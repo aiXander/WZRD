@@ -158,12 +158,16 @@ impl Bus {
 
     // ---------- channel-typed convenience helpers ----------
 
-    pub fn emit_fps(&self, fps: f32, frame_time_ms: f32) {
+    pub fn emit_fps(&self, fps: f32, frame_time_ms: f32, presenting: bool) {
         self.emit(
             "fps",
             json!({
                 "fps": fps,
                 "frame_time_ms": frame_time_ms,
+                // false ⇒ the projector window is occluded and the engine is
+                // deliberately self-pacing offscreen (~30 Hz) — the UI shows
+                // this as a distinct mode, not as a performance problem.
+                "presenting": presenting,
             }),
         );
     }
@@ -270,6 +274,8 @@ pub struct FrameStats {
     pub mask_slice_count: u32,
     pub pipeline_count: u32,
     pub pass_count: u32,
+    /// false ⇒ occluded, self-paced offscreen rendering (intentional).
+    pub presenting: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,50 +307,91 @@ pub struct ConnectivityCell {
 
 // ---------- emitter helpers (composed into the render thread) ----------
 
-/// Tracks frame timings and emits an `fps` event roughly twice a second so
-/// the status pill has fresh numbers without flooding the bus.
+/// Tracks frame timings over a short sliding **time** window and emits an
+/// `fps` event roughly twice a second so the status pill has fresh numbers
+/// without flooding the bus.
+///
+/// The window is time-based (last ~2.5 s), not count-based: a count-based
+/// window spans 10+ seconds of wall time at 60 fps, which turns a clean
+/// mode switch (e.g. present @60 → occluded self-pace @30) into a slow,
+/// alarming-looking droop on the pill. With a time window the readout
+/// settles on the new rate within the window length.
 pub struct FpsAccumulator {
+    /// Frame delta-times (ms), oldest first. Pruned so the sum stays within
+    /// `WINDOW_MS`.
     samples: std::collections::VecDeque<f32>,
+    total_ms: f32,
     last_frame: Option<Instant>,
     last_emit: Instant,
 }
 
+const FPS_WINDOW_MS: f32 = 2_500.0;
+
 impl FpsAccumulator {
     pub fn new() -> Self {
         Self {
-            samples: std::collections::VecDeque::with_capacity(600),
+            samples: std::collections::VecDeque::with_capacity(512),
+            total_ms: 0.0,
             last_frame: None,
             last_emit: Instant::now(),
         }
     }
 
-    pub fn mark(&mut self, bus: &Bus) {
+    /// Drop history — called on present ↔ offscreen mode switches so the
+    /// readout snaps to the new rate instead of blending across modes.
+    pub fn reset(&mut self) {
+        self.samples.clear();
+        self.total_ms = 0.0;
+        self.last_frame = None;
+    }
+
+    pub fn mark(&mut self, bus: &Bus, counts: FrameCounts, presenting: bool) {
         let now = Instant::now();
         if let Some(prev) = self.last_frame {
             let dt = now.duration_since(prev).as_secs_f32() * 1000.0;
-            if self.samples.len() == 600 {
-                self.samples.pop_front();
-            }
             self.samples.push_back(dt);
+            self.total_ms += dt;
+            while self.total_ms > FPS_WINDOW_MS && self.samples.len() > 1 {
+                if let Some(old) = self.samples.pop_front() {
+                    self.total_ms -= old;
+                }
+            }
         }
         self.last_frame = Some(now);
 
         if now.duration_since(self.last_emit) >= Duration::from_millis(500) {
             let (p50, p95, p99) = percentiles(&self.samples);
-            let fps = if p50 > 0.0 { 1000.0 / p50 } else { 0.0 };
-            bus.emit_fps(fps, p50);
+            // Honest throughput: frames delivered per second of wall time,
+            // NOT 1000/p50 — the latter reads "211 fps" while the engine is
+            // actually hitching on 1s stalls.
+            let fps = if self.total_ms > 0.0 {
+                self.samples.len() as f32 * 1000.0 / self.total_ms
+            } else {
+                0.0
+            };
+            bus.emit_fps(fps, p50, presenting);
             bus.emit_frame_stats(FrameStats {
                 fps,
                 frame_time_ms_p50: p50,
                 frame_time_ms_p95: p95,
                 frame_time_ms_p99: p99,
-                mask_slice_count: 0, // filled in elsewhere if available
-                pipeline_count: 0,
-                pass_count: 0,
+                mask_slice_count: counts.mask_slices,
+                pipeline_count: counts.pipelines,
+                pass_count: counts.passes,
+                presenting,
             });
             self.last_emit = now;
         }
     }
+}
+
+/// Per-frame resource counts the render thread hands to [`FpsAccumulator`]
+/// so the `frame_stats` channel carries real numbers.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameCounts {
+    pub mask_slices: u32,
+    pub pipelines: u32,
+    pub passes: u32,
 }
 
 fn percentiles(samples: &std::collections::VecDeque<f32>) -> (f32, f32, f32) {
@@ -590,4 +637,19 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+// ---------- global bus hook (log → telemetry tee) ----------
+
+static GLOBAL_BUS: std::sync::OnceLock<Bus> = std::sync::OnceLock::new();
+
+/// Register the engine's bus as the process-global log sink. Called once
+/// from `App::new`; the tee logger in `main.rs` forwards `info!`/`warn!`/
+/// `error!` records onto the `log` telemetry channel from then on.
+pub fn set_global_bus(bus: &Bus) {
+    let _ = GLOBAL_BUS.set(bus.clone());
+}
+
+pub fn global_bus() -> Option<&'static Bus> {
+    GLOBAL_BUS.get()
 }

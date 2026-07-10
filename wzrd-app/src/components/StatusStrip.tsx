@@ -58,11 +58,33 @@ export function StatusStrip() {
         <span className="text-zinc-400">{engineRunning ? 'running' : 'down'}</span>
       </span>
 
-      <span className="pill">
-        <span className={`dot ${fps && fps.fps > 55 ? 'bg-accent-green' : 'bg-accent-amber'}`} />
+      <span
+        className="pill"
+        title={
+          fps?.presenting === false
+            ? 'Projector window is hidden — engine deliberately self-paces offscreen (~30 Hz); the preview stays live. Bring the render window to front to resume full-rate presentation.'
+            : 'Presenting to the projector window'
+        }
+      >
+        <span
+          className={
+            'dot ' +
+            (fps == null
+              ? 'bg-ink-400'
+              : fps.presenting === false
+              ? 'bg-accent-blue' // intentional offscreen mode, not a warning
+              : fps.fps > 55
+              ? 'bg-accent-green'
+              : 'bg-accent-amber')
+          }
+        />
         <span>FPS</span>
         <span className="text-zinc-400">
-          {fps ? `${fps.fps.toFixed(0)} · ${fps.frame_time_ms.toFixed(1)}ms` : '—'}
+          {fps
+            ? `${fps.fps.toFixed(0)} · ${fps.frame_time_ms.toFixed(1)}ms${
+                fps.presenting === false ? ' · offscreen' : ''
+              }`
+            : '—'}
         </span>
       </span>
 

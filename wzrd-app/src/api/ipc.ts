@@ -54,6 +54,9 @@ export const sceneLoad = (jsonText: string) =>
 export const sceneReload = () => invoke<unknown>('scene_reload');
 export const wgslValidate = (source: string) =>
   invoke<WgslValidateResult>('wgsl_validate', { source });
+/** Live knob path — no scene rebuild, engine picks it up next frame. */
+export const paramSet = (name: string, value: number) =>
+  invoke<unknown>('param_set', { name, value });
 export const effectUpsert = (name: string, wgsl: string, descriptor: unknown | null) =>
   invoke<unknown>('effect_upsert', { name, wgsl, descriptor });
 export const effectRemove = (name: string) =>

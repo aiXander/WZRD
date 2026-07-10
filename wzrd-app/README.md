@@ -29,10 +29,11 @@ shell is purely additive.
                 projector display
 ```
 
-Why a subprocess and not in-process winit? See `../render_engine_architecture.md`
-Phase 4 status block — short version: it sidesteps the macOS NSApp main-thread
-fight (§6.1) and reuses the *exact* RPC surface Phase 7 needs for MCP, with no
-shim code in between.
+Why a subprocess and not in-process winit? See decision P4 in
+`../docs/reference/render-engine.md` — short version: it sidesteps the macOS
+NSApp main-thread fight and reuses the *exact* RPC surface Phase 7 needs for
+MCP, with no shim code in between. (The analyzed-but-uncommitted single-process
+alternative lives in `../docs/TODO/single-process-collapse.md`.)
 
 ## Dev workflow
 

@@ -14,12 +14,44 @@
 use anyhow::Result;
 use clap::Parser;
 
+/// Tee logger: stderr via env_logger + the `log` telemetry channel once the
+/// engine bus exists. Only Info and louder are forwarded to the bus — the
+/// bus's own internals log at trace, so this also breaks any recursion.
+struct TeeLogger {
+    inner: env_logger::Logger,
+}
+
+impl log::Log for TeeLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        self.inner.log(record);
+        if record.level() <= log::Level::Info && self.inner.matches(record) {
+            if let Some(bus) = render_core::telemetry::global_bus() {
+                bus.emit_log(
+                    record.level().as_str().to_ascii_lowercase().as_str(),
+                    record.target(),
+                    &record.args().to_string(),
+                );
+            }
+        }
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+}
+
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(
+    let inner = env_logger::Builder::from_env(
         env_logger::Env::default()
             .default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"),
     )
-    .init();
+    .build();
+    log::set_max_level(inner.filter());
+    log::set_boxed_logger(Box::new(TeeLogger { inner })).expect("logger already set");
 
     let cli = render_core::Cli::parse();
     render_core::run(cli)

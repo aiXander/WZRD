@@ -4,7 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-WZRD is a Python toolkit for additive projection mapping. It extracts animated elements from static backgrounds so only changing regions get projected — unchanged areas stay invisible.
+WZRD is an additive projection-mapping system: only changing regions get projected — unchanged areas stay dark and merge with physical reality. Three cooperating parts:
+
+- **Python offline toolkit** (`wzrd/` + `wzrd_mcp/`) — extracts/segments surfaces from photos and authors layer packs.
+- **Rust realtime engine** (`render-core/`) — wgpu compositor that plays layer packs on a projector; headless-agent-drivable via `scene.json` + WGSL hot-reload.
+- **Tauri control shell** (`wzrd-app/`) — React UI wrapping the engine for humans.
+
+## Docs (`docs/`)
+
+- `docs/reference/render-engine.md` — **primary engine context doc**: current system state, contracts (scene.json, layer pack, RPC/telemetry, WGSL), invariants from the 2026-07 performance pass, working agreements, rejected approaches. Read before touching `render-core/` or `wzrd-app/`.
+- `docs/reference/user_design_spec.md` — the product north star; every engine trade-off answers to it.
+- `docs/TODO/render-engine-roadmap.md` — structural roadmap (§5.1 live BPM transport → §5.6 design/live two-deck → video, MCP, hardening).
+- `docs/TODO/single-process-collapse.md` — open decision: single-process collapse for a lossless preview (not committed).
+- `docs/finished/` — retired plans (v1 build plan lives here). Write-only; never read from it.
 
 ## Setup & Commands
 
@@ -30,13 +42,26 @@ python -m wzrd_mcp            # default: 0.0.0.0:8787
 python -m wzrd_mcp --no-debug # disable verbose tool logging
 
 # Realtime engine (headless agent path — no UI process)
+# NOTE: there is NO `render-core` on PATH. `cargo build` only writes the binary
+# into render-core/target/. Launch via `cargo run --` or ./target/release/render-core.
 cd render-core
-cargo run -- --scene examples/phase3_smoke.scene.json --windowed
+python ../test.py layerpack   # one-off: build the example pack the sample scene points at
+cargo run -- --scene examples/phase3_smoke.scene.json --windowed --no-osc
+# --no-osc runs without the audio server (clocks tick, audio.* drivers → 0).
+# Drop it and start the audio server to make audio-reactive layers (flash/drift) respond.
+# --windowed → drop for borderless fullscreen; add `--display 1` to pick a monitor.
+
+# Realtime Audio Feature Server (separate repo — feeds audio.* drivers over OSC :9000)
+cd ~/Documents/GitHub/Realtime_PyAudio_FFT
+uv run audio-server --open    # auto-connects to a running engine mid-flight
 
 # Tauri control shell (Phase 4 UI — spawns render-core as a subprocess)
+# Build the engine (debug) first so the shell can find + spawn it.
+(cd render-core && cargo build)
 cd wzrd-app
 pnpm install                  # one-off
 WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
+# Runs the engine WITH OSC enabled; audio.* layers stay at defaults until the audio server is up.
 ```
 
 No linting, formatting, or CI pipelines are configured. No pytest — tests use a custom `test.py` with assertions on file existence and return types. Test assets live in `test_imgs/`, outputs go to `test_results/`.
@@ -48,18 +73,18 @@ No linting, formatting, or CI pipelines are configured. No pytest — tests use 
 - `wzrd_mcp/` — FastMCP server layer wrapping wzrd functions as tools
 
 **One Rust crate** at the repo root:
-- `render-core/` — Realtime additive projection-mapping engine (wgpu + winit). Now a `[lib] + [[bin]]` crate. The standalone binary (`render-core --scene scene.json`) consumes a layer pack produced by `wzrd.layerpack` and is the headless agent deployment target. Phases 0–4.2 of `render_engine_architecture.md` are landed:
+- `render-core/` — Realtime additive projection-mapping engine (wgpu + winit). Now a `[lib] + [[bin]]` crate. The standalone binary (`render-core --scene scene.json`) consumes a layer pack produced by `wzrd.layerpack` and is the headless agent deployment target. **Primary engine context doc: `docs/reference/render-engine.md`** (contracts, current state; roadmap in `docs/TODO/render-engine-roadmap.md`). Phases 0–4.2 are landed, plus the 2026-07 performance/telemetry pass (occlusion-aware rendering, live `param.set` knob path, all telemetry channels emitting):
   - **Phases 0–3:** pack loader, scene-aware compositor, homography pass, driver bus (clock + audio via OSC + ui-slider stub), built-in effect catalog (`tint`, `hueCycle`, `flash`, `wobble`), **inline + project-local user-WGSL effects with `naga`-validated swap-on-success hot-reload (D15)**. Project-local effects live in `<scene_dir>/effects/<name>/{shader.wgsl, descriptor.json}`. Audio features (`audio.band`, `audio.onset`) arrive over OSC from the standalone Realtime Audio Feature Server (separate Python repo at `~/Documents/GitHub/Realtime_PyAudio_FFT`) — bind defaults to `127.0.0.1:9000`, override with `--osc-addr`, skip with `--no-osc`. No `audio.rms`/`audio.bpm`/`audio.fft` in v1.
-  - **Phase 4 (Tauri shell):** new `wzrd-app/` directory wraps the engine for humans. The shell spawns `render-core` as a subprocess with `--ws-addr 127.0.0.1:9123` and proxies all UI calls through that JSON-RPC WebSocket — same §3.11 method set Phase 7's MCP wrapper will use. Modules added to `render-core/src/`: `lib.rs` (`pub fn run(cli)`), `app.rs` (App + winit ApplicationHandler), `rpc.rs` (JSON-RPC dispatch + EngineCommand queue + `wgsl.validate`), `ws.rs` (tungstenite accept-loop + per-conn IO thread), `telemetry.rs` (sticky bus + FPS percentiles + composite-buffer JPEG preview readback at ~15 fps).
+  - **Phase 4 (Tauri shell):** new `wzrd-app/` directory wraps the engine for humans. The shell spawns `render-core` as a subprocess with `--ws-addr 127.0.0.1:9123` and proxies all UI calls through that JSON-RPC WebSocket — same §3.11 method set Phase 7's MCP wrapper will use. Modules added to `render-core/src/`: `lib.rs` (`pub fn run(cli)`), `core.rs` (host-agnostic `Core` — GPU/plan/drivers/telemetry/WS, takes any `wgpu::SurfaceTarget`; app-collapse Step 1), `app.rs` (thin `WinitHost` event-loop wrapper), `rpc.rs` (JSON-RPC dispatch + EngineCommand queue + `wgsl.validate`), `ws.rs` (tungstenite accept-loop + per-conn IO thread), `telemetry.rs` (sticky bus + FPS percentiles + composite-buffer JPEG preview readback at ~15 fps).
   - **Headless agent path is unchanged** — omit `--ws-addr` and the engine has no control surface, only file-watcher hot-reload.
-  See `render-core/README.md`, `wzrd-app/README.md`, and `audio_refactor_plan.md`.
+  See `docs/reference/render-engine.md` (primary), `render-core/README.md`, and `wzrd-app/README.md`. Audio-server internals are documented in the `Realtime_PyAudio_FFT` repo itself.
 
 **One Tauri app** at the repo root:
 - `wzrd-app/` — Phase 4 control shell. React + TypeScript + Vite + Tailwind webview running the §3.11 RPC surface through Tauri commands. Three routes (⌘1/⌘2/⌘3 keyboard switching):
   - **Prepare** (`src/routes/Prepare.tsx`) — surface canvas with mask overlays + Monaco editor (scene.json + per-effect WGSL tabs, inline naga squiggles via `wgsl.validate` IPC) + binding inspector with selector / effect / driver dropdowns.
   - **Perform** — preview hero + audio band/onset visualizer + driver rack listing every driver-bound param with live values.
   - **Debug** — collapsible panels (connectivity, render stats, driver bus snapshot, hot-reload events history, log stream with level filter, raw pack/scene dump).
-  Top status strip (OSC / Engine / FPS / Reload pills) is constant across all routes. Backend in `src-tauri/`: `engine.rs` (spawns render-core, owns single-IO-thread JSON-RPC client with reply demux + telemetry fan-in), `rpc.rs` (Tauri commands proxying every method), `lib.rs` (path resolution; handles `cargo tauri dev`'s CWD switching). Engine binary discovery: `WZRD_ENGINE_EXE` > `target/{debug,release}/render-core` > `../../render-core/target/debug/render-core`. Scene path bound via `WZRD_SCENE` env or `--scene` arg.
+  Top status strip (OSC / Engine / FPS / Reload pills) is constant across all routes. All scene mutations (Monaco *and* structured editors) funnel through `src/state/sceneCommit.ts` (optimistic local state, engine push debounced 150 ms, disk write debounced 800 ms) — don't add a second commit path. Backend in `src-tauri/`: `engine.rs` (spawns render-core, owns single-IO-thread JSON-RPC client with reply demux + telemetry fan-in), `rpc.rs` (Tauri commands proxying every method), `lib.rs` (path resolution; handles `cargo tauri dev`'s CWD switching). Engine binary discovery: `WZRD_ENGINE_EXE` > `target/{debug,release}/render-core` > `../../render-core/target/debug/render-core`. Scene path bound via `WZRD_SCENE` env or `--scene` arg.
 
 ### wzrd/ package
 
@@ -77,7 +102,7 @@ No linting, formatting, or CI pipelines are configured. No pytest — tests use 
 - `islands.py` — KMeans color clustering + connected components (requires scikit-learn)
 - `reproject.py` — Layer compositing for island videos
 - `prepare_surface.py` — Full surface prep pipeline (detect → align → darken). Returns dict with `'image'` (PIL Image) and optional `'video'` (alignment aid)
-- `layerpack.py` — Authors the offline ↔ runtime layer pack (`scene.json` + `masks/` + `references/`) consumed by the realtime `render-core` engine. CLI: `python -m wzrd.layerpack <masks_dir> --surface ... --tags tags.json -o pack/`
+- `layerpack.py` — Authors the offline ↔ runtime layer pack (`pack.json` + `masks/` + `references/`) consumed by the realtime `render-core` engine. CLI: `python -m wzrd.layerpack <masks_dir> --surface ... --tags tags.json -o pack/`
 
 ### wzrd_mcp/ package
 
@@ -107,4 +132,5 @@ MCP server that wraps wzrd functions as tools.
 ## Extras
 
 - **opencv-python pinned** to <4.11.0 (missing macOS wheels above that).
-- `deprecated/` folder contains old implementations — not part of the package.
+- `wzrd/deprecated/` contains old implementations — not part of the package.
+- `archive/` folder contains pre-engine planning docs — historical only.

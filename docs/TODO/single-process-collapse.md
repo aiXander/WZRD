@@ -1,12 +1,37 @@
 # WZRD — app collapse analysis
 
+> **Status 2026-07-10 (evening): Step 1 LANDED, static spikes ANSWERED.**
+> The Core/Host split shipped: `render-core/src/core.rs` holds the
+> host-agnostic `Core` (GPU, plan, drivers, telemetry, WS, watcher, frame
+> pacing, occlusion policy); `app.rs` is now a thin `WinitHost`;
+> `GpuContext::new` takes any `wgpu::SurfaceTarget` + explicit size instead
+> of a winit `Window`. Standalone binary verified behaviour-identical
+> (boot, plan build, §3.11 RPC surface, fps telemetry, occlusion →
+> offscreen-at-30 Hz all exercised live). Spike results in §5 Step 2:
+> **tao has no occlusion event** (mitigation known, bounded — poll
+> `NSWindow.occlusionState`); **wgpu-surface-on-tao is compatible**
+> (tao 0.35 + tauri 2.11 both implement rwh 0.6, same version wgpu 22
+> uses). Remaining before Step 2 can land: the two *runtime* spikes
+> (clean GPU teardown, §6.1 crash-recovery proof) and the §5.6 design
+> review. The incremental alternative (binary WS frames, demand-gated
+> capture) stays roadmap §5.8 in
+> [render-engine-roadmap.md](render-engine-roadmap.md).
+>
+> **Plan revised 2026-07-10** after the roadmap restructure: the decision
+> gate moved from "before Phase 5 (video)" to "as part of the §5.6
+> two-deck design" (§3.3 — the design leg is where the preview becomes
+> load-bearing), in-process crash recovery became a hard **precondition**
+> for Step 2 (§6.1), and Step 3b was demoted from peer option to
+> feasibility spike (§5 Step 3). **The full collapse commit hangs on the
+> runtime spikes + §6.1 + the §5.6 design review.**
+
 > Working doc, 2026-05-22. Decides whether to keep the Phase-4 subprocess
 > split (render-core ↔ Tauri shell over localhost JSON-RPC WebSocket) or
 > collapse the two into a single process so the operator-UI preview can
 > sample the engine's composite texture directly the way Resolume / MadMapper
 > / VDMX do.
 >
-> Status: **analysis only, no commitment.** The subprocess split has shipped
+> The subprocess split has shipped
 > end-to-end (Phases 4.1 + 4.2 landed); the preview pipeline works and is
 > stable after the 2026-05-22 render-thread fixes (`PreviewSampler` async
 > readback + 240 Hz frame cap). The question this doc answers is *whether
@@ -172,8 +197,8 @@ architecture above it.
 
 ### 2.4 Why the architecture is this shape
 
-From `render_engine_architecture.md:25-40` (the Phase-4 status block at the
-top of the design doc):
+From the retired v1 design doc's Phase-4 status block (decision carried
+forward as P4 in `../reference/render-engine.md`):
 
 > **Phase 4 architectural choice — subprocess + WS, not in-process winit.**
 > The original spec envisioned Tauri + winit sharing one event loop in one
@@ -236,7 +261,7 @@ process."*
 That argument is wrong. MCP and process topology are orthogonal:
 
 - **File-based agent path** is already the canonical contract
-  (D13 in `render_engine_architecture.md`). LLMs write `scene.json` and
+  (D13 in `../reference/render-engine.md`). LLMs write `scene.json` and
   `effects/*.wgsl`; the file watcher reloads. No WS needed.
 - **RPC-based MCP** can connect to a WS server that lives *inside* a
   collapsed (single-process) shell just as easily as one inside a
@@ -250,6 +275,28 @@ So the *real* and *only* blocker on collapsing is the §6.1 macOS spike:
 winit ↔ tao event-loop cohabitation, NSApp main-thread ownership, and
 the focus / fullscreen / Spaces interactions between the wgpu window
 and the webview window when they share one process.
+
+### 3.3 Where the ceiling actually binds — the design leg (added 2026-07-10)
+
+The Resolume comparison in §3 overstates the *live-leg* pain. WZRD is a
+projection-mapping tool: in the core workflow the operator is in the room
+with the surface and judges the live output by looking at physical
+reality — the thing the preview approximates is standing right there. A
+glanceable thumbnail for "is the projector alive / roughly what's playing"
+is a defensible live-leg preview indefinitely.
+
+What changes the calculus is roadmap §5.6 (design/live two-deck). The
+design leg renders **only to an offscreen composite** — it is never on the
+projector, so its preview channel is the *only* way the operator ever sees
+it, and promote decisions ("does this draft go to the crowd?") are judged
+entirely through it. That is where a 320 px q70 JPEG at 15 fps fails the
+design spec: gradients, fine mask edges, and additive blend artifacts are
+exactly what you need to check *before* promoting.
+
+Consequence: **the collapse decision is a §5.6 design input, not a
+standalone preview optimization.** Make the call while designing the
+two-deck — and before building §5.8's design-leg `PreviewSampler`, which
+is throwaway work under collapse.
 
 ---
 
@@ -313,21 +360,12 @@ Three real items, in descending order of risk:
    window, hand its `raw-window-handle` to wgpu. The standalone
    `render-core` binary keeps using winit and is unaffected.
 
-2. **`App` is hard-wired to winit's `ApplicationHandler`.**
-   `render-core/src/app.rs:333-446` implements `winit::application::ApplicationHandler`
-   directly. To support both hosts, the engine has to split into:
-   - **Core** (host-agnostic): GPU context lifecycle, pass plan, compositor,
-     driver bus, OSC sink, effect registry, file watcher, telemetry bus,
-     WS server. Knows nothing about winit or tao.
-   - **WinitHost** (the standalone binary): owns the winit event loop and
-     calls into Core on each event. Existing `App` minus the GPU/render
-     logic.
-   - **TauriHost** (the collapsed shell): owns a Tauri window's
-     `raw-window-handle`, drives Core on a render thread, bridges Tauri
-     commands to Core's RPC dispatch.
-
-   This is mostly a refactor — every piece exists today, just glued to
-   the winit handler.
+2. ~~**`App` is hard-wired to winit's `ApplicationHandler`.**~~
+   **RESOLVED — Step 1 landed 2026-07-10.** The Core/WinitHost split
+   exists (`render-core/src/core.rs` + the thin `app.rs`); see §5 Step 1
+   for the API residue. What remains of this item is only the
+   **TauriHost** itself (Step 2): own a Tauri window's handle, drive
+   `Core` on a render thread, bridge Tauri commands to Core's dispatch.
 
 3. **macOS webview focus / Spaces / exclusive-fullscreen interactions.**
    When the React webview takes focus, does the wgpu surface on the
@@ -368,10 +406,16 @@ Three real items, in descending order of risk:
 - **Two host wrappers to maintain.** WinitHost (for the standalone
   binary) and TauriHost (for the shell). Both delegate to the same Core;
   divergence risk is low.
-- **No more subprocess crash isolation.** A `panic!` in the render
-  thread, a wgpu device loss, or a runaway shader takes the Tauri shell
-  down with it. Today the shell survives an engine crash and can
-  potentially relaunch it.
+- **No more subprocess crash isolation — and this collides with §5.11.**
+  A `panic!` in the render thread, a wgpu device loss, or a runaway shader
+  takes the Tauri shell down with it. Today the shell survives an engine
+  crash, and roadmap §5.11 explicitly plans to exploit that ("shell
+  supervises the engine child: crash → respawn with the same scene within
+  seconds"). Collapse deletes that mechanism. Worse, WZRD's differentiator
+  — agent-written WGSL hot-swapped mid-show — makes render-thread trouble
+  *more* likely than in Resolume, whose plugins are vetted native code.
+  This is why in-process crash recovery is a **precondition** for Step 2,
+  not an open question — see §6.1.
 - **Engine GPU context lifetime now tied to Tauri's window lifecycle.**
   The render thread has to start after Tauri's setup hook (when the
   engine window exists) and stop cleanly on app exit.
@@ -386,32 +430,36 @@ Three real items, in descending order of risk:
 
 Each step is useful on its own and reversible without losing work.
 
-### Step 1 — split `App` into Core + WinitHost (~half day)
+### Step 1 — split `App` into Core + WinitHost — **DONE (2026-07-10)**
 
-**Goal:** Standalone binary unchanged, but the engine's GPU + render logic
-no longer assumes winit.
+Landed as planned; residue for whoever builds Step 2:
 
-- New module `render-core/src/core.rs` (working name):
-  - Holds `GpuContext`, `PassPlan`, `EffectRegistry`, `Transport`,
-    `AudioFeatures`, the bus, the WS server, the file watcher.
-  - Public API: `Core::new(cli, window_handle) -> Result<Self>`,
-    `Core::resize(w, h)`, `Core::redraw() -> Result<(), wgpu::SurfaceError>`,
-    `Core::poll_inbound()` (drain command queue + watcher + emit
-    audio_freshness heartbeat).
-  - Receives a `raw-window-handle` instead of a `winit::Window` so it
-    doesn't care which crate created the window.
-- `render-core/src/app.rs` becomes a thin `WinitHost` that owns the
-  winit `ApplicationHandler`, creates the winit window, hands its handle
-  to `Core::new`, and delegates every event.
-- `pub fn run(cli)` in `lib.rs` wires `WinitHost` exactly like today.
+- **`render-core/src/core.rs` — `Core`**, host-agnostic. Owns GPU context,
+  pass plan, effect registry, transport, OSC, telemetry bus, WS server,
+  file watcher, slider bank. Also owns the two policies both hosts must
+  share identically: the §3.1 occlusion invariant (`set_occluded` /
+  `occluded()` / `render_offscreen_frame`) and frame pacing (`pace_frame`).
+- **Two-stage init** (one deviation from the original sketch, deliberate):
+  `Core::new(&cli)` does everything pre-window (pack/scene load, OSC, WS
+  server — so load errors still fail fast with a non-zero exit before the
+  event loop starts), then `Core::init_gpu(target, width, height)` brings
+  up wgpu. `target` is `impl Into<wgpu::SurfaceTarget<'static>>` — a winit
+  `Arc<Window>`, a tao/tauri window, anything rwh-0.6. Width/height are
+  passed explicitly because a raw handle can't be queried for size.
+- **Per-frame host contract:** `poll_inbound()` (drain IPC + watcher +
+  telemetry heartbeats) → `pace_frame()` → either `redraw()` (returns
+  `wgpu::SurfaceError`; on `Lost`/`Outdated` the host queries the window
+  size and calls `resize`) or `render_offscreen_frame()` while occluded.
+- **`app.rs` is now `WinitHost`** (~170 lines): window creation +
+  fullscreen/display selection, event delegation, exit decisions. Owns the
+  `Arc<Window>`; `GpuContext` no longer stores a window at all and
+  `gpu.rs` has zero winit imports.
+- `rpc::handle` now takes `&mut Core`; `lib.rs::run` wires `WinitHost`.
 
-**Validation:** standalone binary behaves identically. `cargo run -- --scene
-examples/phase3_smoke.scene.json --windowed` produces the same fps, same
-hot-reload behavior, same OSC ingest. Tauri subprocess path also unchanged
-(it just spawns the same binary).
-
-This step is useful even if we *never* collapse — it cleanly separates
-"engine logic" from "winit event loop" and makes the engine more testable.
+**Validated:** `cargo build` + `cargo test` green, `wzrd-app/src-tauri`
+`cargo check` green (subprocess path untouched); live windowed run
+exercised boot, plan build, all §3.11 RPC methods over WS, fps telemetry,
+and the occlusion → offscreen-30 Hz path (`presenting: false` observed).
 
 ### Step 2 — TauriHost + wgpu-on-Tauri-window (~2 days + surprise tax)
 
@@ -443,15 +491,36 @@ window; `render-core` runs as a library inside that process.
 identically. WS server still binds and accepts external clients.
 Headless binary still runs.
 
-**Risk hotspots to spike first** (each ~30 min):
-- Can wgpu actually create a surface from a Tauri window's
-  `raw-window-handle` on macOS? (Should — wgpu is `raw-window-handle`-native
-  and tao implements the trait.)
-- Does winit's `EventLoop::new()` conflict if a tao event loop is already
-  running? (Don't call it from inside the Tauri process — that's why we
-  use tao's window API, not winit's.)
+**Risk hotspots — spike results (static ones answered 2026-07-10 by
+reading the locked dependency sources):**
+
+- **tao occlusion signal: ANSWERED — NO.** tao 0.35.2's `WindowEvent` has
+  no `Occluded` variant and its source contains no occlusion handling at
+  all (winit grew `Occluded` in 0.27; tao forked earlier). The §3.1
+  invariant — never block on the swapchain of a possibly-occluded window —
+  therefore needs another trigger in TauriHost. Mitigation is known and
+  bounded: poll `NSWindow.occlusionState & NSWindowOcclusionStateVisible`
+  once per frame on the render thread (a cheap AppKit property read; the
+  `NSWindow` is reachable from the rwh 0.6 `AppKitWindowHandle`'s
+  `ns_view.window`), or observe
+  `NSWindowDidChangeOcclusionStateNotification`. Budget this into Step 2;
+  it is no longer an unknown.
+- **wgpu surface from a Tauri window: ANSWERED — YES.** tao 0.35.2's
+  `Window` implements `rwh_06::HasWindowHandle` + `HasDisplayHandle` and
+  is `Send + Sync`; tauri 2.11's `Window<R>` and `WebviewWindow<R>` both
+  implement the same rwh 0.6 traits directly. Both lockfiles resolve a
+  single `raw-window-handle 0.6.2` — the version wgpu 22 consumes — so a
+  tauri window satisfies `Core::init_gpu`'s
+  `impl Into<wgpu::SurfaceTarget<'static>>` bound as-is, no adapter code.
+- **winit-vs-tao event-loop conflict: MOOT by construction.** After
+  Step 1, `Core` has no winit dependency; the Step-2 plan never creates a
+  winit event loop inside the Tauri process.
+
+**Still open — runtime spikes (need an actual embedded TauriHost):**
 - Does the engine window cleanly close when Tauri exits, releasing GPU
   resources?
+- The §6.1 crash-recovery proof: a deliberately-panicking effect and a
+  forced device loss must leave the webview alive.
 
 ### Step 3 — wire the Resolume-style preview (~half day)
 
@@ -461,56 +530,69 @@ texture directly.
 - Add a third wgpu render pipeline inside Core: a fullscreen-quad
   shader that samples `composite_texture` and writes to a target
   texture or surface.
-- Two delivery options inside the same window architecture:
-  - **(a) Native preview surface as a child of the Tauri window.**
-    A small native subwindow positioned over the React layout's
-    "preview" slot, rendered to by the same wgpu device. UI controls
-    overlap via z-order. Cleanest visual result; trickiest layout
-    integration with React.
-  - **(b) Render to a shared GPU texture, expose to the webview via
-    a custom `tauri-plugin` that wraps the texture as a video stream
-    the `<video>` element can consume.** Avoids the layout-integration
-    problem at the cost of one Metal `IOSurface` hop. Possibly the
-    sweet spot.
-- Delete `PreviewSampler` and the `preview` telemetry channel emission
-  path. Keep the channel *name* reserved in case a remote-operator
-  MCP client still wants a JPEG thumbnail; emit only on subscriber
-  demand.
+- Delivery: **plan around (a) — a native preview surface layered over
+  the Tauri window.** A small native subwindow/child view positioned
+  over the React layout's "preview" slot, rendered to by the same wgpu
+  device. UI chrome overlaps via z-order; the tax is layout integration
+  with React (position sync on scroll/resize), which is known and
+  bounded.
+- **(b) — texture-to-webview via a custom Tauri plugin — is demoted to a
+  30-minute feasibility spike, not a peer option** (revised 2026-07-10).
+  As originally written ("wrap the texture as a video stream the
+  `<video>` element can consume") it hand-waved the hard part: there is
+  no clean Tauri path from a wgpu texture into a webview `<video>`
+  without re-encoding frames — which reintroduces the exact pipeline
+  this step deletes. Pursue it only if the spike finds a genuinely
+  zero-copy IOSurface→WKWebView route.
+- Delete `PreviewSampler` as the *local* preview path. Keep the
+  `preview` telemetry channel for remote-operator / MCP clients (the
+  only way to see the projector over WS), but emit only on subscriber
+  demand — see §6.4.
 
-Open design question for Step 3: which delivery option above? Decide
-after Step 2 lands and we know what the layout actually wants to look
-like.
+Remaining Step-3 design detail (position sync mechanics for the native
+surface): decide after Step 2 lands and we know what the layout actually
+wants to look like.
 
 ---
 
-## 6. Open questions / decisions needed before starting
+## 6. Preconditions & decisions (revised 2026-07-10)
 
-1. **Are we OK losing subprocess crash isolation?** A shader-induced
-   GPU hang or wgpu device-loss event currently takes only the engine
-   subprocess down; the shell survives. Post-collapse, both go down
-   together. In practice: how often does this matter? Modern wgpu
-   device loss is rare; user-WGSL is already `naga`-validated before
-   compile; the swap-on-success pipeline lifecycle (`§3.6`) means a
-   bad shader keeps the previous good pipeline. Probably fine but
-   worth confirming.
+1. **In-process crash recovery — PRECONDITION for Step 2, not an open
+   question.** Collapse deletes the §5.11 supervised-respawn mechanism,
+   so the collapsed design must replace it before it ships:
+   - `catch_unwind` around the render-thread loop; on panic, tear down
+     and rebuild Core in-process (device, plan, last-good scene) while
+     the webview stays alive and the event lands on sticky
+     `connectivity`.
+   - wgpu device loss → recreate the device + reload the last-good
+     scene through the same path.
+   - Proof lives in the Step-2 spike list: a deliberately-panicking
+     effect and a forced device loss must leave the shell usable.
 
-2. **Native preview surface vs shared-texture-via-plugin (Step 3a vs 3b).**
-   3a is straightforward but couples the React layout to native window
-   positioning. 3b is cleaner from React's perspective but requires a
-   custom Tauri plugin (small) and uses an `IOSurface`-ish path that's
-   Mac-specific to start.
+   `naga` validation and swap-on-success (§3.6) reduce the *frequency*
+   of trouble but not to zero — a valid-but-pathological shader can
+   still hang the device (reference §4 risk list; §5.11's probation
+   window catches frame-budget blowouts, not device loss). **If this
+   recovery story can't be made solid, the subprocess split + §5.11
+   supervision wins and the preview fix is the §5.8 incremental path.**
 
-3. **When?** Phase 4.2 just landed. Phase 5 (video / HAP) and Phase 7
-   (MCP wrapper) are the next planned chunks. Collapse can slot in
-   before either — it doesn't block anything — but it's also explicit
-   non-load-bearing scope. Doing it before Phase 5 means video decode
-   lands on the collapsed architecture. Doing it after means one more
-   round of subprocess plumbing for the video path.
+2. **Step 3 delivery: RESOLVED — plan around 3a (native surface).**
+   3b is a feasibility spike only; see §5 Step 3 for the reasoning.
 
-4. **Do we keep the JPEG/base64 preview channel at all post-collapse?**
+3. **When: RESOLVED — decide as part of the §5.6 two-deck design, not
+   "before Phase 5".** §3.3 has the argument: the design leg is where
+   the preview becomes load-bearing, because promote decisions are
+   judged entirely through it. Committing before §5.6 means the
+   design-leg preview lands natively once; rejecting means building
+   §5.8's design-leg `PreviewSampler` on the JPEG path instead. Either
+   way the call must be made **before** §5.8's design-leg preview work
+   starts — doing both is paying twice.
+
+4. **Do we keep the JPEG/base64 preview channel post-collapse? Yes.**
    It's the only way a remote MCP client over WS can see what's on the
-   projector. Probably yes, but emit only when a subscriber actually
-   asks for it (already a planned optimization independent of collapse).
+   projector. Emit only when a subscriber actually asks for it —
+   demand-gating survives either outcome of this decision and is safe
+   to build anytime.
 
 ---
 
@@ -530,18 +612,31 @@ like.
 
 ---
 
-## 8. Recommendation
+## 8. Recommendation (revised 2026-07-10)
 
-Do **Step 1** unconditionally — it's a safe refactor, half a day, and
-makes the engine cleaner regardless of whether we ever do Step 2. It
-unblocks the option without committing to it.
+1. ~~**Do Step 1 now, unconditionally.**~~ **DONE 2026-07-10** — see §5
+   Step 1. The engine now has a host-agnostic `Core`, which is also the
+   natural home for the two `PassPlan` slots §5.6 needs.
 
-Decide on **Step 2** before starting Phase 5 (video). The video path
-is heavier infrastructure than the engine has today; landing it on the
-collapsed architecture means one fewer cross-process boundary for
-decoded frames to cross.
+2. **Step-2 spikes: static ones answered** (tao occlusion → NO, needs the
+   `NSWindow.occlusionState` poll; wgpu-on-tao → YES, rwh 0.6 end-to-end;
+   winit conflict → moot). **Remaining: the two runtime spikes** (clean
+   GPU teardown on Tauri exit, §6.1 crash-recovery proof) — these need a
+   minimal embedded TauriHost to answer, i.e. they're the first hours of
+   Step 2 itself.
 
-Treat **Step 3** as the payoff that makes the whole thing worth doing.
-If we're not going to use the in-process GPU context for a
-Resolume-quality preview, we don't need to collapse — the current
-subprocess split is fine.
+3. **Make the collapse call as part of the §5.6 two-deck design** —
+   that's where the preview becomes load-bearing (§3.3). Runtime spikes +
+   §6.1 hold → land Steps 2–3, then build §5.6's design-leg preview
+   natively. They don't → keep the subprocess split, lean on §5.11
+   supervision, and do §5.8's incremental path instead.
+
+4. **Until that call is made, don't build §5.8's binary-WS preview
+   frames or design-leg `PreviewSampler`** — both are throwaway under
+   collapse. (Demand-gated capture is fine anytime; it survives either
+   outcome as the remote-thumbnail path.)
+
+5. **Step 3 remains the payoff that justifies the whole thing** —
+   planned around delivery option (a); (b) is a spike only. If we're
+   not going to use the in-process GPU context for a lossless preview,
+   we don't collapse — the subprocess split is fine.

@@ -99,6 +99,16 @@ export function DebugRoute() {
 
       <Panel title="Render stats" defaultOpen>
         <div className="grid grid-cols-4 gap-3 text-xs">
+          <Stat
+            label="mode"
+            value={
+              frameStats == null
+                ? '—'
+                : frameStats.presenting === false
+                ? 'offscreen (window hidden)'
+                : 'presenting'
+            }
+          />
           <Stat label="FPS" value={fps?.fps.toFixed(0) ?? '—'} />
           <Stat label="frame p50" value={frameStats ? `${frameStats.frame_time_ms_p50.toFixed(2)} ms` : '—'} />
           <Stat label="frame p95" value={frameStats ? `${frameStats.frame_time_ms_p95.toFixed(2)} ms` : '—'} />

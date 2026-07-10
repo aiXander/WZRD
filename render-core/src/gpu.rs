@@ -14,12 +14,10 @@
 //! `FrameState` each frame; this file just exposes the bricks.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
-use winit::window::Window;
 
 use crate::effects::{MAX_COLOR_PARAMS, MAX_SCALAR_PARAMS};
 use crate::pack::LoadedPack;
@@ -144,7 +142,6 @@ impl HomographyUniforms {
 }
 
 pub struct GpuContext {
-    pub window: Arc<Window>,
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
     pub device: wgpu::Device,
@@ -184,13 +181,23 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
-    pub async fn new(window: Arc<Window>, pack: &LoadedPack) -> Result<Self> {
+    /// `target` is anything wgpu can hang a surface on — a winit
+    /// `Arc<Window>`, a tao window's raw handles, etc. — so this file has no
+    /// windowing-crate dependency (app-collapse Step 1). `width`/`height`
+    /// are the target's current inner size in physical pixels; a raw handle
+    /// can't be queried for its size, so the host passes it in.
+    pub async fn new(
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+        pack: &LoadedPack,
+    ) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
         let surface = instance
-            .create_surface(window.clone())
+            .create_surface(target)
             .context("creating wgpu surface for window")?;
 
         let adapter = instance
@@ -215,7 +222,6 @@ impl GpuContext {
             .await
             .context("requesting wgpu device")?;
 
-        let size = window.inner_size();
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
             .formats
@@ -226,8 +232,8 @@ impl GpuContext {
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: width.max(1),
+            height: height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -293,7 +299,6 @@ impl GpuContext {
         });
 
         Ok(Self {
-            window,
             surface,
             surface_config,
             device,

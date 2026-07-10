@@ -8,9 +8,16 @@
 //!
 //! Headless agent loop is unchanged: invoke `run(Cli { scene, … })` with no
 //! `ws_addr` and the engine ignores its IPC surface entirely.
+//!
+//! Engine logic is split host-agnostically (app-collapse Step 1): `core::Core`
+//! owns GPU/plan/drivers/telemetry/WS and takes any `wgpu::SurfaceTarget`;
+//! `app::WinitHost` is the standalone binary's winit event-loop wrapper. An
+//! embedder (e.g. a future in-process Tauri host) constructs `Core` directly
+//! and drives it from its own render thread.
 
 pub mod app;
 pub mod compositor;
+pub mod core;
 pub mod drivers;
 pub mod effects;
 pub mod gpu;
@@ -82,16 +89,39 @@ pub struct Cli {
     pub frame_cap_hz: u32,
 }
 
+/// Opt out of macOS App Nap + background timer coalescing for the lifetime
+/// of the process. Without this, the moment the engine app stops being
+/// frontmost (e.g. the operator clicks the Tauri shell), macOS throttles the
+/// process's timers to ~100 ms granularity — the event loop's frame pacing
+/// stretches from ~4 ms to ~110 ms per cycle and the render rate collapses
+/// to ~9 fps even though the window is still visible. A latency-critical
+/// activity assertion is the documented remedy for real-time AV processes.
+#[cfg(target_os = "macos")]
+fn hold_latency_critical_assertion() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let info = NSProcessInfo::processInfo();
+    let reason = NSString::from_str("realtime projection rendering");
+    let options = NSActivityOptions::NSActivityUserInitiated
+        | NSActivityOptions::NSActivityLatencyCritical;
+    let token = unsafe { info.beginActivityWithOptions_reason(options, &reason) };
+    // Held for the process lifetime — never end the activity.
+    std::mem::forget(token);
+    log::info!("macOS App Nap / timer coalescing disabled (latency-critical assertion)");
+}
+
 /// Run the engine with the provided CLI args. Blocks until the event loop
 /// exits. Use this from both the standalone binary and a Tauri sidecar
 /// spawn site.
 pub fn run(cli: Cli) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    hold_latency_critical_assertion();
+
     let event_loop = winit::event_loop::EventLoop::new().context("creating event loop")?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    let mut app = app::App::new(cli)?;
+    let mut host = app::WinitHost::new(cli)?;
     event_loop
-        .run_app(&mut app)
+        .run_app(&mut host)
         .context("event loop terminated")?;
     Ok(())
 }

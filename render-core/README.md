@@ -9,7 +9,8 @@ hot-reloads on save (D15). Drivers wire clock + audio (OSC ingest from the
 external Realtime Audio Feature Server) straight into effect params.
 **Still no Tauri, no webview, no TypeScript on the critical path.**
 
-See `../render_engine_architecture.md` for the full design.
+See `../docs/reference/render-engine.md` for the full design (roadmap in
+`../docs/TODO/render-engine-roadmap.md`).
 
 ## Build
 

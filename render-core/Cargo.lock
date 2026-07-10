@@ -2081,6 +2081,7 @@ dependencies = [
  "log",
  "naga",
  "notify",
+ "objc2-foundation",
  "pollster",
  "rosc",
  "serde",
