@@ -263,4 +263,30 @@ on a new capture against the original reference photo to get a single
 homography update — no re-segmentation);
 layer deck panel in Perform (per §5.7); virtualized log list; driver-rack
 grouping/filter chips; scene save-as + scene chooser grid; region renaming +
-`identity.json` editing in Prepare; AI co-author chat panel (with §5.10).
+`identity.json` editing in Prepare (→ §5.13); AI co-author chat panel (with §5.10).
+
+### 5.13 Identity sidecar: group authoring + region renaming (small sprint)
+
+Bindings already resolve `select: { group }` (D7), and the Binding Inspector
+already offers a group dropdown — but nothing in the UI can *create* a group
+or assign layers, so the dropdown is empty unless `wzrd.layerpack` authored
+groups offline. The fix is the first slice of the `identity.json` sidecar
+(§2.2): human-authored, pack-adjacent metadata overlaid at load time, keeping
+`pack.json` machine-authored and "pack ids stable, period." Groups are a
+property of the *surface*, not a performance, so they belong here — **not** in
+scene.json (per-scene) and **not** by rewriting the pack.
+
+Scope (deliberately thin):
+- **Engine:** load `<pack_dir>/identity.json` if present; merge its `groups`
+  over `pack.groups` before serving `pack.info`. One new queued RPC
+  `identity.setGroups {groups}` writes the sidecar and re-emits `pack.info`.
+  Same slot later carries region renames (the §5.12 backlog item — build the
+  reader/writer once, add a `labels` map when renaming lands).
+- **UI:** multi-select on the Surface canvas (⌘/⇧-click accumulates a
+  selection; already have pixel-accurate picking) → "New group from selection"
+  → commits via `identity.setGroups`. Editing membership = re-select + save.
+  Distinct from `sceneCommit.ts` — this writes the sidecar, not the scene.
+
+Non-goals: no group nesting, no per-group colour/metadata beyond membership,
+no offline `wzrd.layerpack` group-reconciliation (that rides the broader
+identity-table re-import work in §2.2).
