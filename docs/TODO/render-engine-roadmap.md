@@ -9,10 +9,14 @@
 > Ordered by leverage toward `../reference/user_design_spec.md`. Each item is
 > scoped so an agent can pick it up standalone. **General rule: engine first,
 > headless-verifiable, UI second.** §5.1–§5.5 are resolved (landed or
-> dropped, 2026-07-11); §5.6 (two-deck) is the next big structural one.
+> dropped, 2026-07-11). **Next up (order fixed 2026-07-12): single-process
+> collapse Steps 2–3, then §5.6 (two-deck).**
 >
-> Related open decision (uncommitted): single-process collapse for a
-> lossless preview — [single-process-collapse.md](single-process-collapse.md).
+> Companion plan — **COMMITTED 2026-07-12**: single-process collapse
+> ([single-process-collapse.md](single-process-collapse.md)). Sequencing
+> decision (operator, 2026-07-12): collapse Steps 2–3 land *first*, then
+> §5.6 builds on the collapsed topology (design-leg preview is native,
+> built once).
 
 ### 5.1 ~~Live transport: music-locked BPM~~ — DROPPED (2026-07-11)
 
@@ -93,10 +97,15 @@ The single biggest structural feature (spec: "two legs, one deck"). Sketch:
   `design` (renders only to an offscreen composite consumed by a second
   preview channel). All authoring RPCs (`scene.load`, `effect.upsert`,
   param edits) target `design` by default; `live` is immutable except via:
-  - `promote {fade_ms}` — crossfade the projector output from the live
-    composite to the design composite (two composites already exist as
+  - `promote {fade_ms, quantize}` — crossfade the projector output from the
+    live composite to the design composite (two composites already exist as
     textures; the final pass lerps), then **copy** design's scene into the
-    live slot. **Promote is a copy, not a swap:** design keeps its content
+    live slot. **Quantize (operator decision 2026-07-12):**
+    `quantize: "bar" | "now"`, default `"bar"` — the fade *starts* on the
+    next bar boundary so the visual change lands on a downbeat (both legs
+    tick the same transport, so the boundary is well-defined); `"now"`
+    starts immediately. Surface it as a toggle next to the promote control.
+    **Promote is a copy, not a swap:** design keeps its content
     (now identical to live), so the performer keeps iterating on the same
     idea — the scratchpad never snaps back to the pre-promote look, and
     "promote, push further, promote again" needs no manual `pull` between
@@ -115,7 +124,13 @@ The single biggest structural feature (spec: "two legs, one deck"). Sketch:
 
 This also creates the natural home for the **auto-pilot playlist**
 (spec §13): a queue of saved scenes promoted on a bar/minute schedule with
-per-entry dwell, skipping entries that fail to build.
+per-entry dwell, skipping entries that fail to build. **Deferred (operator
+decision 2026-07-12): explicitly out of §5.6 scope** — it ships as a thin
+follow-up layer once promote is proven solid live. Design constraint on
+§5.6 so the deferral stays cheap: the playlist must need no new engine
+verbs — a scheduler composing existing calls (`scene.load` → design, wait
+for build/probe OK, `promote {quantize:"bar"}`, dwell, repeat, skip on
+failure).
 
 **Shader pre-flight probe (operator requirement, 2026-07-11).** The design
 leg shares the process and GPU with the live leg, so a pathological
@@ -144,15 +159,19 @@ seconds / on every applied edit), and offer it for restore on next boot.
 Together with the §5.3 sidecar this is the Resolume-style "reload and
 continue in under a minute" contract — see §5.11.
 
-**Design input:** the single-process-collapse call is made *here*, as part
-of this design — the design leg is only ever visible through its preview,
-which is what makes the preview ceiling load-bearing. Operator inputs
-settled 2026-07-11 (see
-[single-process-collapse.md](single-process-collapse.md) §6 + §8): the
-design preview must be **decent enough to judge effect quality** (not
-necessarily lossless/full-res), and a **rare ~20 s full blackout is
-acceptable** provided state restore is total — which shifts the §8
-recommendation toward collapse, pending the Step-2 runtime spikes.
+**Design input — RESOLVED (operator decision 2026-07-12): collapse
+COMMITTED, and it lands first.** The design leg is only ever visible
+through its preview, which is what made the preview ceiling load-bearing;
+with the collapse committed
+([single-process-collapse.md](single-process-collapse.md) §8), the design
+leg gets a **native preview surface** (a second viewport sampling the
+design composite directly — lossless, full-fps), built once on the final
+topology. Sequencing: collapse Steps 2–3 land *before* the §5.6 build.
+The two runtime spikes (clean GPU teardown; crash-must-not-corrupt-state +
+relaunch ≤ ~20 s) are the **first tasks of Step 2** — they are a fallback
+trigger, not a gate: if they fail on macOS, revert to the subprocess split
+and build the design preview on §5.8 binary WS frames instead (meets the
+"decent enough to judge effect quality" bar settled 2026-07-11).
 
 ### 5.7 Layer object + intensity (carried over from v1 review #2/#9)
 
@@ -165,24 +184,21 @@ deck reads in surface-language").
 
 ### 5.8 Preview & render-loop upgrades
 
-- **Decision gate (updated 2026-07-11):** the single-process collapse call
-  ([single-process-collapse.md](single-process-collapse.md)) is made as part
-  of the §5.6 design. Step 1 (Core/Host split) landed 2026-07-10, static
-  spikes answered; the crash-recovery precondition was **relaxed** by the
-  operator's accepted recovery contract (§5.11: rare ~20 s blackout OK if
-  restore is total), so only the Step-2 runtime spikes gate the commit and
-  the recommendation now leans collapse. Until the call is made, **hold**
-  the binary-frames and design-leg `PreviewSampler` items below
-  (throwaway under collapse); demand-gated capture is safe anytime
-  (survives either outcome as the remote-thumbnail path).
-- Binary preview frames over WS (drop base64+JSON), larger preview when the
-  Perform route is focused — **only if collapse is rejected**. Note the
-  operator's design-preview bar is "decent enough to judge effect quality,"
-  not lossless — so this path (e.g. ~half-res at 30 fps) is a genuinely
-  sufficient fallback, not a compromise that fails the spec.
-- Design-leg preview channel (second `PreviewSampler` on the design
-  composite, required by §5.6) — **only if collapse is rejected**; under
-  collapse the design leg gets a native preview surface instead.
+- **Decision MADE (2026-07-12): collapse COMMITTED**
+  ([single-process-collapse.md](single-process-collapse.md) §8). The two
+  runtime spikes run as the first tasks of collapse Step 2 and act as a
+  fallback trigger only. The binary-frames and design-leg `PreviewSampler`
+  items below are now **fallback-only** — build them only if the runtime
+  spikes fail on macOS and the collapse is reverted. Demand-gated capture
+  is safe anytime (survives either outcome as the remote-thumbnail path).
+- *(Fallback only)* Binary preview frames over WS (drop base64+JSON),
+  larger preview when the Perform route is focused. The operator's
+  design-preview bar is "decent enough to judge effect quality," not
+  lossless — so this path (e.g. ~half-res at 30 fps) genuinely suffices
+  if the collapse is reverted.
+- *(Fallback only)* Design-leg preview channel (second `PreviewSampler` on
+  the design composite); under collapse the design leg gets a native
+  preview surface instead.
 - Capture gated on subscriber demand — either way.
 - Optional: `WaitUntil` scheduling; GPU timestamp queries into
   `frame_stats`; adaptive frame cap (drop to 30 Hz when no audio + no
@@ -228,10 +244,12 @@ single-process relaunch-with-restore meets it. Defense in depth, in order:
 (2) the probation window below catches full-res budget blowers,
 (3) snapshot/restore bounds the damage of whatever still gets through.
 
-- Tauri shell supervises the engine child: crash → respawn with the same
-  scene within seconds, log the event, sticky `connectivity` reflects it.
-  (Under collapse this bullet is replaced by relaunch-with-restore per the
-  contract above.)
+- ~~Tauri shell supervises the engine child~~ — superseded by the committed
+  collapse (2026-07-12): the mechanism is **relaunch-with-restore** per the
+  contract above (best-effort in-process `catch_unwind` recovery if the
+  Step-2 spike shows it's cheap; relaunch is the accepted backstop). Only
+  if the collapse is reverted does child-supervision (crash → respawn ~2 s)
+  return.
 - Engine startup is already last-good-tolerant (bad scene → previous plan);
   extend to "scene fails at boot → black composite + hot-reload watch"
   instead of exit.

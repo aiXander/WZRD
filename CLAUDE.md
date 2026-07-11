@@ -15,7 +15,7 @@ WZRD is an additive projection-mapping system: only changing regions get project
 - `docs/reference/render-engine.md` — **primary engine context doc**: current system state, contracts (scene.json, layer pack, RPC/telemetry, WGSL), invariants from the 2026-07 performance pass, working agreements, rejected approaches. Read before touching `render-core/` or `wzrd-app/`.
 - `docs/reference/user_design_spec.md` — the product north star; every engine trade-off answers to it.
 - `docs/TODO/render-engine-roadmap.md` — structural roadmap (§5.3 session sidecar → §5.6 design/live two-deck → video, MCP, hardening).
-- `docs/TODO/single-process-collapse.md` — open decision: single-process collapse for a lossless preview (not committed).
+- `docs/TODO/single-process-collapse.md` — **committed plan (2026-07-12)**: single-process collapse for a native lossless preview; collapse Steps 2–3 land *before* the §5.6 two-deck build.
 - `docs/finished/` — retired plans (v1 build plan lives here). Write-only; never read from it.
 
 ## Setup & Commands

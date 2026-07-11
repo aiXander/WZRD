@@ -1,5 +1,17 @@
 # WZRD — app collapse analysis
 
+> **Status 2026-07-12: COMMITTED (operator decision).** Collapse is the
+> plan, no longer pending: the two Step-2 runtime spikes (clean GPU
+> teardown on Tauri exit; crash-must-not-corrupt-state + relaunch-to-light
+> ≤ ~20 s) run as the **first tasks of Step 2** and act as a *fallback
+> trigger*, not a gate — if they fail on macOS, revert to the subprocess
+> split + §5.8 binary WS frames. Sequencing (also decided): **Steps 2–3
+> land before the §5.6 two-deck build**, so the design-leg preview is
+> built once, natively, on the final topology. Prerequisite unchanged:
+> the shader pre-flight probe must exist before the collapsed build ships
+> to a live show. This doc is now an implementation plan (§5), not an
+> open decision.
+
 > **Status 2026-07-11: operator decision inputs SETTLED — recommendation
 > now leans COLLAPSE, pending only the Step-2 runtime spikes.** Three
 > requirements were fixed in conversation with the operator:
@@ -617,14 +629,11 @@ wants to look like.
 2. **Step 3 delivery: RESOLVED — plan around 3a (native surface).**
    3b is a feasibility spike only; see §5 Step 3 for the reasoning.
 
-3. **When: RESOLVED — decide as part of the §5.6 two-deck design, not
-   "before Phase 5".** §3.3 has the argument: the design leg is where
-   the preview becomes load-bearing, because promote decisions are
-   judged entirely through it. Committing before §5.6 means the
-   design-leg preview lands natively once; rejecting means building
-   §5.8's design-leg `PreviewSampler` on the JPEG path instead. Either
-   way the call must be made **before** §5.8's design-leg preview work
-   starts — doing both is paying twice.
+3. **When: DECIDED (2026-07-12) — collapse first, then §5.6.** The call
+   is made: Steps 2–3 land before the two-deck build, so the design-leg
+   preview lands natively once. (Historical framing: §3.3 argued the call
+   belonged inside the §5.6 design because the design leg is where the
+   preview becomes load-bearing — that is what forced the decision now.)
 
 4. **Do we keep the JPEG/base64 preview channel post-collapse? Yes.**
    It's the only way a remote MCP client over WS can see what's on the
@@ -650,7 +659,14 @@ wants to look like.
 
 ---
 
-## 8. Recommendation (revised 2026-07-11)
+## 8. Decision (committed 2026-07-12; recommendation text of 2026-07-11 below)
+
+**Collapse is COMMITTED** — the operator took the recommendation on
+2026-07-12. Execution order: (1) Step-2 runtime spikes as the first
+hours (fallback trigger — revert to subprocess + §5.8 binary frames only
+if they fail), (2) land Steps 2–3, (3) then build §5.6 two-deck with a
+native design-leg preview. Pre-flight probe + design-leg autosave +
+atomic sidecar writes ship alongside Step 2 as planned in point 5 below.
 
 **Collapse is now the preferred outcome** — deliberately adopting the
 Resolume formula (single process + rare crashes via pre-flight + fast
