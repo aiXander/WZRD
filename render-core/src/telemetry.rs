@@ -35,6 +35,7 @@ pub const ALL_CHANNELS: &[&str] = &[
     "drivers",
     "audio",
     "connectivity",
+    "masters",
 ];
 
 /// What an emitter pushes onto the bus and what a subscriber sees on the
@@ -118,7 +119,10 @@ impl Bus {
     /// `audio_freshness`, `connectivity`), the payload is also retained as
     /// the current value so late-arriving subscribers see it.
     pub fn emit(&self, channel: &str, payload: Value) {
-        let sticky = matches!(channel, "hot_reload" | "audio_freshness" | "connectivity");
+        let sticky = matches!(
+            channel,
+            "hot_reload" | "audio_freshness" | "connectivity" | "masters"
+        );
         if sticky {
             if let Ok(mut s) = self.inner.sticky.lock() {
                 s.insert(channel.to_string(), payload.clone());
@@ -234,6 +238,12 @@ impl Bus {
         );
     }
 
+    /// §5.4 masters snapshot — sticky, emitted at startup and on every
+    /// `master.set` (from the WS thread; the bus is thread-safe).
+    pub fn emit_masters(&self, snapshot: crate::drivers::MastersSnapshot) {
+        self.emit("masters", serde_json::to_value(snapshot).expect("masters"));
+    }
+
     pub fn emit_log(&self, level: &str, target: &str, message: &str) {
         self.emit(
             "log",
@@ -290,6 +300,9 @@ pub struct DriverRow {
     pub source: String,
     pub value: f32,
     pub affects: u32,
+    /// §5.5 — true when a live `param.set {binding, param}` override is
+    /// pinning this param; `value` then reports the override.
+    pub overridden: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -593,6 +606,18 @@ fn f16_to_f32(bits: u16) -> f32 {
     if sign == 1 { -f } else { f }
 }
 
+/// sRGB electro-optical transfer function (linear → gamma-encoded), clamped
+/// to [0, 1]. Mirrors the automatic conversion the GPU does when storing into
+/// the sRGB swapchain, so the preview JPEG matches the on-projector output.
+fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 fn encode_jpeg_thumbnail(
     src: &[u8],
     src_w: u32,
@@ -617,9 +642,13 @@ fn encode_jpeg_thumbnail(
             let r = f16_to_f32(u16::from_le_bytes([src[px_off], src[px_off + 1]]));
             let g = f16_to_f32(u16::from_le_bytes([src[px_off + 2], src[px_off + 3]]));
             let b = f16_to_f32(u16::from_le_bytes([src[px_off + 4], src[px_off + 5]]));
-            rgb.push((r.clamp(0.0, 1.0) * 255.0) as u8);
-            rgb.push((g.clamp(0.0, 1.0) * 255.0) as u8);
-            rgb.push((b.clamp(0.0, 1.0) * 255.0) as u8);
+            // The composite is linear-light Rgba16Float. The window's sRGB
+            // swapchain applies the linear→sRGB OETF automatically on store;
+            // this CPU readback must do it explicitly, or the preview shows
+            // raw linear values (too-dark midtones, shifted color balance).
+            rgb.push((linear_to_srgb(r) * 255.0) as u8);
+            rgb.push((linear_to_srgb(g) * 255.0) as u8);
+            rgb.push((linear_to_srgb(b) * 255.0) as u8);
         }
     }
     let mut jpeg: Vec<u8> = Vec::with_capacity(rgb.len() / 4);

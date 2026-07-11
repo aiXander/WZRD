@@ -10,7 +10,7 @@
 //     code ran a full-canvas `source-in` fill per layer per preview frame,
 //     which both wiped the canvas — only the last tint survived — and
 //     burned the webview main thread at 15 fps.)
-//   - Picking reads a downsampled per-layer alpha map (256 px wide), so
+//   - Picking reads a downsampled per-layer mask map (256 px wide), so
 //     hover hit-testing is mask-accurate without holding full-res
 //     ImageData for every layer.
 
@@ -41,6 +41,13 @@ function buildAssets(img: HTMLImageElement, w: number, h: number, hue: number): 
   overlay.height = h;
   const octx = overlay.getContext('2d')!;
   octx.drawImage(img, 0, 0, w, h);
+  // Masks are opaque grayscale PNGs (mask in luminance, alpha = 255
+  // everywhere), so move the mask into the alpha channel first — otherwise
+  // the `source-in` tint keeps the whole canvas, not just the region.
+  const od = octx.getImageData(0, 0, w, h);
+  const d = od.data;
+  for (let i = 0; i < d.length; i += 4) d[i + 3] = d[i];
+  octx.putImageData(od, 0, 0);
   octx.globalCompositeOperation = 'source-in';
   octx.fillStyle = `hsl(${hue}, 75%, 60%)`;
   octx.fillRect(0, 0, w, h);
@@ -94,7 +101,6 @@ export function SurfaceCanvas() {
   const [assetsVersion, setAssetsVersion] = useState(0);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [showOverlays, setShowOverlays] = useState(true);
-  const [showLabels, setShowLabels] = useState(true);
   const [previewImg, setPreviewImg] = useState<HTMLImageElement | null>(null);
 
   // Load every layer's mask PNG once (in parallel) and pre-composite its
@@ -177,26 +183,10 @@ export function SurfaceCanvas() {
       ctx.globalAlpha = 1;
     }
 
-    if (showLabels) {
-      // Font size in pack-space so labels stay readable after CSS downscale.
-      const fontPx = Math.max(14, Math.round(pack.width / 55));
-      ctx.font = `${fontPx}px ui-monospace, monospace`;
-      ctx.textBaseline = 'middle';
-      ctx.lineWidth = Math.max(2, fontPx / 6);
-      pack.layers.forEach((layer, i) => {
-        if (!layer.centroid) return;
-        const label = layer.label ?? layer.id;
-        const [cx, cy] = layer.centroid;
-        ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-        ctx.strokeText(label, cx + 4, cy);
-        ctx.fillStyle =
-          selectedLayer === layer.id || hoverId === layer.id
-            ? '#ffffff'
-            : `hsl(${hueForIndex(i)}, 70%, 75%)`;
-        ctx.fillText(label, cx + 4, cy);
-      });
-    }
-  }, [pack, previewImg, assetsVersion, selectedLayer, hoverId, showOverlays, showLabels]);
+    // Region names are shown on hover (in the status line below the canvas),
+    // not painted at centroids — centroid labels landed in the wrong place for
+    // thin/concave regions and cluttered the surface.
+  }, [pack, previewImg, assetsVersion, selectedLayer, hoverId, showOverlays]);
 
   const layers = useMemo(() => pack?.layers ?? [], [pack]);
 
@@ -215,8 +205,10 @@ export function SurfaceCanvas() {
       if (!a) continue;
       const px = Math.min(a.pickW - 1, Math.max(0, Math.floor(u * a.pickW)));
       const py = Math.min(a.pickH - 1, Math.max(0, Math.floor(v * a.pickH)));
-      const alpha = a.pickData[(py * a.pickW + px) * 4 + 3];
-      if (alpha > 32) return layer.id;
+      // Red channel, not alpha — grayscale masks are opaque (alpha = 255
+      // everywhere); R carries the mask either way.
+      const maskVal = a.pickData[(py * a.pickW + px) * 4];
+      if (maskVal > 32) return layer.id;
     }
     return null;
   }
@@ -247,8 +239,10 @@ export function SurfaceCanvas() {
 
   return (
     <div className="flex flex-col gap-2 h-full">
-      <div className="flex items-center gap-3 text-xs text-zinc-400">
-        <label className="flex items-center gap-1 cursor-pointer">
+      {/* Single line, no wrap: a long selected-layer name must never push
+          the canvas down (layout shift on click). */}
+      <div className="flex items-center gap-3 text-xs text-zinc-400 whitespace-nowrap overflow-hidden">
+        <label className="flex items-center gap-1 cursor-pointer shrink-0">
           <input
             type="checkbox"
             checked={showOverlays}
@@ -256,20 +250,17 @@ export function SurfaceCanvas() {
           />
           Overlays
         </label>
-        <label className="flex items-center gap-1 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={showLabels}
-            onChange={(e) => setShowLabels(e.target.checked)}
-          />
-          Labels
-        </label>
-        <span className="text-zinc-500">|</span>
-        <span>{layers.length} layers</span>
+        <span className="text-zinc-500 shrink-0">|</span>
+        <span className="shrink-0">{layers.length} layers</span>
         {selectedLayer && (
           <>
-            <span className="text-zinc-500">|</span>
-            <span className="text-accent-violet">selected: {selectedLayer}</span>
+            <span className="text-zinc-500 shrink-0">|</span>
+            <span
+              className="text-accent-violet truncate min-w-0"
+              title={selectedLayer}
+            >
+              selected: {selectedLayer}
+            </span>
           </>
         )}
       </div>
@@ -280,7 +271,7 @@ export function SurfaceCanvas() {
         onMouseLeave={() => setHoverId(null)}
         onClick={onCanvasClick}
       />
-      <div className="text-xs text-zinc-400 min-h-[1.25rem]">
+      <div className="text-xs text-zinc-400 min-h-[1.25rem] whitespace-nowrap overflow-hidden text-ellipsis">
         {hoverId ? (
           <>
             <span className="text-zinc-200">{hoverId}</span>

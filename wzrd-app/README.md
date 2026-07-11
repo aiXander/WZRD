@@ -58,6 +58,13 @@ The shell finds the engine binary by:
 The scene path comes from `WZRD_SCENE` env var or `--scene <path>` passed
 through to `wzrd-app`.
 
+To auto-start the audio feature server alongside the shell, set
+`WZRD_AUDIO=1` (or pass `--audio` through to the binary:
+`pnpm tauri dev -- -- --audio`). The shell runs `uv run audio-server --open`
+in `~/Documents/GitHub/Realtime_PyAudio_FFT` (override the checkout location
+with `WZRD_AUDIO_DIR`) and kills it on window close. A failed audio spawn is
+logged and non-fatal.
+
 ## Phase 4.1 deliverable
 
 - Open a pack (read from the scene's `pack` field on engine startup).

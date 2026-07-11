@@ -1,5 +1,25 @@
 # WZRD — app collapse analysis
 
+> **Status 2026-07-11: operator decision inputs SETTLED — recommendation
+> now leans COLLAPSE, pending only the Step-2 runtime spikes.** Three
+> requirements were fixed in conversation with the operator:
+> 1. **A rare ~20 s full blackout is acceptable** *if* state restore is
+>    total (scene + knobs + masters + calibration + design draft). That's
+>    the Resolume recovery formula — autosave + relaunch + recover — and it
+>    **relaxes the §6.1 crash-recovery precondition**: in-process recovery
+>    is now best-effort, relaunch-with-restore is the accepted backstop.
+>    The state machinery is §5.3 (session sidecar, in flight) + the §5.6
+>    design-leg autosave.
+> 2. **AI-written shaders get a pre-flight probe** before touching any
+>    plan (compile → ~60 offscreen frames at reduced res → p95 check →
+>    thumbnail; roadmap §5.6). Crashes become rare by construction, not
+>    by hope — this counters the "agent shaders make collapse riskier
+>    than Resolume" argument at its source.
+> 3. **The design-leg preview bar is "decent enough to judge effect
+>    quality"** — near-full-res NOT required (§3.3 note). Both collapse
+>    and the §5.8 binary-frames fallback can meet it; collapse wins on
+>    margin and simplicity rather than being the only option.
+>
 > **Status 2026-07-10 (evening): Step 1 LANDED, static spikes ANSWERED.**
 > The Core/Host split shipped: `render-core/src/core.rs` holds the
 > host-agnostic `Core` (GPU, plan, drivers, telemetry, WS, watcher, frame
@@ -21,9 +41,10 @@
 > gate moved from "before Phase 5 (video)" to "as part of the §5.6
 > two-deck design" (§3.3 — the design leg is where the preview becomes
 > load-bearing), in-process crash recovery became a hard **precondition**
-> for Step 2 (§6.1), and Step 3b was demoted from peer option to
-> feasibility spike (§5 Step 3). **The full collapse commit hangs on the
-> runtime spikes + §6.1 + the §5.6 design review.**
+> for Step 2 (§6.1) — *superseded 2026-07-11: relaxed to state-integrity +
+> relaunch-≤20 s, see §6.1* — and Step 3b was demoted from peer option to
+> feasibility spike (§5 Step 3). **The full collapse commit now hangs on
+> the Step-2 runtime spikes + the §5.6 design review only.**
 
 > Working doc, 2026-05-22. Decides whether to keep the Phase-4 subprocess
 > split (render-core ↔ Tauri shell over localhost JSON-RPC WebSocket) or
@@ -298,6 +319,16 @@ standalone preview optimization.** Make the call while designing the
 two-deck — and before building §5.8's design-leg `PreviewSampler`, which
 is throwaway work under collapse.
 
+**Preview bar fixed (2026-07-11).** The operator's actual design workflow
+is prompting an AI for new shaders and judging drafts on screen before
+they go live — so a design-leg preview is unconditionally required, but
+the bar is "**decent enough to judge effect quality and decide what to do
+next**," not lossless-indistinguishable. Practical floor: roughly half
+pack resolution at ~30 fps. That is reachable by the §5.8 incremental
+path (binary WS frames) as well as by collapse — so the preview alone no
+longer *forces* collapse; it makes some upgrade mandatory and leaves the
+topology choice to the recovery/robustness trade-off in §6/§8.
+
 ---
 
 ## 4. Proposed solution — collapse to a single process
@@ -414,8 +445,9 @@ Three real items, in descending order of risk:
   seconds"). Collapse deletes that mechanism. Worse, WZRD's differentiator
   — agent-written WGSL hot-swapped mid-show — makes render-thread trouble
   *more* likely than in Resolume, whose plugins are vetted native code.
-  This is why in-process crash recovery is a **precondition** for Step 2,
-  not an open question — see §6.1.
+  *(2026-07-11: this cost was re-priced and accepted — the pre-flight
+  probe attacks the frequency, the autosave/restore contract bounds the
+  damage; see the relaxed §6.1.)*
 - **Engine GPU context lifetime now tied to Tauri's window lifecycle.**
   The render thread has to start after Tauri's setup hook (when the
   engine window exists) and stop cleanly on app exit.
@@ -557,24 +589,30 @@ wants to look like.
 
 ## 6. Preconditions & decisions (revised 2026-07-10)
 
-1. **In-process crash recovery — PRECONDITION for Step 2, not an open
-   question.** Collapse deletes the §5.11 supervised-respawn mechanism,
-   so the collapsed design must replace it before it ships:
-   - `catch_unwind` around the render-thread loop; on panic, tear down
-     and rebuild Core in-process (device, plan, last-good scene) while
-     the webview stays alive and the event lands on sticky
-     `connectivity`.
-   - wgpu device loss → recreate the device + reload the last-good
-     scene through the same path.
-   - Proof lives in the Step-2 spike list: a deliberately-panicking
-     effect and a forced device loss must leave the shell usable.
-
-   `naga` validation and swap-on-success (§3.6) reduce the *frequency*
-   of trouble but not to zero — a valid-but-pathological shader can
-   still hang the device (reference §4 risk list; §5.11's probation
-   window catches frame-budget blowouts, not device loss). **If this
-   recovery story can't be made solid, the subprocess split + §5.11
-   supervision wins and the preview fix is the §5.8 incremental path.**
+1. **Crash recovery — RELAXED (2026-07-11), no longer a hard blocker.**
+   The operator accepted the Resolume contract: a rare ~20 s blackout is
+   fine *if restore is total*. The recovery story is therefore layered,
+   and only the last layer is mandatory:
+   - *Best effort, in-process:* `catch_unwind` around the render-thread
+     loop → rebuild Core (device, plan, last-good scene) while the
+     webview stays alive; same path for wgpu device loss. Build it if
+     the Step-2 spike shows it's cheap; don't gate the collapse on it.
+   - *Accepted backstop, always:* relaunch-with-restore. **The real
+     precondition moves to state integrity:** a panic at any moment must
+     never corrupt or lose the §5.3 sidecar, the scene file, or the
+     §5.6 design-leg autosave (atomic writes: temp file + rename), and
+     relaunch-to-light must be proven ≤ ~20 s.
+   - *Frequency control:* the §5.6 shader pre-flight probe (compile +
+     offscreen timed run + thumbnail before any plan swap) keeps the
+     crash rate near zero in the first place; §5.11's probation window
+     backs it up at full res. This is what Resolume can't do for
+     third-party FFGL — WZRD tests its "plugins" automatically before
+     every swap.
+   - Residual known-unfixable: a shader that hard-hangs the GPU device
+     in-process. Covered by the backstop (relaunch); if it turns out to
+     happen in practice, a separate probe *process* with its own Metal
+     device is the escalation (works on the single M2 GPU — macOS
+     contains most faults to the offending process's command buffers).
 
 2. **Step 3 delivery: RESOLVED — plan around 3a (native surface).**
    3b is a feasibility spike only; see §5 Step 3 for the reasoning.
@@ -612,31 +650,42 @@ wants to look like.
 
 ---
 
-## 8. Recommendation (revised 2026-07-10)
+## 8. Recommendation (revised 2026-07-11)
+
+**Collapse is now the preferred outcome** — deliberately adopting the
+Resolume formula (single process + rare crashes via pre-flight + fast
+total-restore recovery + direct-sampled preview) rather than drifting
+into it. What changed: the operator fixed the three decision inputs
+(status block at top) — blackout tolerance, shader pre-flight, and a
+judgeable-not-lossless preview bar — which dissolved the crash-isolation
+argument that previously kept the subprocess split ahead.
 
 1. ~~**Do Step 1 now, unconditionally.**~~ **DONE 2026-07-10** — see §5
    Step 1. The engine now has a host-agnostic `Core`, which is also the
    natural home for the two `PassPlan` slots §5.6 needs.
 
-2. **Step-2 spikes: static ones answered** (tao occlusion → NO, needs the
-   `NSWindow.occlusionState` poll; wgpu-on-tao → YES, rwh 0.6 end-to-end;
-   winit conflict → moot). **Remaining: the two runtime spikes** (clean
-   GPU teardown on Tauri exit, §6.1 crash-recovery proof) — these need a
-   minimal embedded TauriHost to answer, i.e. they're the first hours of
+2. **Only the two runtime spikes still gate the commit** (static ones
+   answered 2026-07-10: tao occlusion → NO, poll `NSWindow.occlusionState`;
+   wgpu-on-tao → YES; winit conflict → moot): clean GPU teardown on Tauri
+   exit, and the *relaxed* §6.1 proof — a deliberately-panicking effect
+   and a forced device loss must not corrupt saved state, and
+   relaunch-to-light must land ≤ ~20 s. These are the first hours of
    Step 2 itself.
 
-3. **Make the collapse call as part of the §5.6 two-deck design** —
-   that's where the preview becomes load-bearing (§3.3). Runtime spikes +
-   §6.1 hold → land Steps 2–3, then build §5.6's design-leg preview
-   natively. They don't → keep the subprocess split, lean on §5.11
-   supervision, and do §5.8's incremental path instead.
+3. **Sequencing stays with §5.6:** make the formal call while designing
+   the two-deck, land Steps 2–3, then build the design-leg preview
+   natively. The §5.8 binary-frames path remains the documented fallback
+   — and per the 2026-07-11 preview bar it genuinely suffices — if the
+   runtime spikes surprise us on macOS.
 
-4. **Until that call is made, don't build §5.8's binary-WS preview
-   frames or design-leg `PreviewSampler`** — both are throwaway under
+4. **Until the call is formalized, still don't build §5.8's binary-WS
+   preview frames or design-leg `PreviewSampler`** — throwaway under
    collapse. (Demand-gated capture is fine anytime; it survives either
    outcome as the remote-thumbnail path.)
 
-5. **Step 3 remains the payoff that justifies the whole thing** —
-   planned around delivery option (a); (b) is a spike only. If we're
-   not going to use the in-process GPU context for a lossless preview,
-   we don't collapse — the subprocess split is fine.
+5. **Prerequisites to schedule alongside Step 2** (both useful under
+   either topology, both roadmap §5.6): the shader pre-flight probe and
+   the design-leg autosave; plus atomic sidecar writes (§6.1). The
+   collapse should not ship before the pre-flight probe exists — it's
+   the mechanism that makes single-process acceptable with AI-authored
+   shaders.

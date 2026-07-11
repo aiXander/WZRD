@@ -106,7 +106,11 @@ impl ApplicationHandler for WinitHost {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // Persist operator state (§5.3) before tearing down.
+                self.core.on_exit();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 self.core.resize(size.width, size.height);
             }
@@ -140,8 +144,13 @@ impl ApplicationHandler for WinitHost {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.core.poll_inbound();
+        if self.core.exit_requested() {
+            // SIGTERM/SIGINT path — Core already snapshotted the session.
+            event_loop.exit();
+            return;
+        }
         self.core.pace_frame();
 
         if self.core.occluded() {

@@ -14,7 +14,7 @@ WZRD is an additive projection-mapping system: only changing regions get project
 
 - `docs/reference/render-engine.md` — **primary engine context doc**: current system state, contracts (scene.json, layer pack, RPC/telemetry, WGSL), invariants from the 2026-07 performance pass, working agreements, rejected approaches. Read before touching `render-core/` or `wzrd-app/`.
 - `docs/reference/user_design_spec.md` — the product north star; every engine trade-off answers to it.
-- `docs/TODO/render-engine-roadmap.md` — structural roadmap (§5.1 live BPM transport → §5.6 design/live two-deck → video, MCP, hardening).
+- `docs/TODO/render-engine-roadmap.md` — structural roadmap (§5.3 session sidecar → §5.6 design/live two-deck → video, MCP, hardening).
 - `docs/TODO/single-process-collapse.md` — open decision: single-process collapse for a lossless preview (not committed).
 - `docs/finished/` — retired plans (v1 build plan lives here). Write-only; never read from it.
 
@@ -62,6 +62,9 @@ cd wzrd-app
 pnpm install                  # one-off
 WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
 # Runs the engine WITH OSC enabled; audio.* layers stay at defaults until the audio server is up.
+# Add WZRD_AUDIO=1 (or `pnpm tauri dev -- -- --audio`) to auto-start the audio server too —
+# spawns `uv run audio-server --open` in ~/Documents/GitHub/Realtime_PyAudio_FFT
+# (override with WZRD_AUDIO_DIR), killed on shell close. Failed spawn = logged, non-fatal.
 ```
 
 No linting, formatting, or CI pipelines are configured. No pytest — tests use a custom `test.py` with assertions on file existence and return types. Test assets live in `test_imgs/`, outputs go to `test_results/`.
@@ -73,7 +76,7 @@ No linting, formatting, or CI pipelines are configured. No pytest — tests use 
 - `wzrd_mcp/` — FastMCP server layer wrapping wzrd functions as tools
 
 **One Rust crate** at the repo root:
-- `render-core/` — Realtime additive projection-mapping engine (wgpu + winit). Now a `[lib] + [[bin]]` crate. The standalone binary (`render-core --scene scene.json`) consumes a layer pack produced by `wzrd.layerpack` and is the headless agent deployment target. **Primary engine context doc: `docs/reference/render-engine.md`** (contracts, current state; roadmap in `docs/TODO/render-engine-roadmap.md`). Phases 0–4.2 are landed, plus the 2026-07 performance/telemetry pass (occlusion-aware rendering, live `param.set` knob path, all telemetry channels emitting):
+- `render-core/` — Realtime additive projection-mapping engine (wgpu + winit). Now a `[lib] + [[bin]]` crate. The standalone binary (`render-core --scene scene.json`) consumes a layer pack produced by `wzrd.layerpack` and is the headless agent deployment target. **Primary engine context doc: `docs/reference/render-engine.md`** (contracts, current state; roadmap in `docs/TODO/render-engine-roadmap.md`). Phases 0–4.2 are landed, plus the 2026-07 performance/telemetry pass (occlusion-aware rendering, live `param.set` knob path, all telemetry channels emitting) and roadmap §5.2–§5.5 (per-layer identity + `pick` selectors; engine-written `session.json` sidecar for operator state; operator masters brightness/speed/saturation/audioListen via `master.set`; descriptor-driven param metadata + live per-binding overrides via `param.set {binding, param}`):
   - **Phases 0–3:** pack loader, scene-aware compositor, homography pass, driver bus (clock + audio via OSC + ui-slider stub), built-in effect catalog (`tint`, `hueCycle`, `flash`, `wobble`), **inline + project-local user-WGSL effects with `naga`-validated swap-on-success hot-reload (D15)**. Project-local effects live in `<scene_dir>/effects/<name>/{shader.wgsl, descriptor.json}`. Audio features (`audio.band`, `audio.onset`) arrive over OSC from the standalone Realtime Audio Feature Server (separate Python repo at `~/Documents/GitHub/Realtime_PyAudio_FFT`) — bind defaults to `127.0.0.1:9000`, override with `--osc-addr`, skip with `--no-osc`. No `audio.rms`/`audio.bpm`/`audio.fft` in v1.
   - **Phase 4 (Tauri shell):** new `wzrd-app/` directory wraps the engine for humans. The shell spawns `render-core` as a subprocess with `--ws-addr 127.0.0.1:9123` and proxies all UI calls through that JSON-RPC WebSocket — same §3.11 method set Phase 7's MCP wrapper will use. Modules added to `render-core/src/`: `lib.rs` (`pub fn run(cli)`), `core.rs` (host-agnostic `Core` — GPU/plan/drivers/telemetry/WS, takes any `wgpu::SurfaceTarget`; app-collapse Step 1), `app.rs` (thin `WinitHost` event-loop wrapper), `rpc.rs` (JSON-RPC dispatch + EngineCommand queue + `wgsl.validate`), `ws.rs` (tungstenite accept-loop + per-conn IO thread), `telemetry.rs` (sticky bus + FPS percentiles + composite-buffer JPEG preview readback at ~15 fps).
   - **Headless agent path is unchanged** — omit `--ws-addr` and the engine has no control surface, only file-watcher hot-reload.

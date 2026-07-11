@@ -64,6 +64,61 @@ pub fn param_set(state: State<AppState>, name: String, value: f64) -> Result<Val
         .map_err(|e| format!("{e:#}"))
 }
 
+/// §5.5 live per-binding override — `param.set { binding, param, value }`.
+/// `value: None` clears the override (the param falls back to its scene
+/// value / driver next frame). Zero rebuild, persisted via the session
+/// sidecar.
+#[tauri::command]
+pub fn param_override(
+    state: State<AppState>,
+    binding: String,
+    param: String,
+    value: Option<f64>,
+) -> Result<Value, String> {
+    state
+        .engine
+        .request(
+            "param.set",
+            json!({ "binding": binding, "param": param, "value": value }),
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §5.4 masters — operator-owned globals (brightness / speed / saturation /
+/// audioListen). Live values come back on the sticky `masters` telemetry
+/// channel.
+#[tauri::command]
+pub fn master_set(state: State<AppState>, name: String, value: f64) -> Result<Value, String> {
+    state
+        .engine
+        .request(
+            "master.set",
+            json!({ "name": name, "value": value }),
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §5.5 — effect input descriptors (ranges/steps/widgets) so controls render
+/// without guessing. `name: None` returns the whole catalog.
+#[tauri::command]
+pub fn effect_describe(state: State<AppState>, name: Option<String>) -> Result<Value, String> {
+    state
+        .engine
+        .request("effect.describe", json!({ "name": name }), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §5.3 — explicit session sidecar save (masters + knobs + calibration).
+#[tauri::command]
+pub fn session_save(state: State<AppState>) -> Result<Value, String> {
+    state
+        .engine
+        .request("session.save", json!({}), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 pub fn wgsl_validate(state: State<AppState>, source: String) -> Result<Value, String> {
     state

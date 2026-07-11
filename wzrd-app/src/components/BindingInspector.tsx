@@ -6,11 +6,44 @@
 // rows with literal vs. driver toggle. Driver picker enumerates the bus.
 // "Add binding" button at the top opens a fresh row with sensible defaults.
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { commitSceneText } from '../state/sceneCommit';
+import { effectDescribe } from '../api/ipc';
 import { useStore } from '../state/store';
 
 const BUILTIN_EFFECTS = ['tint', 'hueCycle', 'flash', 'wobble'];
+
+type EffectInput = { name: string; type: string; default?: any };
+type EffectCatalog = Record<string, EffectInput[]>;
+
+function toHex(v: any): string {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) {
+    const [r, g, b] = v;
+    const c = (x: number) =>
+      Math.round(Math.min(1, Math.max(0, x ?? 0)) * 255)
+        .toString(16)
+        .padStart(2, '0');
+    return `#${c(r)}${c(g)}${c(b)}`;
+  }
+  return '#ffffff';
+}
+
+function defaultForInput(input: EffectInput): any {
+  if (input.type === 'color') return toHex(input.default);
+  const n = Number(input.default);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Declared inputs for a binding's effect: catalog for named effects,
+ *  the embedded `inputs` array for inline ones. */
+function inputsForEffect(effect: any, catalog: EffectCatalog): EffectInput[] {
+  if (effect && typeof effect === 'object' && effect.inline) {
+    return Array.isArray(effect.inputs) ? effect.inputs : [];
+  }
+  if (typeof effect === 'string') return catalog[effect] ?? [];
+  return [];
+}
 const DRIVER_TYPES = [
   'const',
   'clock.bars',
@@ -44,6 +77,26 @@ export function BindingInspector() {
   const setSelected = useStore((s) => s.setSelectedBindingId);
   const effects = useStore((s) => s.effects);
   const drivers = useStore((s) => s.drivers);
+
+  // Effect catalog (declared inputs incl. defaults) via `effect.describe`.
+  // Drives param defaults on effect switch and the add-param choices, so
+  // the inspector can never author params an effect doesn't declare.
+  const [catalog, setCatalog] = useState<EffectCatalog>({});
+  useEffect(() => {
+    let cancelled = false;
+    effectDescribe()
+      .then((res: any) => {
+        if (cancelled || !res?.effects) return;
+        const next: EffectCatalog = {};
+        for (const e of res.effects) next[e.name] = e.inputs ?? [];
+        setCatalog(next);
+      })
+      .catch((e) => console.warn('effect.describe', e));
+    return () => {
+      cancelled = true;
+    };
+    // Re-fetch when the effect list changes (hot-reloaded user effects).
+  }, [effects]);
 
   const scene = useMemo(() => parseScene(sceneJson), [sceneJson]);
   const bindings: Binding[] = scene?.bindings ?? [];
@@ -135,6 +188,7 @@ export function BindingInspector() {
           binding={current}
           pack={pack}
           effects={[...BUILTIN_EFFECTS, ...effects]}
+          catalog={catalog}
           drivers={drivers}
           onChange={(next) =>
             commit((s) => {
@@ -161,36 +215,73 @@ function BindingEditor({
   binding,
   pack,
   effects,
+  catalog,
   drivers,
   onChange,
 }: {
   binding: Binding;
   pack: any;
   effects: string[];
+  catalog: EffectCatalog;
   drivers: Array<{ binding_id: string; param_name: string; value: number; source: string }>;
   onChange: (b: Binding) => void;
 }) {
-  const selectKind = binding.select?.id
-    ? 'id'
-    : binding.select?.tag
-    ? 'tag'
-    : binding.select?.group
-    ? 'group'
-    : 'all';
+  // Key presence, not truthiness — `{ id: "" }` must still read as 'id'.
+  const sel = binding.select ?? {};
+  const selectKind =
+    'id' in sel ? 'id' : 'tag' in sel ? 'tag' : 'group' in sel ? 'group' : 'all';
 
   function update(patch: Partial<Binding>) {
     onChange({ ...binding, ...patch });
   }
 
   function updateSelect(kind: 'all' | 'id' | 'tag' | 'group', value?: string) {
-    if (kind === 'all') return update({ select: { all: true } });
-    if (kind === 'id') return update({ select: { id: value ?? '' } });
-    if (kind === 'tag') return update({ select: { tag: value ?? '' } });
-    if (kind === 'group') return update({ select: { group: value ?? '' } });
+    const next: any =
+      kind === 'all'
+        ? { all: true }
+        : kind === 'id'
+        ? { id: value ?? ids[0] ?? '' }
+        : kind === 'tag'
+        ? { tag: value ?? tagList[0] ?? '' }
+        : { group: value ?? groups[0] ?? '' };
+    // `pick` is orthogonal to the member-set kind — switching kind must not
+    // silently drop it (it flattened pick_bloom to `{ id: "" }` once).
+    if (sel.pick) next.pick = sel.pick;
+    update({ select: next });
   }
 
   function updateParam(name: string, value: any) {
     update({ params: { ...(binding.params ?? {}), [name]: value } });
+  }
+
+  const declaredInputs = inputsForEffect(binding.effect, catalog);
+  const missingInputs = declaredInputs.filter(
+    (i) => !(i.name in (binding.params ?? {}))
+  );
+
+  /** Switching effect rebuilds params from the new effect's declared
+   *  defaults — carrying the old effect's params is a guaranteed engine
+   *  rejection ("effect X has no param Y"). Same-named params survive. */
+  function switchEffect(name: string) {
+    if (name === '__inline__') {
+      update({
+        effect: {
+          inline: true,
+          name: binding.id,
+          wgsl: 'fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32> { let a = mask * 0.5; return vec4<f32>(a, a, a, a); }',
+          inputs: [],
+        },
+        params: {},
+      });
+      return;
+    }
+    const inputs = catalog[name] ?? [];
+    const params: Record<string, any> = {};
+    for (const input of inputs) {
+      const prev = (binding.params ?? {})[input.name];
+      params[input.name] = prev !== undefined ? prev : defaultForInput(input);
+    }
+    update({ effect: name, params });
   }
 
   const ids: string[] = pack?.layers.map((l: any) => l.id) ?? [];
@@ -229,7 +320,9 @@ function BindingEditor({
               value={binding.select.id}
               onChange={(e) => updateSelect('id', e.target.value)}
             >
-              <option value="">—</option>
+              {!ids.includes(binding.select.id) && (
+                <option value={binding.select.id}>—</option>
+              )}
               {ids.map((id) => (
                 <option key={id} value={id}>
                   {id}
@@ -243,7 +336,9 @@ function BindingEditor({
               value={binding.select.tag}
               onChange={(e) => updateSelect('tag', e.target.value)}
             >
-              <option value="">—</option>
+              {!tagList.includes(binding.select.tag) && (
+                <option value={binding.select.tag}>—</option>
+              )}
               {tagList.map((t) => (
                 <option key={t} value={t}>
                   {t}
@@ -257,7 +352,9 @@ function BindingEditor({
               value={binding.select.group}
               onChange={(e) => updateSelect('group', e.target.value)}
             >
-              <option value="">—</option>
+              {!groups.includes(binding.select.group) && (
+                <option value={binding.select.group}>—</option>
+              )}
               {groups.map((g) => (
                 <option key={g} value={g}>
                   {g}
@@ -273,7 +370,7 @@ function BindingEditor({
           <select
             className="bg-ink-900 border border-ink-600 rounded px-1 py-0.5 w-full"
             value={binding.effect}
-            onChange={(e) => update({ effect: e.target.value })}
+            onChange={(e) => switchEffect(e.target.value)}
           >
             {effects.map((eName) => (
               <option key={eName} value={eName}>
@@ -294,6 +391,7 @@ function BindingEditor({
             key={name}
             name={name}
             value={value}
+            declaredType={declaredInputs.find((i) => i.name === name)?.type}
             onChange={(v) => updateParam(name, v)}
             liveValue={
               drivers.find(
@@ -302,12 +400,17 @@ function BindingEditor({
             }
           />
         ))}
-        <button
-          className="text-zinc-400 hover:text-zinc-100 text-left"
-          onClick={() => updateParam(`param_${Object.keys(binding.params ?? {}).length + 1}`, 0)}
-        >
-          + param
-        </button>
+        {/* Only declared-but-unset inputs can be added — inventing names
+            (the old `param_N` button) is a guaranteed engine rejection. */}
+        {missingInputs.map((input) => (
+          <button
+            key={input.name}
+            className="text-zinc-400 hover:text-zinc-100 text-left"
+            onClick={() => updateParam(input.name, defaultForInput(input))}
+          >
+            + {input.name}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -325,14 +428,21 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 function ParamRow({
   name,
   value,
+  declaredType,
   onChange,
   liveValue,
 }: {
   name: string;
   value: any;
+  declaredType?: string;
   onChange: (v: any) => void;
   liveValue?: number;
 }) {
+  // The declared input type bounds what this row may author — a float param
+  // must never become a color string and vice versa (the engine rejects the
+  // whole scene on a type mismatch). Unknown type → allow everything.
+  const allowColor = declaredType !== 'float';
+  const allowScalar = declaredType !== 'color';
   const isDriver = value && typeof value === 'object' && 'driver' in value;
   const driverKind: string =
     (isDriver && typeof value.driver === 'string' ? value.driver : 'const');
@@ -372,13 +482,14 @@ function ParamRow({
             }
           }}
         >
-          <option value="const">number</option>
-          <option value="color">color</option>
-          {DRIVER_TYPES.filter((d) => d !== 'const').map((d) => (
-            <option key={d} value={d}>
-              {d}
-            </option>
-          ))}
+          {allowScalar && <option value="const">number</option>}
+          {allowColor && <option value="color">color</option>}
+          {allowScalar &&
+            DRIVER_TYPES.filter((d) => d !== 'const').map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
         </select>
       </div>
       {typeof value === 'number' && (
@@ -387,7 +498,12 @@ function ParamRow({
           step="0.01"
           className="bg-ink-900 px-1 py-0.5 rounded border border-ink-600"
           value={value}
-          onChange={(e) => onChange(parseFloat(e.target.value))}
+          onChange={(e) => {
+            // An emptied field parses to NaN → serializes to null → the
+            // engine rejects the whole scene. Don't commit until numeric.
+            const n = parseFloat(e.target.value);
+            if (Number.isFinite(n)) onChange(n);
+          }}
         />
       )}
       {typeof value === 'string' && (
@@ -477,7 +593,10 @@ function NumberField({
         step="0.01"
         className="bg-ink-900 px-1 py-0.5 rounded border border-ink-600 flex-1"
         value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onChange={(e) => {
+          const n = parseFloat(e.target.value);
+          if (Number.isFinite(n)) onChange(n);
+        }}
       />
     </label>
   );

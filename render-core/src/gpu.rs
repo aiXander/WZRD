@@ -79,20 +79,45 @@ impl FrameStateGpu {
     }
 }
 
+/// Per-layer identity within a binding's resolved selection (§5.2). Stable
+/// inputs for organic variation: `layer_seed` hashes the layer *id* (so it
+/// survives re-segmentation, D7), index/count describe the pass's position
+/// in the selection, centroid/bbox locate the region in uv space.
+#[derive(Debug, Clone, Copy)]
+pub struct LayerIdentity {
+    /// Stable per-layer random in [0, 1) — FNV-1a of the layer id.
+    pub layer_seed: f32,
+    pub layer_index: u32,
+    pub layer_count: u32,
+    pub centroid_uv: [f32; 2],
+    /// (min_x, min_y, max_x, max_y), uv space.
+    pub bbox_uv: [f32; 4],
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct LayerParamsGpu {
     pub slice: u32,
     pub effect_id: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    pub layer_index: u32,
+    pub layer_count: u32,
+    pub layer_seed: f32,
+    pub _pad0: f32,
+    pub centroid_uv: [f32; 2],
+    pub bbox_uv: [f32; 4],
     /// 8 scalar slots packed as two vec4 lanes.
     pub params_f: [[f32; 4]; 2],
     pub params_c: [[f32; 4]; MAX_COLOR_PARAMS],
 }
 
 impl LayerParamsGpu {
-    pub fn build(slice: u32, effect_id: u32, scalars: &[f32], colors: &[[f32; 4]]) -> Self {
+    pub fn build(
+        slice: u32,
+        effect_id: u32,
+        identity: &LayerIdentity,
+        scalars: &[f32],
+        colors: &[[f32; 4]],
+    ) -> Self {
         let mut params_f = [[0.0f32; 4]; 2];
         for (i, v) in scalars.iter().enumerate().take(MAX_SCALAR_PARAMS) {
             params_f[i / 4][i % 4] = *v;
@@ -104,8 +129,12 @@ impl LayerParamsGpu {
         Self {
             slice,
             effect_id,
-            _pad0: 0,
-            _pad1: 0,
+            layer_index: identity.layer_index,
+            layer_count: identity.layer_count,
+            layer_seed: identity.layer_seed,
+            _pad0: 0.0,
+            centroid_uv: identity.centroid_uv,
+            bbox_uv: identity.bbox_uv,
             params_f,
             params_c,
         }
@@ -117,27 +146,34 @@ impl LayerParamsGpu {
 pub struct HomographyUniforms {
     /// Three rows of the 3×3, each padded to a vec4 for std140.
     pub rows: [[f32; 4]; 3],
+    /// §5.4 output masters: (brightness, saturation, _, _). Applied in the
+    /// final pass — the composite (and therefore the operator preview) stays
+    /// un-mastered; only the projector output is scaled.
+    pub adjust: [f32; 4],
 }
 
 impl HomographyUniforms {
-    pub fn identity() -> Self {
-        Self {
-            rows: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-            ],
-        }
-    }
-
-    pub fn from_matrix(m: [[f32; 3]; 3]) -> Self {
-        Self {
-            rows: [
+    pub fn new(m: Option<[[f32; 3]; 3]>, brightness: f32, saturation: f32) -> Self {
+        let rows = match m {
+            Some(m) => [
                 [m[0][0], m[0][1], m[0][2], 0.0],
                 [m[1][0], m[1][1], m[1][2], 0.0],
                 [m[2][0], m[2][1], m[2][2], 0.0],
             ],
+            None => [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+        };
+        Self {
+            rows,
+            adjust: [brightness, saturation, 0.0, 0.0],
         }
+    }
+
+    pub fn identity() -> Self {
+        Self::new(None, 1.0, 1.0)
     }
 }
 
@@ -331,11 +367,16 @@ impl GpuContext {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
-    pub fn set_homography(&self, m: Option<[[f32; 3]; 3]>) {
-        let uniforms = match m {
-            Some(m) => HomographyUniforms::from_matrix(m),
-            None => HomographyUniforms::identity(),
-        };
+    /// Refresh the final-pass uniform: calibration matrix + the §5.4 output
+    /// masters. Written once per presented frame (the buffer is 64 bytes; a
+    /// dirty flag would cost more complexity than the write).
+    pub fn write_homography(
+        &self,
+        m: Option<[[f32; 3]; 3]>,
+        brightness: f32,
+        saturation: f32,
+    ) {
+        let uniforms = HomographyUniforms::new(m, brightness, saturation);
         self.queue
             .write_buffer(&self.homography_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
@@ -585,6 +626,23 @@ pub fn compose_shader(effect_body: &str) -> String {
     s.push('\n');
     s.push_str(MAIN_WGSL);
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Rust struct must byte-match the WGSL `LayerParams` uniform:
+    /// 16 (u32 header) + 8 (seed + pad) + 8 (centroid vec2) + 16 (bbox vec4)
+    /// + 32 (params_f) + 64 (params_c) = 144, and 16-aligned throughout.
+    #[test]
+    fn layer_params_layout_matches_wgsl() {
+        assert_eq!(std::mem::size_of::<LayerParamsGpu>(), 144);
+        assert_eq!(std::mem::offset_of!(LayerParamsGpu, centroid_uv), 24);
+        assert_eq!(std::mem::offset_of!(LayerParamsGpu, bbox_uv), 32);
+        assert_eq!(std::mem::offset_of!(LayerParamsGpu, params_f), 48);
+        assert_eq!(std::mem::offset_of!(LayerParamsGpu, params_c), 80);
+    }
 }
 
 fn create_homography_pipeline(

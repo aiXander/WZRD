@@ -53,3 +53,5 @@ wzrd-app/src-tauri/gen/schemas/
 # Node
 node_modules/
 *.tsbuildinfo
+# WZRD engine-written session sidecars (operator state, per-venue — not source)
+session.json

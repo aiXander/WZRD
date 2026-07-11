@@ -8,162 +8,82 @@
 >
 > Ordered by leverage toward `../reference/user_design_spec.md`. Each item is
 > scoped so an agent can pick it up standalone. **General rule: engine first,
-> headless-verifiable, UI second.** §5.1–§5.3 are small and show-critical —
-> the pre-first-show path; §5.6 is the big structural one.
+> headless-verifiable, UI second.** §5.1–§5.5 are resolved (landed or
+> dropped, 2026-07-11); §5.6 (two-deck) is the next big structural one.
 >
 > Related open decision (uncommitted): single-process collapse for a
 > lossless preview — [single-process-collapse.md](single-process-collapse.md).
 
-### 5.1 Live transport: music-locked BPM + phase resync (next)
+### 5.1 ~~Live transport: music-locked BPM~~ — DROPPED (2026-07-11)
 
-Smallest item, most show-critical. Today `transport.bpm` is a static number
-typed into `scene.json` before the music started; every `clock.*`-driven
-binding is synced to that guess, and the only live correction path is a
-scene edit (full plan rebuild). Meanwhile the audio server already tracks
-tempo and emits `/audio/bpm ,f` per block on the same OSC feed as
-`/audio/lmh` (the engine currently ignores it — `osc.rs` drops `/audio/bpm`
-on the floor).
+Live BPM tracking is out of scope for now. BPM is a slowly-changing smoothed
+float with little value in this engine — the live musical energy that matters
+arrives as discrete events (kicks/onsets via `audio.onset`), which the engine
+already consumes. `transport.bpm` stays what it is today: a static scene
+value driving `clock.*` phase. The audio server's `/audio/bpm` stream stays
+deliberately ignored by `osc.rs`. Section number retained so §5.x
+cross-references stay valid; revisit only if a real scene proves onsets +
+static clock insufficient.
 
-- **BPM is an input, never an estimate.** `osc.rs` decodes `/audio/bpm` into
-  `AudioFeatures` (one more atomic); `Transport` follows it while the feed
-  is fresh (same freshness window as the OSC pill) and falls back to the
-  scene's `transport.bpm` when it isn't (`--no-osc`, server down/stale).
-  The engine must never compute, estimate, or tap tempo itself — the audio
-  server owns tempo (§7), including any smoothing or plausibility gating of
-  the BPM stream.
-- **Invariant — the transport integrates phase.** `phase += bpm/60 · dt` per
-  frame, never `phase = f(bpm, wall_time)`. With BPM continuously varying at
-  runtime, deriving phase from absolute time would make every `clock.*`
-  driver jump on each BPM update. (The §5.4 masters "speed" control
-  multiplies this same integration step, for the same reason.)
-- **`transport.resync`** — inline RPC on the zero-rebuild path (like
-  `param.set`): "the downbeat is *now*", zeroing bar/beat phase at call
-  time. A correct BPM at the wrong phase still fires the every-4-bars bloom
-  off-beat; this is the one-button fix. Companion inline read
-  `transport.state` → `{bpm, source: "live"|"fallback", bar_phase,
-  beat_phase}`.
-- Telemetry: fold `bpm` + `source` into the existing `audio` channel payload
-  (emitter + UI consumer land together — §3.3 lesson). UI: BPM readout +
-  SYNC button in the status strip / Perform.
+### 5.2 Per-layer variation + `pick` selectors — LANDED (2026-07-11)
 
-### 5.2 Per-layer variation + `pick` selectors (the organic-look gap)
+Implemented — see [../reference/render-engine.md](../reference/render-engine.md)
+§2.1 (`pick` grammar + strictness) and §2.4 (per-layer identity accessors:
+`layer_seed()`, `layer_index()`/`layer_count()`, `layer_centroid()`,
+`layer_bbox()`). Residue worth knowing: picks are stateless — a pure hash
+of (binding id, transport cycle) via `compositor::pick_choice`, rate
+restricted to `clock.*` (`drivers::PickRate`) — so no RNG state exists to
+carry across the §5.6 legs; all member passes stay in the plan and a
+re-pick just flips `active` flags. `phase3_smoke.scene.json`'s `pick_bloom`
+binding demos both features (inline WGSL using `layer_centroid()` +
+`layer_seed()`, re-picked every 2 bars).
 
-When a binding selects 20 leaf clusters, all 20 passes currently get
-byte-identical uniforms — every leaf animates in perfect lockstep, which
-reads mechanical, and the tree scene's "one random leaf blooms every 4 bars"
-is inexpressible. The workaround (author 20 near-duplicate bindings) defeats
-the selector model. Two additions:
+### 5.3 Operator-owned state: the session sidecar — LANDED (2026-07-11)
 
-- **Per-layer identity in the WGSL contract.** Extend `LayerParamsGpu` (+
-  the prelude mirror) with `layer_seed` (stable hash of the layer *id* —
-  stable across re-segmentation because ids are, D7), `layer_index` /
-  `layer_count` within the binding's resolved selection, `centroid_uv`, and
-  `bbox` (uv-space). Surface them to user WGSL as prelude accessors
-  documented in §2.4. One `hueCycle` binding plus `phase += layer_seed` then
-  desynchronizes 20 leaves for free; a bloom radiates from `centroid_uv`.
-  Pass-plan build work only — the uniform struct has padding headroom, no
-  new bind groups.
-- **`pick` selectors (reinstated from v1).** The selector grammar grows
-  `{ "tag": "leaves", "pick": { "mode": "random_each" | "random_static",
-  "rate": { "driver": "clock.bars", "n": 4 } } }`. `random_each` re-picks
-  one member of the resolved set each time the rate driver wraps;
-  `random_static` picks once at scene load. Seed the RNG from the transport
-  bar counter so runs are deterministic and the design-leg preview (§5.6)
-  picks the same layer its promote will.
+Implemented — see [../reference/render-engine.md](../reference/render-engine.md)
+§2.5 for the full contract (sidecar shape, scope rule, write policy, read
+precedence). Residue worth knowing: `session.rs` owns load/save (atomic
+temp+rename; `session.json` is gitignored); the sidecar is per *directory*
+(venue), not per scene; the debounce rides a shared epoch-ms `AtomicU64`
+touched by the WS thread and drained in `Core::poll_inbound` (~1.5 s);
+SIGTERM/SIGINT land via a `signal-hook` flag → snapshot + graceful host
+exit, which is §5.11's power-blink item done early. Reference §4 weakness 5
+(knob persistence) is resolved. `projectorCalibration` in scene.json is a
+deprecated read-only fallback. The "show file" umbrella (playlist + scenes
++ session) still waits for §5.6's auto-pilot playlist.
 
-Litmus: with this landed, the selection semantics of all three target scenes
-are expressible without per-layer binding duplication.
+### 5.4 Masters row — LANDED (2026-07-11)
 
-### 5.3 Operator-owned state: the session sidecar
+Implemented per the original sketch — see reference §2.5. `Masters` atomics
+in `drivers.rs`; brightness/saturation in the final homography pass (the
+preview deliberately shows the un-mastered composite); speed as per-frame
+`Transport` time integration (bends time, never jumps); audioListen scales
+every `audio.*` read including the `state.audio_*` uniform. RPC
+`master.set`/`master.list` + sticky `masters` telemetry; persisted in the
+sidecar; always-visible row in Perform (double-click a label to reset).
+**Crossfade-time master still pending** — it only means something once
+§5.6's promote exists; add it there.
 
-`scene.json` is the AI-writable composition, but venue-physical and
-performance state currently leaks into it (`projectorCalibration`) or
-evaporates on restart (`SliderBank` — reference §4 weakness 5). The spec's
-AI "emits the complete effect each turn"; the day an agent rewrite drops the
-calibration field, projector alignment dies mid-show — exactly the failure
-the masters design already guards against. Calibration is also *per-venue*
-while a scene is *per-artwork*: replaying last summer's scene at a new venue
-currently drags a stale homography along (spec §12).
+### 5.5 Params first-class: descriptor knobs + overrides — LANDED (2026-07-11)
 
-One sidecar — `session.json` next to the scene, engine-written, never on the
-AI's editing surface:
+Implemented — see reference §2.3. Descriptors (user *and* built-in) carry
+`min`/`max`/`step`/`unit`/`widget` per input, served by `effect.describe`;
+`param.set {binding, param, value}` pins any scalar param via the
+engine-side `ParamOverrides` table consulted in `tick()` (zero rebuild,
+`value: null` clears, `drivers` telemetry flags `overridden`). Carry-forward
+on regenerate is inherent: the table is keyed (binding id, param name) and
+lives outside the plan, so overrides survive every rebuild where the name
+still resolves to a scalar. The driver rack's numeric rows now tune through
+this path; scene.json is never written implicitly. Audio conditioning stays
+server-side (settled) — effect strength is just a scalar input on the
+effect, now live-tweakable via the override path.
 
-```jsonc
-{
-  "version": 1,
-  "projectorCalibration": null,      // 3×3 row-major or null — moved out of scene.json
-  "masters": { "brightness": 1.0, "speed": 1.0, "saturation": 1.0, "audioListen": 1.0 },
-  "params": { "flash_base": 0.35 }   // SliderBank + §5.5 override snapshot
-}
-```
-
-- **Read precedence:** sidecar first; `projectorCalibration` in `scene.json`
-  stays readable as a deprecated fallback (warn on use, never written back).
-- **Write policy:** engine-owned. Written on explicit save, debounced after
-  master/knob changes, and on SIGTERM — which gives §5.11 its power-blink
-  snapshot for free. `scene.load` and the file watcher never touch it; no
-  RPC on the design/authoring surface writes it.
-- **Scope rule:** `scene.json` = what the surface *does* (AI + human
-  authored); `session.json` = how *this venue, this night* is set (operator
-  only).
-- The eventual "show file" (playlist + scenes + session) composes these;
-  don't build the umbrella before the auto-pilot playlist (§5.6) exists.
-
-Resolves reference §4 weakness 5: knobs persist via the sidecar, and "write
-knobs back into scene.json" stays a separate explicit authoring action,
-never implicit.
-
-### 5.4 Masters row (engine-level, operator-owned)
-
-A small set of global controls the AI can never touch (spec: "masters are
-mine alone"): overall **brightness**, **speed** (global time scale),
-**saturation**, **audio-listen** (scales every `audio.*` driver toward 0),
-and later **crossfade time**. Implementation: engine-owned `Masters` struct,
-applied (a) in the final homography pass for brightness/saturation, (b) as
-multipliers in `Transport`/`AudioFeatures` reads for speed/listen — speed
-multiplies the §5.1 phase-integration step (`phase += speed · bpm/60 · dt`),
-never a scaled absolute clock, so a speed change bends time instead of
-jumping it. RPC: `master.set {name, value}` + a `masters` telemetry channel.
-Persisted in the session sidecar (§5.3), **not** inside `scene.json` — the
-AI edits scene.json; it must not be able to reach the masters. UI: an
-always-visible row in Perform.
-
-### 5.5 Params become first-class: descriptor-driven knobs
-
-The design spec's core loop — "the AI grows the dials, I play them" —
-needs parameters that are addressable and typed without recompiling:
-
-- **Extend effect descriptors** with UI metadata per input: `min`, `max`,
-  `step`, `unit`, `widget` (slider/knob/toggle/palette). Built-ins get
-  descriptors too. `pack.info`-style `effect.describe(name)` RPC (or fold
-  into `pack.info`'s sibling `scene.describe`) so the UI/agent can render
-  controls without guessing ranges.
-- **Address params as `binding.param`, not just global slider names.**
-  `param.set { binding, param, value }` should override *any* scalar param
-  (const or driver output scaling), stored in an engine-side override table
-  consulted by `tick()` — same zero-rebuild property as the slider bank.
-  Keep name-keyed `ui.slider` for scene-authored shared knobs.
-- **Value semantics on regenerate:** when the AI rewrites an effect, carry
-  forward user-tuned values wherever the param name + type still match
-  (spec §4: "a knob never jumps under my finger; my hand-tuning carries
-  forward").
-
-**Audio conditioning stays server-side (settled).** Every `audio.*` value
-arrives already smoothed and min/max-bounded by the audio server; the engine
-adds no attack/release, normalization, or per-param signal conditioning
-(§7). The one audio-tuning knob that belongs engine-side is **effect
-strength** — how hard a given audio value drives a given visual parameter.
-That's an ordinary scalar input on the effect itself (author effects as
-`base + strength · audio_value`, with `strength` declared in the
-descriptor), which this item's override path makes live-tweakable — no
-special driver wrapper, no schema change.
-
-Related forward concern (v1 §8.11): effects past v1 will want **shared WGSL
-utilities** (noise, SDF, colour-space, palette helpers) instead of every file
-re-implementing `permute()`/`hsv2rgb()`. WGSL has no native `#include`; the
-fix is a small `#import`-style text preprocessor run before `naga`. Keep the
-effect loader's compile entry point a single function so wedging this in is a
-one-layer change, not a rewrite.
+**Still open (forward concern, v1 §8.11): shared WGSL utilities.** Effects
+past v1 will want shared noise/SDF/colour-space/palette helpers instead of
+every file re-implementing `permute()`/`hsv2rgb()`. WGSL has no native
+`#include`; the fix is a small `#import`-style text preprocessor run before
+`naga`. The compile entry point is still the single `gpu::compose_shader` /
+`build_effect_pipeline` pair, so wedging it in stays a one-layer change.
 
 ### 5.6 Design/Live legs + Promote/Pull (the two-deck architecture)
 
@@ -197,11 +117,42 @@ This also creates the natural home for the **auto-pilot playlist**
 (spec §13): a queue of saved scenes promoted on a bar/minute schedule with
 per-entry dwell, skipping entries that fail to build.
 
+**Shader pre-flight probe (operator requirement, 2026-07-11).** The design
+leg shares the process and GPU with the live leg, so a pathological
+AI-written shader entering *design* still stalls the *live* output. Gate it:
+on any `effect.upsert` / watcher reload targeting design, the engine (a)
+naga-compiles, (b) renders the effect ~60 frames to a scratch offscreen
+target at reduced resolution (half/quarter of pack res), (c) measures p95
+frame time and scale-checks it against the full-res budget, and only then
+swaps the pipeline into the design plan. The probe result —
+`{compiled, p95_ms, thumbnail}` — goes out on `hot_reload` telemetry and
+the §5.11 status file, so the authoring agent can self-correct on
+*performance and look*, not just compile errors, before the operator ever
+sees the draft. Runs on a single M2 GPU: same device, probe frames
+sequenced between live frames (a few ms/frame of budget during the burst).
+Known residual risk: an in-process probe cannot contain a shader that hangs
+the GPU device — that class is covered by the §5.11 recovery contract
+(relaunch + restore), and a separate probe *process* with its own Metal
+device stays available as optional hardening if hangs show up in practice.
+Defense order: pre-flight keeps bad shaders out of both legs; the §5.11
+probation window catches what slips through at full res.
+
+**Design-leg autosave.** Once design state lives behind RPC edits (not just
+the scene file), a crash mid-design must not eat the draft: debounce-write
+the design leg's scene to `<scene_dir>/.wzrd/design.scene.json` (~every few
+seconds / on every applied edit), and offer it for restore on next boot.
+Together with the §5.3 sidecar this is the Resolume-style "reload and
+continue in under a minute" contract — see §5.11.
+
 **Design input:** the single-process-collapse call is made *here*, as part
 of this design — the design leg is only ever visible through its preview,
-which is what makes the preview ceiling load-bearing. See
-[single-process-collapse.md](single-process-collapse.md) §3.3 + §8 and the
-§5.8 decision gate.
+which is what makes the preview ceiling load-bearing. Operator inputs
+settled 2026-07-11 (see
+[single-process-collapse.md](single-process-collapse.md) §6 + §8): the
+design preview must be **decent enough to judge effect quality** (not
+necessarily lossless/full-res), and a **rare ~20 s full blackout is
+acceptable** provided state restore is total — which shifts the §8
+recommendation toward collapse, pending the Step-2 runtime spikes.
 
 ### 5.7 Layer object + intensity (carried over from v1 review #2/#9)
 
@@ -214,16 +165,21 @@ deck reads in surface-language").
 
 ### 5.8 Preview & render-loop upgrades
 
-- **Decision gate (2026-07-10):** the single-process collapse call
+- **Decision gate (updated 2026-07-11):** the single-process collapse call
   ([single-process-collapse.md](single-process-collapse.md)) is made as part
-  of the §5.6 design. Its Step 1 (Core/Host split) **landed 2026-07-10**
-  and the static spikes are answered; only the runtime spikes + the
-  crash-recovery precondition remain. Until the call is made, **hold**
+  of the §5.6 design. Step 1 (Core/Host split) landed 2026-07-10, static
+  spikes answered; the crash-recovery precondition was **relaxed** by the
+  operator's accepted recovery contract (§5.11: rare ~20 s blackout OK if
+  restore is total), so only the Step-2 runtime spikes gate the commit and
+  the recommendation now leans collapse. Until the call is made, **hold**
   the binary-frames and design-leg `PreviewSampler` items below
   (throwaway under collapse); demand-gated capture is safe anytime
   (survives either outcome as the remote-thumbnail path).
 - Binary preview frames over WS (drop base64+JSON), larger preview when the
-  Perform route is focused — **only if collapse is rejected**.
+  Perform route is focused — **only if collapse is rejected**. Note the
+  operator's design-preview bar is "decent enough to judge effect quality,"
+  not lossless — so this path (e.g. ~half-res at 30 fps) is a genuinely
+  sufficient fallback, not a compromise that fails the spec.
 - Design-leg preview channel (second `PreviewSampler` on the design
   composite, required by §5.6) — **only if collapse is rejected**; under
   collapse the design leg gets a native preview surface instead.
@@ -261,14 +217,27 @@ agent gets `design`-leg-only access for free.
 
 ### 5.11 Reliability hardening (spec §9: "trust it to stay up")
 
+**Accepted recovery contract (operator, 2026-07-11) — the Resolume
+formula.** A rare full blackout of ~20 s is acceptable *provided restore is
+total*: relaunch comes back with the same scene, knobs, masters,
+calibration (§5.3 sidecar) and in-flight design draft (§5.6 design-leg
+autosave). This is the yardstick every architecture choice measures
+against — supervised subprocess respawn (~2 s) comfortably beats it;
+single-process relaunch-with-restore meets it. Defense in depth, in order:
+(1) the §5.6 pre-flight probe keeps bad shaders out of both legs,
+(2) the probation window below catches full-res budget blowers,
+(3) snapshot/restore bounds the damage of whatever still gets through.
+
 - Tauri shell supervises the engine child: crash → respawn with the same
   scene within seconds, log the event, sticky `connectivity` reflects it.
+  (Under collapse this bullet is replaced by relaunch-with-restore per the
+  contract above.)
 - Engine startup is already last-good-tolerant (bad scene → previous plan);
   extend to "scene fails at boot → black composite + hot-reload watch"
   instead of exit.
 - Headless autostart recipe (launchd/systemd) documented for installations.
-- Slider/master state snapshot on SIGTERM — implemented as the session
-  sidecar write (§5.3) — so a power blink comes back close to where it was.
+- ~~Slider/master state snapshot on SIGTERM~~ — **done** (landed with §5.3,
+  2026-07-11: `signal-hook` flag → sidecar snapshot → graceful exit).
 - **Post-swap probation window.** `naga` proves a shader *compiles*; a
   valid-but-pathological one can still blow the frame budget (reference §4
   risk list). Extend swap-on-success: after any pipeline/plan swap, watch

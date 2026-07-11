@@ -25,6 +25,7 @@ pub mod osc;
 pub mod pack;
 pub mod rpc;
 pub mod scene;
+pub mod session;
 pub mod telemetry;
 pub mod watch;
 pub mod ws;

@@ -7,9 +7,10 @@
 // surface inline. Routes share the top status strip so it's always glanceable.
 
 import { useEffect } from 'react';
-import { useStore } from './state/store';
+import { useStore, type Masters } from './state/store';
 import {
   engineStatus,
+  lastPayload,
   listEffects,
   onEngineStatus,
   onTelemetry,
@@ -56,6 +57,14 @@ export default function App() {
       } catch (e) {
         console.warn('list_effects:', e);
       }
+      try {
+        // Masters are sticky — the engine emitted them before the webview
+        // mounted, so hydrate from the shell's last-payload snapshot.
+        const m = await lastPayload<Masters>('masters');
+        if (m) tStore.setMasters(m);
+      } catch (e) {
+        console.warn('last_payload(masters):', e);
+      }
 
       unlistenT = await onTelemetry((frame) => {
         const st = useStore.getState();
@@ -81,6 +90,9 @@ export default function App() {
             break;
           case 'connectivity':
             st.setConnectivity(frame.payload);
+            break;
+          case 'masters':
+            st.setMasters(frame.payload);
             break;
           case 'preview':
             st.setPreview(frame.payload);

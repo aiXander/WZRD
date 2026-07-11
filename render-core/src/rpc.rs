@@ -9,6 +9,7 @@
 //! Phase 7's MCP wrapper proxies the same surface unchanged.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -17,8 +18,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::core::Core;
-use crate::drivers::SliderBank;
+use crate::drivers::{Masters, ParamOverrides, SliderBank};
 use crate::pack::LoadedPack;
+use crate::session;
 use crate::telemetry::Bus;
 
 /// A command that mutates engine state. Issued from the WS server thread;
@@ -50,6 +52,16 @@ pub enum EngineCommand {
         name: String,
         reply: Sender<Result<Value, String>>,
     },
+    /// §5.5 — describe one effect's inputs (or the whole catalog). Queued
+    /// because the registry lives on the render thread.
+    EffectDescribe {
+        name: Option<String>,
+        reply: Sender<Result<Value, String>>,
+    },
+    /// §5.3 — explicit session sidecar save (masters + knobs + calibration).
+    SessionSave {
+        reply: Sender<Result<Value, String>>,
+    },
 }
 
 /// Bound bag of references used to answer the synchronous (read-only)
@@ -69,6 +81,15 @@ pub struct RpcContext {
     /// render-thread hop) — the render thread reads it on its next tick, so
     /// knob latency is bounded by one frame.
     pub sliders: Arc<SliderBank>,
+    /// §5.4 masters — written inline by `master.set`, same latency contract
+    /// as the slider bank.
+    pub masters: Arc<Masters>,
+    /// §5.5 per-binding scalar overrides — written inline by the
+    /// `param.set {binding, param, value}` form.
+    pub overrides: Arc<ParamOverrides>,
+    /// §5.3 dirty stamp (epoch ms of last operator-state change; 0 = clean).
+    /// The render thread debounces session sidecar writes on it.
+    pub session_dirty: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -181,10 +202,87 @@ pub fn dispatch(
         }
 
         // Live tuning surface (§4 of the design spec — "tune by feel, not by
-        // re-prompting"). Sets a named ui.slider value; every param bound to
-        // `{"driver": "ui.slider", "name": ...}` picks it up on the next
-        // frame. No scene rebuild, no shader recompile.
+        // re-prompting"). Two addressing forms, both zero-rebuild:
+        //   { name, value }            → named ui.slider (scene-authored
+        //                                shared knob, SliderBank)
+        //   { binding, param, value }  → §5.5 override of any scalar param
+        //                                on a binding — const or driver
+        //                                output alike; value: null clears.
+        // Both mark the §5.3 session sidecar dirty so tuning survives a
+        // restart.
         "param.set" => {
+            #[derive(Deserialize)]
+            struct Params {
+                #[serde(default)]
+                name: Option<String>,
+                #[serde(default)]
+                binding: Option<String>,
+                #[serde(default)]
+                param: Option<String>,
+                #[serde(default)]
+                value: Option<f32>,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            if let Some(v) = p.value {
+                if !v.is_finite() {
+                    return Err(RpcError::message("value must be finite"));
+                }
+            }
+            match (p.name, p.binding, p.param) {
+                (Some(name), None, None) => {
+                    let value = p.value.ok_or_else(|| {
+                        RpcError::message("slider form requires `value`")
+                    })?;
+                    ctx.sliders.set(&name, value);
+                    session::touch(&ctx.session_dirty);
+                    Ok(json!({ "ok": true, "name": name, "value": value }))
+                }
+                (None, Some(binding), Some(param)) => {
+                    match p.value {
+                        Some(v) => ctx.overrides.set(&binding, &param, v),
+                        None => {
+                            ctx.overrides.clear(&binding, &param);
+                        }
+                    }
+                    session::touch(&ctx.session_dirty);
+                    Ok(json!({
+                        "ok": true,
+                        "binding": binding,
+                        "param": param,
+                        "value": p.value,
+                    }))
+                }
+                _ => Err(RpcError::message(
+                    "param.set takes either { name, value } or { binding, param, value } \
+                     (value: null clears an override)",
+                )),
+            }
+        }
+
+        "param.list" => {
+            let sliders: serde_json::Map<String, Value> = ctx
+                .sliders
+                .snapshot()
+                .into_iter()
+                .map(|(k, v)| (k, json!(v)))
+                .collect();
+            let mut overrides = serde_json::Map::new();
+            for (binding, param, value) in ctx.overrides.snapshot() {
+                overrides
+                    .entry(binding)
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .expect("override entry is object")
+                    .insert(param, json!(value));
+            }
+            Ok(json!({ "sliders": sliders, "overrides": overrides }))
+        }
+
+        // §5.4 masters — operator-owned globals, deliberately not reachable
+        // through scene.json. Inline write, one-frame latency, sticky
+        // `masters` telemetry so every client converges on the same values.
+        "master.set" => {
             #[derive(Deserialize)]
             struct Params {
                 name: String,
@@ -195,19 +293,16 @@ pub fn dispatch(
             if !p.value.is_finite() {
                 return Err(RpcError::message("value must be finite"));
             }
-            ctx.sliders.set(&p.name, p.value);
-            Ok(json!({ "ok": true, "name": p.name, "value": p.value }))
+            let stored = ctx
+                .masters
+                .set(&p.name, p.value)
+                .map_err(|e| RpcError::message(format!("{e:#}")))?;
+            session::touch(&ctx.session_dirty);
+            ctx.bus.emit_masters(ctx.masters.snapshot());
+            Ok(json!({ "ok": true, "name": p.name, "value": stored }))
         }
 
-        "param.list" => {
-            let values: serde_json::Map<String, Value> = ctx
-                .sliders
-                .snapshot()
-                .into_iter()
-                .map(|(k, v)| (k, json!(v)))
-                .collect();
-            Ok(json!({ "sliders": values }))
-        }
+        "master.list" => Ok(serde_json::to_value(ctx.masters.snapshot()).expect("masters")),
 
         "scene.load" => {
             #[derive(Deserialize)]
@@ -258,6 +353,42 @@ pub fn dispatch(
                     descriptor: p.descriptor,
                     reply: reply_tx,
                 })
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
+        "effect.describe" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct Params {
+                name: Option<String>,
+            }
+            let p: Params = if req.params.is_null() {
+                Params::default()
+            } else {
+                serde_json::from_value(req.params.clone())
+                    .map_err(|e| RpcError::message(format!("params: {e}")))?
+            };
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::EffectDescribe {
+                    name: p.name,
+                    reply: reply_tx,
+                })
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
+        "session.save" => {
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::SessionSave { reply: reply_tx })
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -339,6 +470,19 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
                 let _ = reply.send(Err(format!("{e:#}")));
             }
         },
+        EngineCommand::EffectDescribe { name, reply } => {
+            let res = core
+                .describe_effects(name.as_deref())
+                .map_err(|e| format!("{e:#}"));
+            let _ = reply.send(res);
+        }
+        EngineCommand::SessionSave { reply } => {
+            let res = core
+                .save_session()
+                .map(|path| json!({ "ok": true, "path": path.display().to_string() }))
+                .map_err(|e| format!("{e:#}"));
+            let _ = reply.send(res);
+        }
     }
 }
 

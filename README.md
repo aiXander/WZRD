@@ -15,10 +15,12 @@ WZRD has **two halves**:
 
 There are **two ways to run** the engine, plus an optional audio server that feeds both:
 
-| | What runs | When to use |
-|---|---|---|
-| **Headless engine** | `render-core` alone, a single projector window | Live shows, agent deployment, quick iteration on a scene/shader |
-| **GUI shell** | Tauri app (`wzrd-app`) that spawns `render-core` as a subprocess | Authoring: Monaco editor, mask overlays, binding inspector, live telemetry |
+
+|                     | What runs                                                        | When to use                                                                |
+| ------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **Headless engine** | `render-core` alone, a single projector window                   | Live shows, agent deployment, quick iteration on a scene/shader            |
+| **GUI shell**       | Tauri app (`wzrd-app`) that spawns `render-core` as a subprocess | Authoring: Monaco editor, mask overlays, binding inspector, live telemetry |
+
 
 ### Prerequisites (one-time)
 
@@ -38,7 +40,7 @@ cargo run -- --scene examples/phase3_smoke.scene.json --windowed --no-osc
 ```
 
 - `--windowed` — run in a window instead of borderless-fullscreen (drop it to go fullscreen on the primary display; add `--display 1` to pick a monitor).
-- `--no-osc` — **skip the audio server**. Clocks still tick and all `clock.*` effects animate; `audio.*` drivers just return 0 (so the audio-reactive `flash`/`drift` layers sit at their defaults). Start the audio server (below) and drop `--no-osc` to make them react.
+- `--no-osc` — **skip the audio server**. Clocks still tick and all `clock.`* effects animate; `audio.*` drivers just return 0 (so the audio-reactive `flash`/`drift` layers sit at their defaults). Start the audio server (below) and drop `--no-osc` to make them react.
 - The scene's `pack` field (resolved relative to the scene file) points at the layer pack. Override with `--pack path/to/pack/`.
 - Any WGSL under `render-core/examples/effects/<name>/` and inline WGSL in the scene hot-reload the instant you save.
 
@@ -60,15 +62,18 @@ The Tauri app spawns `render-core` for you over a JSON-RPC WebSocket, so you get
 cd wzrd-app
 pnpm install        # one-time
 WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
+
+# with audio server auto-launch:
+WZRD_AUDIO=1 WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
 ```
 
 - Routes switch with `⌘1` (Prepare) / `⌘2` (Perform) / `⌘3` (Debug).
 - The shell finds the engine via `WZRD_ENGINE_EXE` → `target/{debug,release}/render-core` → `../../render-core/target/debug/render-core`. If it can't spawn it, rebuild step 1.
-- `pnpm tauri dev` runs the engine **with OSC enabled**, so `audio.*` layers stay at defaults until the audio server is up. See below.
+- `pnpm tauri dev` runs the engine **with OSC enabled**, so `audio.`* layers stay at defaults until the audio server is up. See below.
 
 ### Optional — Realtime Audio Feature Server (makes `audio.*` drivers react)
 
-`render-core` does **not** capture audio itself. Audio features (`audio.band`, `audio.onset`) arrive over OSC from a separate project, [`Realtime_PyAudio_FFT`](https://github.com/xandersteenbrugge/Realtime_PyAudio_FFT), listening on `127.0.0.1:9000` by default.
+`render-core` does **not** capture audio itself. Audio features (`audio.band`, `audio.onset`) arrive over OSC from a separate project, `[Realtime_PyAudio_FFT](https://github.com/xandersteenbrugge/Realtime_PyAudio_FFT)`, listening on `127.0.0.1:9000` by default.
 
 ```bash
 # In its own terminal, from the audio server repo:
@@ -91,7 +96,7 @@ cd render-core && cargo run --release -- --scene examples/phase3_smoke.scene.jso
 cd wzrd-app && WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
 ```
 
-See [`render-core/README.md`](render-core/README.md) for the effect/driver catalog and WGSL prelude, and [`wzrd-app/README.md`](wzrd-app/README.md) for the shell's routes and telemetry channels.
+See `[render-core/README.md](render-core/README.md)` for the effect/driver catalog and WGSL prelude, and `[wzrd-app/README.md](wzrd-app/README.md)` for the shell's routes and telemetry channels.
 
 ---
 
@@ -228,7 +233,8 @@ Use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) to br
 npx @modelcontextprotocol/inspector
 ```
 
-This opens a UI at **http://localhost:5173**. To connect:
+This opens a UI at **[http://localhost:5173](http://localhost:5173)**. To connect:
+
 1. Set transport type to **Streamable HTTP**
 2. Enter URL: `http://localhost:8787/mcp`
 3. Click **Connect**
@@ -263,3 +269,4 @@ Add to your MCP config (e.g. `.claude/settings.json`):
 - **Temporal smoothing:** 0.3 gives moderate stability; 0 disables for per-frame independence
 - **Gamma < 1.0** brightens extracted creatures (default 0.85), useful for projection
 - **Feathering:** Higher radius gives softer edges but costs performance in video mode
+

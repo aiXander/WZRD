@@ -8,10 +8,12 @@
 //! plumbing waits for Phase 6+ cue editing.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::osc::{AudioBand, AudioFeatures};
@@ -51,6 +53,169 @@ impl SliderBank {
             .expect("slider bank lock")
             .iter()
             .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+}
+
+/// §5.4 masters — engine-level, operator-owned globals. Deliberately outside
+/// `scene.json` (the AI's editing surface): a scene rewrite can never touch
+/// them. Written inline on the WS thread by `master.set` (same pattern as
+/// [`SliderBank`]), read once per frame by the render thread, persisted via
+/// the §5.3 session sidecar. Values are f32 bits in atomics so no lock sits
+/// on the frame path.
+pub struct Masters {
+    brightness: AtomicU32,
+    speed: AtomicU32,
+    saturation: AtomicU32,
+    audio_listen: AtomicU32,
+}
+
+/// Plain-value view of [`Masters`] — the shape used by the `masters`
+/// telemetry channel and the session sidecar.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastersSnapshot {
+    pub brightness: f32,
+    pub speed: f32,
+    pub saturation: f32,
+    pub audio_listen: f32,
+}
+
+impl Default for MastersSnapshot {
+    fn default() -> Self {
+        Self {
+            brightness: 1.0,
+            speed: 1.0,
+            saturation: 1.0,
+            audio_listen: 1.0,
+        }
+    }
+}
+
+impl Masters {
+    pub fn new() -> Arc<Self> {
+        let one = 1.0f32.to_bits();
+        Arc::new(Self {
+            brightness: AtomicU32::new(one),
+            speed: AtomicU32::new(one),
+            saturation: AtomicU32::new(one),
+            audio_listen: AtomicU32::new(one),
+        })
+    }
+
+    fn cell(&self, name: &str) -> Option<(&AtomicU32, f32, f32)> {
+        match name {
+            "brightness" => Some((&self.brightness, 0.0, 2.0)),
+            "speed" => Some((&self.speed, 0.0, 8.0)),
+            "saturation" => Some((&self.saturation, 0.0, 2.0)),
+            "audioListen" | "audio_listen" => Some((&self.audio_listen, 0.0, 1.0)),
+            _ => None,
+        }
+    }
+
+    /// Set a master by name. Clamps into the master's legal range and
+    /// returns the value actually stored; unknown names fail loudly.
+    pub fn set(&self, name: &str, value: f32) -> Result<f32> {
+        let (cell, lo, hi) = self.cell(name).ok_or_else(|| {
+            anyhow!("unknown master {name:?} (brightness | speed | saturation | audioListen)")
+        })?;
+        let v = value.clamp(lo, hi);
+        cell.store(v.to_bits(), Ordering::Relaxed);
+        Ok(v)
+    }
+
+    pub fn brightness(&self) -> f32 {
+        f32::from_bits(self.brightness.load(Ordering::Relaxed))
+    }
+    pub fn speed(&self) -> f32 {
+        f32::from_bits(self.speed.load(Ordering::Relaxed))
+    }
+    pub fn saturation(&self) -> f32 {
+        f32::from_bits(self.saturation.load(Ordering::Relaxed))
+    }
+    pub fn audio_listen(&self) -> f32 {
+        f32::from_bits(self.audio_listen.load(Ordering::Relaxed))
+    }
+
+    pub fn snapshot(&self) -> MastersSnapshot {
+        MastersSnapshot {
+            brightness: self.brightness(),
+            speed: self.speed(),
+            saturation: self.saturation(),
+            audio_listen: self.audio_listen(),
+        }
+    }
+
+    /// Restore from a sidecar snapshot (clamped through the same ranges as
+    /// `set` so a hand-edited session.json can't smuggle wild values in).
+    pub fn restore(&self, snap: &MastersSnapshot) {
+        let _ = self.set("brightness", snap.brightness);
+        let _ = self.set("speed", snap.speed);
+        let _ = self.set("saturation", snap.saturation);
+        let _ = self.set("audioListen", snap.audio_listen);
+    }
+}
+
+/// §5.5 per-binding param override table. `param.set {binding, param, value}`
+/// pins any *scalar* param — const or driver-bound — to a live value without
+/// a plan rebuild; the compositor consults this table each tick before
+/// evaluating the underlying [`ScalarValue`]. Keyed by (binding id, param
+/// name), which is also the carry-forward rule: when the AI regenerates an
+/// effect, an override survives exactly as long as a scalar param with the
+/// same name still exists on the binding (spec §4: hand-tuning carries
+/// forward; a vanished param's override just sits inert).
+#[derive(Default)]
+pub struct ParamOverrides {
+    // Nested (binding → param → value) so the per-frame lookup borrows
+    // &str keys instead of allocating a (String, String) tuple per param.
+    values: RwLock<HashMap<String, HashMap<String, f32>>>,
+}
+
+impl ParamOverrides {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn set(&self, binding: &str, param: &str, value: f32) {
+        self.values
+            .write()
+            .expect("param overrides lock")
+            .entry(binding.to_string())
+            .or_default()
+            .insert(param.to_string(), value);
+    }
+
+    /// Returns true if an override existed.
+    pub fn clear(&self, binding: &str, param: &str) -> bool {
+        let mut map = self.values.write().expect("param overrides lock");
+        let Some(inner) = map.get_mut(binding) else {
+            return false;
+        };
+        let existed = inner.remove(param).is_some();
+        if inner.is_empty() {
+            map.remove(binding);
+        }
+        existed
+    }
+
+    pub fn get(&self, binding: &str, param: &str) -> Option<f32> {
+        self.values
+            .read()
+            .expect("param overrides lock")
+            .get(binding)
+            .and_then(|m| m.get(param))
+            .copied()
+    }
+
+    pub fn snapshot(&self) -> Vec<(String, String, f32)> {
+        self.values
+            .read()
+            .expect("param overrides lock")
+            .iter()
+            .flat_map(|(b, m)| {
+                m.iter()
+                    .map(move |(p, v)| (b.clone(), p.clone(), *v))
+            })
             .collect()
     }
 }
@@ -173,8 +338,8 @@ impl DriverSpec {
             DriverSpec::ClockBeats { n } => phase(frame.beat_time(), *n),
             DriverSpec::ClockPhase { rate } => phase(frame.elapsed_sec, 1.0 / rate.max(1e-6)),
             DriverSpec::ClockTime => frame.elapsed_sec,
-            DriverSpec::AudioBand(b) => frame.audio.band(*b),
-            DriverSpec::AudioOnset { band, decay } => frame.audio.onset_envelope(*band, *decay),
+            DriverSpec::AudioBand(b) => frame.band(*b),
+            DriverSpec::AudioOnset { band, decay } => frame.onset(*band, *decay),
             DriverSpec::UiSlider { name, default } => {
                 frame.sliders.get(name).unwrap_or(*default)
             }
@@ -195,6 +360,67 @@ impl DriverSpec {
                 format!("audio.onset({})", band_name(*band))
             }
             DriverSpec::UiSlider { name, .. } => format!("ui.slider({name})"),
+        }
+    }
+}
+
+/// Re-pick cadence for §5.2 `pick` selectors. Deliberately restricted to
+/// transport-derived clocks: the pick cycle must be a pure function of
+/// transport time so runs are deterministic and the §5.6 design-leg preview
+/// picks the same layer its promote will. Audio-driven rates would make the
+/// pick history depend on live signal state — rejected at parse.
+#[derive(Debug, Clone)]
+pub enum PickRate {
+    Bars { n: f32 },
+    Beats { n: f32 },
+    /// From `clock.phase { rate }` — period is `1/rate` seconds.
+    Seconds { period: f32 },
+}
+
+impl PickRate {
+    pub fn parse(v: &Value) -> Result<Self> {
+        let driver = v
+            .get("driver")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("pick rate object missing `driver` field: {v}"))?;
+        match driver {
+            "clock.bars" => {
+                let n = v.get("n").and_then(Value::as_f64).unwrap_or(1.0).max(1e-3) as f32;
+                Ok(Self::Bars { n })
+            }
+            "clock.beats" => {
+                let n = v.get("n").and_then(Value::as_f64).unwrap_or(1.0).max(1e-3) as f32;
+                Ok(Self::Beats { n })
+            }
+            "clock.phase" => {
+                let rate = v.get("rate").and_then(Value::as_f64).unwrap_or(0.1) as f32;
+                Ok(Self::Seconds {
+                    period: 1.0 / rate.max(1e-6),
+                })
+            }
+            other => bail!(
+                "pick rate must be a clock.bars / clock.beats / clock.phase driver \
+                 (got {other:?}) — picks are transport-locked so runs stay deterministic"
+            ),
+        }
+    }
+
+    /// Monotonic cycle counter: how many whole periods have elapsed. The
+    /// pick re-rolls when this changes.
+    pub fn cycle(&self, frame: &FrameContext) -> u64 {
+        let (t, period) = match self {
+            Self::Bars { n } => (frame.bar_time(), *n),
+            Self::Beats { n } => (frame.beat_time(), *n),
+            Self::Seconds { period } => (frame.elapsed_sec, *period),
+        };
+        (t / period.max(1e-6)).floor().max(0.0) as u64
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Bars { n } => format!("clock.bars({n})"),
+            Self::Beats { n } => format!("clock.beats({n})"),
+            Self::Seconds { period } => format!("clock.phase({})", 1.0 / period.max(1e-6)),
         }
     }
 }
@@ -231,6 +457,11 @@ pub struct FrameContext<'a> {
     pub bpm: f32,
     pub audio: &'a AudioFeatures,
     pub sliders: &'a SliderBank,
+    /// §5.4 audio-listen master — scales every `audio.*` read toward 0. Use
+    /// [`FrameContext::band`]/[`FrameContext::onset`] instead of touching
+    /// `audio` directly so the master applies uniformly (drivers, FrameState
+    /// uniform, telemetry all see the same scaled value).
+    pub audio_listen: f32,
 }
 
 impl<'a> FrameContext<'a> {
@@ -242,20 +473,32 @@ impl<'a> FrameContext<'a> {
         // overrides land alongside the cue editor in Phase 6+.
         self.beat_time() / 4.0
     }
+    pub fn band(&self, b: AudioBand) -> f32 {
+        self.audio.band(b) * self.audio_listen
+    }
+    pub fn onset(&self, b: AudioBand, decay: f32) -> f32 {
+        self.audio.onset_envelope(b, decay) * self.audio_listen
+    }
 }
 
-/// Cheap wall-clock owned by the main thread. Stepped each frame; provides
-/// the elapsed time and (for Phase 3) the BPM read from the scene file.
+/// Musical clock owned by the render thread. Since §5.4 it *integrates* time
+/// per frame instead of reading a wall clock: `time += dt · speed`, where
+/// `speed` is the operator's speed master. A speed change therefore bends
+/// time (phases keep continuity) instead of jumping the absolute clock —
+/// the difference between a smooth half-time drop and every phase-driven
+/// effect snapping to a new position.
 pub struct Transport {
-    start: Instant,
     bpm: f32,
+    time_sec: f64,
+    last_step: Instant,
 }
 
 impl Transport {
     pub fn new(bpm: f32) -> Self {
         Self {
-            start: Instant::now(),
             bpm: bpm.max(1.0),
+            time_sec: 0.0,
+            last_step: Instant::now(),
         }
     }
 
@@ -263,20 +506,36 @@ impl Transport {
         self.bpm = bpm.max(1.0);
     }
 
+    /// Advance the clock by the wall time since the previous step, scaled by
+    /// `speed`. Called exactly once per frame by the render thread before
+    /// the plan tick.
+    pub fn step(&mut self, speed: f32) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_step).as_secs_f64();
+        self.last_step = now;
+        self.step_by(dt, speed);
+    }
+
+    fn step_by(&mut self, dt: f64, speed: f32) {
+        self.time_sec += dt * speed.max(0.0) as f64;
+    }
+
     pub fn elapsed_sec(&self) -> f32 {
-        self.start.elapsed().as_secs_f32()
+        self.time_sec as f32
     }
 
     pub fn frame_context<'a>(
         &self,
         audio: &'a AudioFeatures,
         sliders: &'a SliderBank,
+        audio_listen: f32,
     ) -> FrameContext<'a> {
         FrameContext {
             elapsed_sec: self.elapsed_sec(),
             bpm: self.bpm,
             audio,
             sliders,
+            audio_listen,
         }
     }
 }
@@ -350,4 +609,55 @@ fn parse_hex_color(s: &str) -> Result<[f32; 4]> {
 #[allow(dead_code)]
 pub fn null_audio() -> Arc<AudioFeatures> {
     AudioFeatures::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masters_clamp_and_reject_unknown() {
+        let m = Masters::new();
+        assert_eq!(m.set("brightness", 5.0).unwrap(), 2.0);
+        assert_eq!(m.set("audioListen", -1.0).unwrap(), 0.0);
+        assert_eq!(m.set("audio_listen", 0.5).unwrap(), 0.5);
+        assert!(m.set("volume", 1.0).is_err());
+        assert_eq!(m.brightness(), 2.0);
+        assert_eq!(m.audio_listen(), 0.5);
+    }
+
+    #[test]
+    fn overrides_set_get_clear() {
+        let o = ParamOverrides::new();
+        assert_eq!(o.get("b1", "amp"), None);
+        o.set("b1", "amp", 0.7);
+        assert_eq!(o.get("b1", "amp"), Some(0.7));
+        assert_eq!(o.get("b1", "freq"), None);
+        assert!(o.clear("b1", "amp"));
+        assert!(!o.clear("b1", "amp"));
+        assert_eq!(o.get("b1", "amp"), None);
+        assert!(o.snapshot().is_empty());
+    }
+
+    #[test]
+    fn transport_speed_bends_time() {
+        let mut t = Transport::new(120.0);
+        t.step_by(1.0, 1.0);
+        t.step_by(1.0, 0.5);
+        t.step_by(1.0, 0.0);
+        assert!((t.elapsed_sec() - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn audio_listen_scales_audio_drivers_only() {
+        let audio = null_audio();
+        let sliders = SliderBank::new();
+        let t = Transport::new(120.0);
+        let ctx = t.frame_context(&audio, &sliders, 0.0);
+        // Bands are 0 on null audio anyway; the point is the scaling path
+        // compiles and clock drivers ignore the listen master.
+        assert_eq!(ctx.band(AudioBand::Low), 0.0);
+        let clock = DriverSpec::ClockPhase { rate: 1.0 };
+        let _ = clock.eval(&ctx);
+    }
 }

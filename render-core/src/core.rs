@@ -22,19 +22,21 @@
 //!   touch the swapchain of a possibly-occluded window) and frame pacing.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
 use crate::compositor::PassPlan;
-use crate::drivers::{SliderBank, Transport};
+use crate::drivers::{Masters, ParamOverrides, SliderBank, Transport};
 use crate::effects::EffectRegistry;
 use crate::gpu::GpuContext;
 use crate::osc::{try_spawn, AudioFeatures, OscListener};
 use crate::pack::LoadedPack;
 use crate::rpc::{self, parking_lot_lite::SwapValue, EngineCommand, PackInfo, RpcContext};
 use crate::scene::SceneFile;
+use crate::session::{self, SessionFile};
 use crate::telemetry::{
     AudioSnapshot, Bus, Connectivity, ConnectivityCell, DriverSnapshot, FpsAccumulator,
     FrameCounts, HotReloadEvent, PreviewSampler,
@@ -88,6 +90,32 @@ pub struct Core {
 
     /// Live `ui.slider` values, shared with the WS server (`param.set`).
     sliders: Arc<SliderBank>,
+
+    /// §5.4 masters — operator-owned globals shared with the WS server
+    /// (`master.set`). Never reachable from scene.json.
+    masters: Arc<Masters>,
+
+    /// §5.5 per-binding scalar overrides, shared with the WS server
+    /// (`param.set {binding, param, value}`).
+    overrides: Arc<ParamOverrides>,
+
+    /// §5.3 session sidecar path (`session.json` next to the scene) + the
+    /// calibration loaded from it. `session_calibration` takes precedence
+    /// over the deprecated scene.json field and is the only calibration the
+    /// engine ever writes back.
+    session_path: PathBuf,
+    session_calibration: Option<[[f32; 3]; 3]>,
+    scene_calib_warned: bool,
+
+    /// Epoch-ms stamp of the last operator-state change (0 = clean). Written
+    /// by the WS thread on master/knob changes; `poll_inbound` debounces the
+    /// sidecar write on it.
+    session_dirty: Arc<AtomicU64>,
+
+    /// Flipped by SIGTERM/SIGINT — `poll_inbound` snapshots the session and
+    /// requests a host exit (§5.11 power-blink snapshot).
+    term_flag: Arc<AtomicBool>,
+    exit_requested: bool,
 
     /// True while the OS reports the projector window fully occluded. On
     /// macOS an occluded window's swapchain throttles to ~1 Hz and
@@ -172,6 +200,62 @@ impl Core {
         }
 
         let sliders = SliderBank::new();
+        let masters = Masters::new();
+        let overrides = ParamOverrides::new();
+        let session_dirty = Arc::new(AtomicU64::new(0));
+
+        // §5.3 — restore operator state from the session sidecar before the
+        // WS surface (or the first frame) can observe defaults.
+        let session_path = session::session_path(&scene_path);
+        let mut session_calibration = None;
+        match session::load(&session_path) {
+            Ok(Some(s)) => {
+                session_calibration = s.projector_calibration;
+                if let Some(m) = &s.masters {
+                    masters.restore(m);
+                }
+                for (name, value) in &s.params {
+                    sliders.set(name, *value);
+                }
+                for (binding, params) in &s.overrides {
+                    for (param, value) in params {
+                        overrides.set(binding, param, *value);
+                    }
+                }
+                log::info!(
+                    "restored session sidecar {} ({} knobs, {} overrides{})",
+                    session_path.display(),
+                    s.params.len(),
+                    s.overrides.values().map(|m| m.len()).sum::<usize>(),
+                    if session_calibration.is_some() {
+                        ", calibration"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            Ok(None) => {}
+            Err(err) => log::warn!(
+                "ignoring session sidecar {}: {err:#}",
+                session_path.display()
+            ),
+        }
+        // Seed the sticky masters channel so late subscribers see the
+        // restored values, not defaults.
+        bus.emit_masters(masters.snapshot());
+
+        // §5.11 — a termination signal snapshots the session before exit, so
+        // a power-blink/systemd-stop comes back close to where it was.
+        let term_flag = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        {
+            for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+                if let Err(err) = signal_hook::flag::register(sig, Arc::clone(&term_flag)) {
+                    log::warn!("could not register signal {sig}: {err}");
+                }
+            }
+        }
+
         let (cmd_rx, ws_handle) = match cli.ws_addr {
             Some(addr) => {
                 let (tx, rx) = crossbeam_channel::unbounded();
@@ -181,6 +265,9 @@ impl Core {
                     effects_dir: effects_dir.clone(),
                     bus: bus.clone(),
                     sliders: Arc::clone(&sliders),
+                    masters: Arc::clone(&masters),
+                    overrides: Arc::clone(&overrides),
+                    session_dirty: Arc::clone(&session_dirty),
                 };
                 let handle = ws::serve(addr, tx, ctx).context("starting WS server")?;
                 (Some(rx), Some(handle))
@@ -224,6 +311,14 @@ impl Core {
             audio_was_fresh: None,
             last_audio_pill: Instant::now(),
             sliders,
+            masters,
+            overrides,
+            session_path,
+            session_calibration,
+            scene_calib_warned: false,
+            session_dirty,
+            term_flag,
+            exit_requested: false,
             occluded: false,
             last_drivers_emit: Instant::now(),
             last_audio_emit: Instant::now(),
@@ -279,8 +374,18 @@ impl Core {
                     message: None,
                 });
                 self.transport.set_bpm(self.scene.transport.bpm);
-                if let Some(gpu) = self.gpu.as_ref() {
-                    gpu.set_homography(self.scene.projector_calibration);
+                // §5.3 — calibration now lives in session.json; the scene
+                // field is a deprecated read-only fallback, never written.
+                if self.scene.projector_calibration.is_some()
+                    && self.session_calibration.is_none()
+                    && !self.scene_calib_warned
+                {
+                    log::warn!(
+                        "scene.json projectorCalibration is deprecated — calibration \
+                         belongs in session.json (engine-written); the scene value is \
+                         honoured as a fallback but will never be written back"
+                    );
+                    self.scene_calib_warned = true;
                 }
                 Ok(())
             }
@@ -439,13 +544,36 @@ impl Core {
         }
     }
 
+    /// Effective projector calibration: session sidecar first (§5.3), the
+    /// deprecated scene.json field as a read-only fallback.
+    fn effective_calibration(&self) -> Option<[[f32; 3]; 3]> {
+        self.session_calibration
+            .or(self.scene.projector_calibration)
+    }
+
     /// One presented frame (tick → record → submit → present). Must only be
     /// called while not occluded. On `SurfaceError::Lost`/`Outdated` the host
     /// should query the window's current size and call [`Core::resize`];
     /// on `OutOfMemory` it should shut down.
     pub fn redraw(&mut self) -> Result<(), wgpu::SurfaceError> {
-        if let (Some(gpu), Some(plan)) = (self.gpu.as_ref(), self.plan.as_ref()) {
-            plan.tick(gpu, &self.transport, &self.audio_state, &self.sliders);
+        // §5.4 speed master bends the musical clock (integrated, never a
+        // scaled absolute time).
+        self.transport.step(self.masters.speed());
+        let calibration = self.effective_calibration();
+        if let (Some(gpu), Some(plan)) = (self.gpu.as_ref(), self.plan.as_mut()) {
+            let ctx = self.transport.frame_context(
+                &self.audio_state,
+                &self.sliders,
+                self.masters.audio_listen(),
+            );
+            plan.tick(gpu, &ctx, &self.overrides);
+            // Brightness/saturation masters ride the final pass uniform —
+            // refreshed per presented frame so a master move lands next frame.
+            gpu.write_homography(
+                calibration,
+                self.masters.brightness(),
+                self.masters.saturation(),
+            );
             plan.record_and_submit(gpu)?;
             let counts = self.frame_counts();
             self.fps.mark(&self.bus, counts, true);
@@ -458,10 +586,18 @@ impl Core {
 
     /// One frame with no swapchain interaction — used while occluded so the
     /// composite (and therefore the operator preview) keeps updating without
-    /// the render thread blocking on the throttled window.
+    /// the render thread blocking on the throttled window. No homography
+    /// pass runs here, so the brightness/saturation masters don't apply —
+    /// by design, the preview shows the un-mastered composite.
     pub fn render_offscreen_frame(&mut self) {
-        if let (Some(gpu), Some(plan)) = (self.gpu.as_ref(), self.plan.as_ref()) {
-            plan.tick(gpu, &self.transport, &self.audio_state, &self.sliders);
+        self.transport.step(self.masters.speed());
+        if let (Some(gpu), Some(plan)) = (self.gpu.as_ref(), self.plan.as_mut()) {
+            let ctx = self.transport.frame_context(
+                &self.audio_state,
+                &self.sliders,
+                self.masters.audio_listen(),
+            );
+            plan.tick(gpu, &ctx, &self.overrides);
             plan.render_offscreen(gpu);
         }
         let counts = self.frame_counts();
@@ -494,8 +630,12 @@ impl Core {
 
         if self.last_drivers_emit.elapsed() >= Duration::from_millis(100) {
             if let Some(plan) = self.plan.as_ref() {
-                let rows =
-                    plan.driver_rows(&self.transport, &self.audio_state, &self.sliders);
+                let ctx = self.transport.frame_context(
+                    &self.audio_state,
+                    &self.sliders,
+                    self.masters.audio_listen(),
+                );
+                let rows = plan.driver_rows(&ctx, &self.overrides);
                 self.bus.emit_drivers(DriverSnapshot { drivers: rows });
             }
             self.last_drivers_emit = Instant::now();
@@ -572,6 +712,66 @@ impl Core {
         // Live-value channels the operator UI renders (driver rack, audio
         // strip, connectivity panel).
         self.emit_periodic_telemetry(heartbeat);
+
+        // §5.3 session sidecar — debounced persist of operator state
+        // (masters, knobs, overrides). One write ~1.5 s after the last
+        // touch, not one per slider tick.
+        let dirty_ms = self.session_dirty.load(Ordering::Relaxed);
+        if dirty_ms != 0 && session::now_ms().saturating_sub(dirty_ms) >= 1_500 {
+            if let Err(err) = self.save_session() {
+                log::warn!("session sidecar write failed: {err:#}");
+            }
+        }
+
+        // §5.11 — SIGTERM/SIGINT: snapshot the session, then ask the host to
+        // exit. The host polls `exit_requested()` after this call.
+        if self.term_flag.swap(false, Ordering::Relaxed) {
+            log::info!("termination signal — snapshotting session and exiting");
+            if let Err(err) = self.save_session() {
+                log::warn!("session snapshot on shutdown failed: {err:#}");
+            }
+            self.exit_requested = true;
+        }
+    }
+
+    /// True once a termination signal asked for a graceful exit. The host
+    /// checks this each loop iteration and tears the event loop down.
+    pub fn exit_requested(&self) -> bool {
+        self.exit_requested
+    }
+
+    /// Host-initiated shutdown hook (window close). Persists the session
+    /// sidecar so knobs/masters survive to the next run.
+    pub fn on_exit(&mut self) {
+        if let Err(err) = self.save_session() {
+            log::warn!("session snapshot on exit failed: {err:#}");
+        }
+    }
+
+    /// §5.3 — write the session sidecar now. Clears the dirty stamp first so
+    /// a change racing the write just re-dirties and gets the next debounce.
+    pub fn save_session(&mut self) -> Result<PathBuf> {
+        self.session_dirty.store(0, Ordering::Relaxed);
+        let mut file = SessionFile {
+            version: crate::session::SESSION_VERSION,
+            projector_calibration: self.session_calibration,
+            masters: Some(self.masters.snapshot()),
+            ..Default::default()
+        };
+        for (name, value) in self.sliders.snapshot() {
+            file.params.insert(name, value);
+        }
+        for (binding, param, value) in self.overrides.snapshot() {
+            file.overrides.entry(binding).or_default().insert(param, value);
+        }
+        session::save(&self.session_path, &file)?;
+        log::info!("session sidecar written: {}", self.session_path.display());
+        Ok(self.session_path.clone())
+    }
+
+    /// §5.5 — serve `effect.describe` from the render thread's registry.
+    pub fn describe_effects(&self, name: Option<&str>) -> Result<serde_json::Value> {
+        self.registry.describe(name)
     }
 
     /// Frame-pacing cap. macOS Metal disables vsync throttling for

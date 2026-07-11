@@ -111,7 +111,8 @@ impl EngineHandle {
             json!({
                 "channels": [
                     "preview", "hot_reload", "audio_freshness", "fps",
-                    "log", "frame_stats", "drivers", "audio", "connectivity"
+                    "log", "frame_stats", "drivers", "audio", "connectivity",
+                    "masters"
                 ]
             }),
             Duration::from_secs(2),
@@ -265,7 +266,7 @@ fn handle_inbound(inner: &EngineInner, app: &AppHandle, text: &str) {
             let payload = params.get("payload").cloned().unwrap_or(Value::Null);
             if matches!(
                 channel,
-                "hot_reload" | "audio_freshness" | "connectivity" | "fps"
+                "hot_reload" | "audio_freshness" | "connectivity" | "fps" | "masters"
             ) {
                 let mut last = inner.last_payloads.lock().expect("last payloads lock");
                 last.insert(channel.to_string(), payload.clone());

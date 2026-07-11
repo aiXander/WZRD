@@ -57,6 +57,21 @@ export const wgslValidate = (source: string) =>
 /** Live knob path — no scene rebuild, engine picks it up next frame. */
 export const paramSet = (name: string, value: number) =>
   invoke<unknown>('param_set', { name, value });
+/**
+ * §5.5 live per-binding override — pins any scalar param (const or
+ * driver-bound) without a rebuild; `null` clears it. Persisted in the
+ * session sidecar, never written into scene.json.
+ */
+export const paramOverride = (binding: string, param: string, value: number | null) =>
+  invoke<unknown>('param_override', { binding, param, value });
+/** §5.4 masters — brightness | speed | saturation | audioListen. */
+export const masterSet = (name: string, value: number) =>
+  invoke<unknown>('master_set', { name, value });
+/** §5.5 effect input descriptors (ranges/steps/widgets). */
+export const effectDescribe = (name?: string) =>
+  invoke<unknown>('effect_describe', { name: name ?? null });
+/** §5.3 explicit session sidecar save. */
+export const sessionSave = () => invoke<{ ok: boolean; path: string }>('session_save');
 export const effectUpsert = (name: string, wgsl: string, descriptor: unknown | null) =>
   invoke<unknown>('effect_upsert', { name, wgsl, descriptor });
 export const effectRemove = (name: string) =>

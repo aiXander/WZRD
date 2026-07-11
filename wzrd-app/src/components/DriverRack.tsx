@@ -1,17 +1,18 @@
 // Driver rack — every param in the active scene, playable.
 //
 // Row control depends on what the param is:
-//   - `ui.slider` driver  → live slider → `param.set` RPC (no rebuild, next
-//     frame). This is the "knobs" path from the design spec.
-//   - literal number      → slider + numeric field → debounced scene commit
-//     (engine push ~150ms trailing, disk write ~800ms trailing).
+//   - `ui.slider` driver  → live slider → `param.set {name}` RPC (no
+//     rebuild, next frame). Scene-authored shared knobs.
+//   - literal number      → live slider → §5.5 `param.set {binding, param}`
+//     override (no rebuild; persisted in the session sidecar, never written
+//     into scene.json implicitly — ↺ clears back to the scene value).
 //   - colour string       → colour picker → debounced scene commit.
 //   - clock./audio. driver→ read-only live value bar (the source drives it).
 //
 // Live values arrive on the `drivers` telemetry channel (~10 Hz).
 
 import { useMemo, useRef, useState } from 'react';
-import { paramSet } from '../api/ipc';
+import { paramOverride, paramSet } from '../api/ipc';
 import { commitSceneMutation } from '../state/sceneCommit';
 import { useStore, type DriverRow } from '../state/store';
 
@@ -22,6 +23,17 @@ function sendParam(name: string, value: number) {
   throttleTimers[name] = window.setTimeout(() => {
     delete throttleTimers[name];
     paramSet(name, value).catch((e) => console.warn('param.set', name, e));
+  }, 25);
+}
+
+function sendOverride(binding: string, param: string, value: number) {
+  const key = `${binding}::${param}`;
+  if (throttleTimers[key] != null) window.clearTimeout(throttleTimers[key]);
+  throttleTimers[key] = window.setTimeout(() => {
+    delete throttleTimers[key];
+    paramOverride(binding, param, value).catch((e) =>
+      console.warn('param.set override', key, e)
+    );
   }, 25);
 }
 
@@ -112,12 +124,14 @@ function RowView({ row, highlight }: { row: Row; highlight: boolean }) {
     sourceLabel = row.live?.source ?? driverKind ?? '?';
     control = <LiveBar value={row.live?.value ?? 0} />;
   } else if (typeof raw === 'number') {
-    sourceLabel = 'const';
+    sourceLabel = row.live?.overridden ? 'const · override' : 'const';
     control = (
       <ConstControl
         bindingId={row.binding_id}
         paramName={row.param_name}
         value={raw}
+        liveValue={row.live?.value}
+        overridden={!!row.live?.overridden}
       />
     );
   } else if (typeof raw === 'string') {
@@ -190,16 +204,30 @@ function UiSliderControl({
   );
 }
 
-/** Literal scene value: slider + numeric field via debounced scene commit. */
+/**
+ * Literal scene value: live §5.5 override (zero rebuild, session-persisted).
+ * The scene value stays untouched — ↺ clears the override so the param
+ * falls back to it next frame. "Write knobs back into scene.json" remains a
+ * separate, explicit authoring action (Monaco / binding inspector).
+ */
 function ConstControl({
   bindingId,
   paramName,
   value,
+  liveValue,
+  overridden,
 }: {
   bindingId: string;
   paramName: string;
   value: number;
+  liveValue: number | undefined;
+  overridden: boolean;
 }) {
+  // Local value wins while (and after) dragging so the knob never jumps
+  // under the finger when a stale telemetry frame arrives.
+  const [local, setLocal] = useState<number | null>(null);
+  const shown = local ?? (overridden ? liveValue ?? value : value);
+
   // Slider bounds adapt to the value's magnitude so both a 0..1 intensity
   // and a freq=18 stay draggable. Bounds are sticky per mount so the scale
   // doesn't warp mid-drag.
@@ -213,11 +241,15 @@ function ConstControl({
 
   function commit(v: number) {
     if (!Number.isFinite(v)) return;
-    commitSceneMutation((scene) => {
-      const b = (scene.bindings ?? []).find((b: any) => b.id === bindingId);
-      if (b) b.params = { ...(b.params ?? {}), [paramName]: v };
-      return scene;
-    });
+    setLocal(v);
+    sendOverride(bindingId, paramName, v);
+  }
+
+  function reset() {
+    setLocal(null);
+    paramOverride(bindingId, paramName, null).catch((e) =>
+      console.warn('param.set clear', bindingId, paramName, e)
+    );
   }
 
   return (
@@ -227,17 +259,29 @@ function ConstControl({
         min={min}
         max={max}
         step={(max - min) / 200}
-        value={value}
-        className="flex-1 accent-violet-400"
+        value={shown}
+        className={'flex-1 ' + (overridden || local != null ? 'accent-amber-400' : 'accent-violet-400')}
         onChange={(e) => commit(parseFloat(e.target.value))}
       />
       <input
         type="number"
         step="0.01"
-        value={value}
+        value={shown}
         className="w-16 bg-ink-900 px-1 py-0.5 rounded border border-ink-600 font-mono text-right"
         onChange={(e) => commit(parseFloat(e.target.value))}
       />
+      <button
+        className={
+          'w-5 text-center ' +
+          (overridden || local != null
+            ? 'text-amber-300 hover:text-amber-100'
+            : 'text-transparent pointer-events-none')
+        }
+        title={`clear override (back to scene value ${value})`}
+        onClick={reset}
+      >
+        ↺
+      </button>
     </div>
   );
 }

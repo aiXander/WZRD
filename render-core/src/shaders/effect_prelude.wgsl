@@ -33,8 +33,14 @@ struct FrameState {
 struct LayerParams {
     slice: u32,
     effect_id: u32,
-    _pad0: u32,
-    _pad1: u32,
+    // §5.2 per-layer identity — position of this pass within its binding's
+    // resolved selection, plus a stable per-layer random and uv geometry.
+    layer_index: u32,
+    layer_count: u32,
+    layer_seed: f32,
+    _pad0: f32,
+    centroid_uv: vec2<f32>,
+    bbox_uv: vec4<f32>,      // (min_x, min_y, max_x, max_y), uv space
     // 8 scalar slots packed into two vec4s (std140 16-byte alignment).
     params_f: array<vec4<f32>, 2>,
     // 4 colour slots.
@@ -60,6 +66,20 @@ fn f_param(i: u32) -> f32 {
 fn c_param(i: u32) -> vec4<f32> {
     return layer.params_c[i];
 }
+
+// §5.2 per-layer identity accessors. One binding over N layers gets a
+// distinct value per pass, so a single effect can vary organically across
+// its selection instead of animating in lockstep:
+//   - `phase += layer_seed()` desynchronizes N copies of a cycle for free
+//     (seed is a stable hash of the layer *id* — survives re-segmentation);
+//   - `layer_index()` / `layer_count()` support ordered ramps/cascades;
+//   - `layer_centroid()` / `layer_bbox()` locate the region for radial
+//     blooms, distance falloffs, per-region uv normalization.
+fn layer_seed() -> f32 { return layer.layer_seed; }
+fn layer_index() -> u32 { return layer.layer_index; }
+fn layer_count() -> u32 { return layer.layer_count; }
+fn layer_centroid() -> vec2<f32> { return layer.centroid_uv; }
+fn layer_bbox() -> vec4<f32> { return layer.bbox_uv; }
 
 // Re-sample this layer's mask at an arbitrary UV. Useful for spatial
 // effects (wobble, displacement) that need to test whether a *displaced*

@@ -25,6 +25,9 @@ pub struct AppState {
     /// Lazily-resolved pack directory (from `pack.info`), cached so mask
     /// loads don't pay an RPC round trip each.
     pub pack_dir: std::sync::OnceLock<PathBuf>,
+    /// Audio feature server child, when launched with `--audio` /
+    /// `WZRD_AUDIO=1`. Killed alongside the engine on window close.
+    pub audio_child: std::sync::Mutex<Option<std::process::Child>>,
 }
 
 /// Resolve `--scene` from process args, env var `WZRD_SCENE`, or fall back
@@ -80,6 +83,51 @@ fn resolve_scene_path() -> Result<PathBuf, String> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".into())
     ))
+}
+
+/// True when the shell should auto-start the audio feature server:
+/// `--audio` in the process args (pnpm: `pnpm tauri dev -- -- --audio`) or
+/// `WZRD_AUDIO=1` in the environment.
+fn audio_requested() -> bool {
+    if std::env::args().skip(1).any(|a| a == "--audio") {
+        return true;
+    }
+    matches!(
+        std::env::var("WZRD_AUDIO").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// Where the Realtime_PyAudio_FFT checkout lives. `WZRD_AUDIO_DIR`
+/// overrides; default matches the documented dev setup.
+fn audio_server_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("WZRD_AUDIO_DIR") {
+        return PathBuf::from(p);
+    }
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join("Documents/GitHub/Realtime_PyAudio_FFT")
+}
+
+/// Spawn `uv run audio-server --open` in the audio repo. The server sends
+/// OSC to the engine's :9000 and auto-connects mid-flight, so ordering
+/// relative to the engine spawn doesn't matter.
+fn spawn_audio_server() -> Result<std::process::Child, String> {
+    let dir = audio_server_dir();
+    if !dir.exists() {
+        return Err(format!(
+            "audio server dir {} not found (set WZRD_AUDIO_DIR)",
+            dir.display()
+        ));
+    }
+    std::process::Command::new("uv")
+        .args(["run", "audio-server", "--open"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("spawning audio server in {}: {e}", dir.display()))
 }
 
 fn resolve_engine_exe() -> PathBuf {
@@ -148,11 +196,28 @@ pub fn run() {
                 }
             };
 
+            let audio_child = if audio_requested() {
+                match spawn_audio_server() {
+                    Ok(c) => {
+                        log::info!("spawned audio server pid {}", c.id());
+                        Some(c)
+                    }
+                    Err(e) => {
+                        // Non-fatal: the shell is fully usable without audio.
+                        log::error!("could not start audio server: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             app.manage(AppState {
                 engine: handle,
                 scene_path,
                 effects_dir,
                 pack_dir: std::sync::OnceLock::new(),
+                audio_child: std::sync::Mutex::new(audio_child),
             });
             Ok(())
         })
@@ -163,6 +228,10 @@ pub fn run() {
             rpc::scene_load,
             rpc::scene_reload,
             rpc::param_set,
+            rpc::param_override,
+            rpc::master_set,
+            rpc::effect_describe,
+            rpc::session_save,
             rpc::wgsl_validate,
             rpc::effect_upsert,
             rpc::effect_remove,
@@ -177,6 +246,12 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.engine.shutdown();
+                    if let Ok(mut guard) = state.audio_child.lock() {
+                        if let Some(mut c) = guard.take() {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                        }
+                    }
                 }
             }
         })

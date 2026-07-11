@@ -11,7 +11,10 @@ import { BindingInspector } from '../components/BindingInspector';
 export function Prepare() {
   return (
     <div className="grid grid-cols-[40fr_35fr_25fr] h-full min-h-0">
-      <section className="border-r border-ink-700 min-h-0 flex flex-col">
+      {/* min-w-0 on every column: grid children default to min-width:auto,
+          so variable-width content (selected-layer label, inspector rows)
+          would otherwise resize the whole grid on every click. */}
+      <section className="border-r border-ink-700 min-h-0 min-w-0 flex flex-col">
         <header className="text-xs text-zinc-500 px-3 py-1.5 border-b border-ink-700">
           Surface
         </header>
@@ -20,7 +23,7 @@ export function Prepare() {
         </div>
       </section>
 
-      <section className="border-r border-ink-700 min-h-0 flex flex-col">
+      <section className="border-r border-ink-700 min-h-0 min-w-0 flex flex-col">
         <header className="text-xs text-zinc-500 px-3 py-1.5 border-b border-ink-700">
           Editor
         </header>
@@ -29,7 +32,7 @@ export function Prepare() {
         </div>
       </section>
 
-      <section className="min-h-0 flex flex-col">
+      <section className="min-h-0 min-w-0 flex flex-col">
         <header className="text-xs text-zinc-500 px-3 py-1.5 border-b border-ink-700">
           Binding Inspector
         </header>

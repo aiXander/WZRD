@@ -82,7 +82,7 @@ Still committed, condensed (historical rationale in the retired v1 plan):
 | D1 | Native Rust + wgpu render core; the browser never renders the projector output. |
 | D3/D4 | Layer pack is the offline↔runtime contract; masks live in one `Texture2DArray<R8>` (256-slice cap). |
 | D7 | Selectors (`id`/`tag`/`group`/`all`) over hard-coded indices; layer ids are semantic and survive re-segmentation. |
-| D9 | Calibration = in-engine 3×3 homography as the final pass, stored in `scene.json`. |
+| D9 | Calibration = in-engine 3×3 homography as the final pass. Stored in the session sidecar since §5.3 (2026-07-11); a scene-level `projectorCalibration` is a deprecated read-only fallback. |
 | D13 | `scene.json` is canonical on disk and on the wire. No TS DSL on any critical path. |
 | D14 | Python stays Python (offline segmentation, content generation via `wzrd_mcp`). |
 | D15 | Effects are user-authored WGSL (inline or `effects/<name>/`), naga-validated, swap-on-success hot-reload. Built-ins are reference implementations, not a ceiling. |
@@ -100,16 +100,17 @@ not "fix" it to alpha blending.
 |---|---|
 | `lib.rs` | `Cli` + `run()` — shared entry for the binary and any embedder. |
 | `main.rs` | CLI parse + **tee logger** (stderr + `log` telemetry channel via `telemetry::global_bus`). |
-| `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. |
+| `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, session persistence (§5.3 restore-at-boot, debounced write, SIGTERM/SIGINT snapshot → `exit_requested()`), plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. |
 | `app.rs` | Thin `WinitHost` — window creation/fullscreen/display selection, winit event delegation into `Core`, exit decisions. The only winit-aware file besides `lib.rs`. |
 | `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, composite target, pipeline cache, WGSL composer (`prelude + body + main`), homography pipeline. |
-| `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick()` (driver eval → uniforms); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). |
-| `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Transport` (BPM clock). |
+| `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick(&mut)` (driver eval → uniforms, §5.2 pick re-rolls via `active` flags); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). Owns the stable hashes (`fnv1a`/`seed01`/`pick_choice`) behind layer_seed + pick determinism. |
+| `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
+| `session.rs` | §5.3 session sidecar: `SessionFile` load/save (atomic temp+rename), `session_path` (`session.json` next to the scene), the shared dirty stamp the debounced write keys off. |
 | `effects.rs` | Effect registry: built-ins (`tint`, `hueCycle`, `flash`, `wobble`), project-local + inline WGSL, mtime-based rescan. |
 | `scene.rs` | `scene.json` parser + selector resolution. |
-| `pack.rs` | Layer-pack loader. |
+| `pack.rs` | Layer-pack loader; per-slice uv geometry (`LayerGeom`) from the manifest or the mask bytes (§5.2). |
 | `osc.rs` | UDP OSC sink for `/audio/lmh` + `/audio/onset/*` → lock-free `AudioFeatures` atomics. |
-| `rpc.rs` | JSON-RPC dispatch: inline read-only methods + queued `EngineCommand`s for mutations; `param.set`/`param.list`; `wgsl.validate` with user-source line remapping. |
+| `rpc.rs` | JSON-RPC dispatch: inline read-only + live-tuning methods (`param.set` both forms, `master.set`) + queued `EngineCommand`s for mutations (`scene.load`, `effect.*`, `session.save`); `wgsl.validate` with user-source line remapping. |
 | `ws.rs` | tungstenite server, thread-per-connection, telemetry fan-out. |
 | `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (non-blocking composite readback → JPEG @ ~15 fps), payload types. |
 | `watch.rs` | notify-based watcher over the scene file + effects dir. |
@@ -117,8 +118,11 @@ not "fix" it to alpha blending.
 **`wzrd-app/`** — `src-tauri/src/{lib,engine,rpc}.rs` (spawn + single-IO-thread
 JSON-RPC client + command proxies) and `src/` (React: Zustand store,
 `state/sceneCommit.ts` debounced commit path, `SurfaceCanvas`, `MonacoPanel`,
-`BindingInspector`, `DriverRack`, `AudioStrip`, `PreviewThumbnail`,
-`StatusStrip`, three routes).
+`BindingInspector`, `DriverRack`, `MastersRow`, `AudioStrip`,
+`PreviewThumbnail`, `StatusStrip`, three routes). Numeric const rows in the
+driver rack tune through the §5.5 override path (amber = overridden, ↺
+clears back to the scene value); colours still go through the debounced
+scene commit.
 
 ---
 
@@ -130,11 +134,11 @@ JSON-RPC client + command proxies) and `src/` (React: Zustand store,
 {
   "version": 1,
   "pack": "../../test_results/layerpack/pack",   // resolved relative to the scene file
-  "transport": { "bpm": 120 },                   // fallback only — live BPM streams from the audio server (§5.1)
+  "transport": { "bpm": 120 },                   // static tempo for clock.* phase — no live BPM tracking (dropped, §5.1)
   "bindings": [
     {
       "id": "primary_flash",                     // stable — the hot-reload diff key
-      "select": { "tag": "leaves" },             // or { "id": ... } | { "group": ... } | { "all": true }; "pick" selectors land with §5.2
+      "select": { "tag": "leaves" },             // or { "id": ... } | { "group": ... } | { "all": true }; optional "pick" narrows to one member (below)
       "effect": "flash",                         // built-in | project-local name | { "inline": true, "wgsl": "...", "inputs": [...] }
       "params": {
         "envelope": { "driver": "audio.onset", "band": "low", "decay": 0.15 },
@@ -143,18 +147,37 @@ JSON-RPC client + command proxies) and `src/` (React: Zustand store,
       }
     }
   ],
-  "post": [],                                    // parsed, not yet consumed
-  "projectorCalibration": null                   // deprecated here — moving to session.json (§5.3); engine reads the sidecar first
+  "post": []                                     // parsed, not yet consumed
 }
 ```
+
+`projectorCalibration` in scene.json is **deprecated** (§5.3 landed
+2026-07-11): calibration lives in the session sidecar now. A scene-level
+value is still honoured as a read-only fallback (warn on use) but is never
+written back.
 
 Drivers: `const(value)`, `clock.bars(n)`, `clock.beats(n)`, `clock.phase(rate)`,
 `clock.time`, `audio.band(low|mid|high)`, `audio.onset(band, decay)`,
 `ui.slider(name, default)`. No `audio.rms`/`audio.fft` scene drivers in v1
 (the server emits `/audio/fft` but the engine doesn't consume it; rms doesn't
-exist). The server also streams `/audio/bpm` — consumed by the **Transport**
-once §5.1 lands, never exposed as a scene driver; scenes lock to tempo
-through `clock.*`. Duplicate/empty binding ids are load errors.
+exist). The server also streams `/audio/bpm` — **deliberately ignored**
+(live BPM tracking dropped 2026-07-11, roadmap §5.1): `transport.bpm` is a
+static scene value, and live musical energy reaches scenes through
+`audio.onset`/`audio.band`, not tempo. Duplicate/empty binding ids are load
+errors.
+
+**`pick` selectors (§5.2, landed 2026-07-11).** Any selector may add
+`"pick": { "mode": "random_each" | "random_static", "rate": { "driver":
+"clock.bars", "n": 4 } }`. The binding still resolves (and builds passes
+for) the full member set, but only one member draws: `random_each` re-picks
+each time the rate clock wraps; `random_static` picks once at scene load. A
+re-pick is an `active`-flag flip on the pass plan — zero rebuild, zero GPU
+work. Rate drivers are restricted to `clock.bars`/`clock.beats`/
+`clock.phase`, and the choice is a pure hash of (binding id, cycle count) —
+no RNG state — so runs are deterministic and the future §5.6 design leg
+picks the same layer its promote will. Strictness: `random_each` without
+`rate`, `random_static` with `rate`, and selectors setting more or fewer
+than one of `all`/`id`/`tag`/`group` are all load errors.
 
 **Timed/authored cues are external in v1 (v1 §3.7).** The driver bus is
 signal-driven (reactive). Repeatable narrative timing — "at bar 128 start the
@@ -189,9 +212,15 @@ stable, period."
 | `scene.reload` | queued | Re-read from disk. |
 | `effect.upsert {name, wgsl, descriptor?}` | queued | Writes `effects/<name>/`, registry + watcher pick it up. |
 | `effect.remove {name}` | queued | |
+| `effect.describe {name?}` | queued | §5.5 — input descriptors (type, default, `min`/`max`/`step`/`unit`/`widget`) for one effect, or the whole catalog (built-ins included) when `name` is omitted. |
 | `wgsl.validate {source}` | inline | naga diagnostics remapped to user-source lines (drives Monaco squiggles). |
+| `telemetry.channels` | inline | The list of live channel names (`telemetry::ALL_CHANNELS`). |
 | `param.set {name, value}` | **inline** | Writes the `SliderBank`; bound `ui.slider` params update next frame. **No rebuild, no disk write — this is the live knob path.** |
-| `param.list` | inline | Current slider values. |
+| `param.set {binding, param, value}` | **inline** | §5.5 override form — pins any *scalar* param on a binding (const or driver output alike) in the engine-side override table; `value: null` clears. Same zero-rebuild property; survives plan rebuilds as long as a scalar param with that name exists (the carry-forward rule). |
+| `param.list` | inline | `{ sliders, overrides }` — current knob values + the override table. |
+| `master.set {name, value}` | **inline** | §5.4 — `brightness` \| `speed` \| `saturation` \| `audioListen`. Clamped, applied next frame, echoed on the sticky `masters` channel. Not reachable from scene.json by design. |
+| `master.list` | inline | Current masters snapshot. |
+| `session.save` | queued | §5.3 — write the session sidecar now (also happens debounced after master/knob changes and on SIGTERM/SIGINT/window close). |
 | `telemetry.subscribe {channels}` / `.unsubscribe` | per-conn | |
 
 Telemetry channels (all emitted by the engine as of the 2026-07 pass):
@@ -201,12 +230,13 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 | `preview` | ~15 fps | 320px JPEG of the composite, base64. |
 | `fps` | 2 Hz | Honest throughput (frames/wall-second) + p50 frame time. |
 | `frame_stats` | 2 Hz | p50/p95/p99 + mask-slice / pipeline / pass counts. |
-| `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count. |
+| `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). |
 | `audio` | 30 Hz | L/M/H bands + onset envelopes. |
 | `audio_freshness` | 1 Hz + edges | fresh/stale/down (sticky). |
 | `connectivity` | 1 Hz | osc / file_watcher / ws status cells (sticky). |
 | `hot_reload` | on event | target, ok, elapsed, message (sticky). |
 | `log` | on event | Info+ engine log lines (via the tee logger). |
+| `masters` | on `master.set` + startup | §5.4 snapshot `{brightness, speed, saturation, audioListen}` (sticky). |
 
 ### 2.4 Effect WGSL contract
 
@@ -216,9 +246,59 @@ phase, bpm, audio bands/onsets, resolution), `f_param(N)` / `c_param(N)`
 (8 scalar + 4 colour slots), and `sample_mask(uv)`. The engine composes
 `shaders/effect_prelude.wgsl + body + shaders/effect_main.wgsl` and
 naga-validates before pipeline creation; a bad save never blanks the
-projector. §5.2 extends this contract with per-layer identity
-(`layer_seed`, `layer_index`/`layer_count`, `centroid_uv`, `bbox`) so one
-binding can vary organically across its resolved layers.
+projector.
+
+**Per-layer identity (§5.2, landed 2026-07-11).** When one binding resolves
+to N layers, each pass carries its own identity, exposed as prelude
+accessors: `layer_seed()` (stable [0,1) hash of the layer *id* — survives
+re-segmentation because ids do, D7), `layer_index()` / `layer_count()`
+(position within the binding's resolved selection, ascending slice order),
+`layer_centroid()` (vec2, uv) and `layer_bbox()` (vec4 `(min_x, min_y,
+max_x, max_y)`, uv, max-exclusive). `phase += layer_seed()` desynchronizes
+N copies of any cycle; centroid/bbox anchor radial blooms and per-region uv
+normalization. Geometry comes from the pack manifest's pixel-space
+`bbox`/`centroid` (converted to uv at load) or is computed from the mask
+bytes when the manifest omits them (`pack::geom_from_mask`, mirroring
+`wzrd.layerpack._bbox_and_centroid`).
+
+Note: `state.audio_*` / `state.onset_*` arrive **pre-scaled by the
+audio-listen master** (§5.4) — user WGSL and drivers see the same values.
+
+### 2.5 Session sidecar + masters (§5.3/§5.4, landed 2026-07-11)
+
+`session.json`, engine-written, next to the scene file (deliberately per
+*directory*, not per scene — calibration and masters describe the venue,
+and every scene played from that directory shares the physical setup):
+
+```jsonc
+{
+  "version": 1,
+  "projectorCalibration": null,      // 3×3 row-major or null — moved out of scene.json
+  "masters": { "brightness": 1.0, "speed": 1.0, "saturation": 1.0, "audioListen": 1.0 },
+  "params": { "flash_base": 0.35 },  // SliderBank snapshot, by slider name
+  "overrides": { "wobble_demo": { "amp": 0.05 } }  // §5.5 per-binding scalar overrides
+}
+```
+
+- **Scope rule:** `scene.json` = what the surface *does* (AI + human
+  authored); `session.json` = how *this venue, this night* is set (operator
+  only). No authoring RPC and no scene reload path ever writes it.
+- **Write policy (engine-owned):** explicit `session.save`, debounced
+  ~1.5 s after any `master.set`/`param.set`, and on SIGTERM/SIGINT/window
+  close (`signal-hook` flag → `Core::poll_inbound` snapshots and requests a
+  host exit — the §5.11 power-blink snapshot). Writes are atomic
+  (temp + rename). `session.json` is gitignored.
+- **Read precedence:** sidecar first; a scene-level `projectorCalibration`
+  is a deprecated read-only fallback (warn once, never written back).
+- **Masters application:** brightness/saturation ride the final homography
+  pass uniform (composite + preview stay un-mastered — only the projector
+  output scales); speed multiplies the transport's per-frame time
+  integration (`time += dt·speed` — bends time, never jumps it, so picks
+  and phases stay continuous); audioListen scales every `audio.*` read
+  (drivers *and* the `state.audio_*` uniform) toward 0. Master values are
+  clamped: brightness/saturation 0–2, speed 0–8, audioListen 0–1.
+- The eventual "show file" (playlist + scenes + session) composes these;
+  don't build the umbrella before the §5.6 auto-pilot playlist exists.
 
 ---
 
@@ -279,9 +359,9 @@ honesty property; the operator trusts this pill mid-show (design spec §10).
 `drivers`, `audio`, `connectivity`, `log`, and the frame-stats counts were
 declared, typed, and consumed by the UI — but no engine code emitted them.
 The Perform/Debug pages looked dead. Emitters now live in
-`App::emit_periodic_telemetry` (drivers 10 Hz, audio 30 Hz, connectivity
+`Core::emit_periodic_telemetry` (drivers 10 Hz, audio 30 Hz, connectivity
 1 Hz) and the `main.rs` tee logger. `FrameStats` counts come from
-`App::frame_counts()`. Lesson: **a channel isn't done until something emits
+`Core::frame_counts()`. Lesson: **a channel isn't done until something emits
 on it; wire UI + emitter in the same change.**
 
 ### 3.4 `ui.slider` was a stub and there was no live param path
@@ -321,15 +401,43 @@ and aims the inspector at the first one.
 ### 3.7 Perform route
 
 The driver rack is now playable: `ui.slider` rows are real sliders through
-`param.set`; literal numbers get an adaptive-range slider + numeric field
-through the debounced scene commit; colours get a picker; clock/audio-driven
-rows show live read-only bars (bar only rendered for values in [0,1]).
-The preview hero fills available height. The rack rows highlight when their
-binding is selected.
+`param.set`; literal numbers got an adaptive-range slider + numeric field
+through the debounced scene commit (since re-routed onto the §5.5 live
+override path, 2026-07-11 — scene.json is no longer written implicitly);
+colours get a picker; clock/audio-driven rows show live read-only bars (bar
+only rendered for values in [0,1]). The preview hero fills available
+height, with the §5.4 masters row always visible beneath it. The rack rows
+highlight when their binding is selected.
 
 Smaller fixes riding along: `read_mask_png` no longer pays a `pack.info`
 RPC per mask (cached in Tauri state); redundant `request_redraw` removed;
 preview JPEG decode moved off the paint path.
+
+### 3.8 The binding inspector authored invalid scenes (2026-07-11)
+
+The structured editor could write params/selectors the engine rejects:
+switching an effect kept the old effect's params, "+ param" invented
+`param_N` names, changing selector kind dropped `pick` and committed
+`{"id": ""}`, and an emptied number field committed `NaN`→`null`. Every
+such commit hot-reloads a scene the engine rejects — and a *boot* from
+that file leaves a white projector window (no previous plan to fall back
+to; the §5.11 "black composite at boot failure" item is the mitigation).
+Invariant since the fix: **the inspector only authors what
+`effect.describe` declares** — effect switches rebuild params from
+declared defaults (same-named params carry over), add-param offers only
+declared-but-unset inputs, param type dropdowns are bounded by the
+declared input type, and `select.pick` survives kind changes. Keep any
+future structured editor on this rule; grep `catalog` in
+`BindingInspector.tsx`.
+
+Second invariant, in `sceneCommit.ts`: **disk only ever receives
+engine-accepted scenes.** A rejected push stays optimistic in webview
+memory (Reload pill shows FAIL) but is never persisted — otherwise one
+bad edit survives restarts and every later innocent edit re-writes the
+whole corrupted in-memory scene back over any repair (this looped twice
+on 2026-07-11 before the gating existed). The file on disk is the
+last-good recovery point; don't add a persist path that bypasses the
+accept gate.
 
 ---
 
@@ -361,11 +469,10 @@ Ranked; none currently show-stopping at 5–20 layers.
    sleep in `about_to_wait`), but a `WaitUntil`-based schedule would be
    cleaner and free the thread for command handling during the sleep.
    Low priority; commands are drained every iteration anyway.
-5. **`ui.slider` values are process-lifetime only.** Not persisted on exit;
-   a restart resets knobs to scene defaults. Resolution is designed: the
-   session sidecar (§5.3) snapshots knob + master state across restarts;
-   "write knobs back into scene.json" stays a separate explicit authoring
-   action, never implicit.
+5. ~~**`ui.slider` values are process-lifetime only.**~~ **Resolved
+   2026-07-11** by the session sidecar (§2.5): knobs, masters, and §5.5
+   overrides persist across restarts. "Write knobs back into scene.json"
+   remains a separate explicit authoring action, never implicit.
 6. **`post` bindings and `layerRef` (D5 slow path) are parsed but not
    implemented.** Deferred until a real scene needs cross-layer sampling.
    When it lands (v1 §3.6): a consuming binding samples an earlier layer's
@@ -451,12 +558,12 @@ that forces it:
   ever needed.
 - **Hosting the full ISF runtime** — borrow the ISF *descriptor schema* for
   typed effect inputs (D8), not the GLSL runtime.
-- **Ableton Link / external clock sync in v1** — the server-streamed
-  `/audio/bpm` + the scene's fallback BPM cover v1 (§5.1); pre-computed DAW
-  features can arrive over OSC.
-- **In-engine BPM detection / tap tempo** — the audio server owns tempo and
-  streams `/audio/bpm`; the engine follows it (§5.1) and never estimates,
-  taps, or smooths tempo itself.
+- **Ableton Link / external clock sync in v1** — the scene's static
+  `transport.bpm` covers v1; pre-computed DAW features can arrive over OSC.
+- **Live BPM tracking of any kind** (dropped 2026-07-11, roadmap §5.1) —
+  the engine never estimates, taps, or follows tempo. The server's
+  `/audio/bpm` stream is deliberately ignored; kicks/onsets are the live
+  sync mechanism, `transport.bpm` stays a static scene value.
 - **Engine-side audio signal conditioning** — smoothing, attack/release,
   min/max normalization of `audio.*` all live in the audio server. The
   engine's only audio-tuning surface is effect-strength params on the

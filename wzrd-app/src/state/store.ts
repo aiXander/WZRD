@@ -52,6 +52,14 @@ export type DriverRow = {
   source: string;
   value: number;
   affects: number;
+  /** §5.5 — a live param.set {binding,param} override is pinning this param. */
+  overridden?: boolean;
+};
+export type Masters = {
+  brightness: number;
+  speed: number;
+  saturation: number;
+  audioListen: number;
 };
 export type LogLine = {
   level: string;
@@ -113,6 +121,10 @@ interface Store {
 
   connectivity: Connectivity | null;
   setConnectivity: (v: Connectivity) => void;
+
+  // §5.4 masters — sticky; engine emits on startup and on every master.set
+  masters: Masters | null;
+  setMasters: (v: Masters) => void;
 
   preview: { width: number; height: number; data_b64: string } | null;
   setPreview: (v: Store['preview']) => void;
@@ -178,6 +190,9 @@ export const useStore = create<Store>((set) => ({
 
   connectivity: null,
   setConnectivity: (v) => set({ connectivity: v }),
+
+  masters: null,
+  setMasters: (v) => set({ masters: v }),
 
   preview: null,
   setPreview: (v) => set({ preview: v }),

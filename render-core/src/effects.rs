@@ -38,18 +38,83 @@ pub mod builtin_id {
     pub const WOBBLE: u32 = 3;
 }
 
+/// §5.5 UI metadata on a scalar input — lets the UI/agent render a control
+/// without guessing ranges. All optional; `None` means "the author didn't
+/// say" and consumers pick their own default.
+#[derive(Debug, Clone, Default)]
+pub struct ScalarMeta {
+    pub min: Option<f32>,
+    pub max: Option<f32>,
+    pub step: Option<f32>,
+    pub unit: Option<String>,
+    /// Widget hint: "slider" | "knob" | "toggle". Advisory only.
+    pub widget: Option<String>,
+}
+
+impl ScalarMeta {
+    fn range(min: f32, max: f32, step: f32) -> Self {
+        Self {
+            min: Some(min),
+            max: Some(max),
+            step: Some(step),
+            unit: None,
+            widget: Some("slider".into()),
+        }
+    }
+}
+
 /// Declared input on an effect. Drives both scene-time param parsing and
 /// the params_f / params_c slot layout the shader sees.
 #[derive(Debug, Clone)]
 pub enum InputSlot {
-    Scalar { name: String, default: f32 },
-    Color { name: String, default: [f32; 4] },
+    Scalar {
+        name: String,
+        default: f32,
+        meta: ScalarMeta,
+    },
+    Color {
+        name: String,
+        default: [f32; 4],
+        /// Widget hint ("palette" | "color"). Advisory only.
+        widget: Option<String>,
+    },
 }
 
 impl InputSlot {
     pub fn name(&self) -> &str {
         match self {
             InputSlot::Scalar { name, .. } | InputSlot::Color { name, .. } => name,
+        }
+    }
+
+    /// JSON shape served by `effect.describe` — one entry per input, typed,
+    /// with whatever UI metadata the descriptor declared.
+    pub fn describe(&self) -> Value {
+        match self {
+            InputSlot::Scalar {
+                name,
+                default,
+                meta,
+            } => serde_json::json!({
+                "name": name,
+                "type": "float",
+                "default": default,
+                "min": meta.min,
+                "max": meta.max,
+                "step": meta.step,
+                "unit": meta.unit,
+                "widget": meta.widget,
+            }),
+            InputSlot::Color {
+                name,
+                default,
+                widget,
+            } => serde_json::json!({
+                "name": name,
+                "type": "color",
+                "default": default,
+                "widget": widget,
+            }),
         }
     }
 }
@@ -127,7 +192,7 @@ impl EffectBinding {
         let mut colors = Vec::new();
         for input in &def.inputs {
             match input {
-                InputSlot::Scalar { name, default } => {
+                InputSlot::Scalar { name, default, .. } => {
                     let v = params_obj.and_then(|m| m.get(name));
                     let resolved = match v {
                         Some(value) => ScalarValue::parse(value)
@@ -136,7 +201,7 @@ impl EffectBinding {
                     };
                     scalars.push(resolved);
                 }
-                InputSlot::Color { name, default } => {
+                InputSlot::Color { name, default, .. } => {
                     let v = params_obj.and_then(|m| m.get(name));
                     let resolved = match v {
                         Some(value) => parse_color_value(value)
@@ -189,6 +254,18 @@ struct DescriptorInput {
     ty: String,
     #[serde(default)]
     default: Option<Value>,
+    // §5.5 UI metadata — all optional so pre-existing descriptors keep
+    // parsing unchanged.
+    #[serde(default)]
+    min: Option<f32>,
+    #[serde(default)]
+    max: Option<f32>,
+    #[serde(default)]
+    step: Option<f32>,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    widget: Option<String>,
 }
 
 impl DescriptorInput {
@@ -203,6 +280,13 @@ impl DescriptorInput {
                 Ok(InputSlot::Scalar {
                     name: self.name,
                     default,
+                    meta: ScalarMeta {
+                        min: self.min,
+                        max: self.max,
+                        step: self.step,
+                        unit: self.unit,
+                        widget: self.widget,
+                    },
                 })
             }
             "color" | "rgba" => {
@@ -214,6 +298,7 @@ impl DescriptorInput {
                 Ok(InputSlot::Color {
                     name: self.name,
                     default,
+                    widget: self.widget,
                 })
             }
             other => bail!("unsupported input type {other:?} for {:?}", self.name),
@@ -336,6 +421,21 @@ impl EffectRegistry {
             .ok_or_else(|| anyhow!("unknown effect {:?}", name))
     }
 
+    /// §5.5 `effect.describe` payload — one named effect, or the full
+    /// catalog sorted by name when `name` is `None`.
+    pub fn describe(&self, name: Option<&str>) -> Result<Value> {
+        match name {
+            Some(n) => self.resolve_named(n).map(|d| describe_def(&d)),
+            None => {
+                let mut defs: Vec<&EffectDef> = self.effects.values().collect();
+                defs.sort_by(|a, b| a.name.cmp(&b.name));
+                Ok(serde_json::json!({
+                    "effects": defs.iter().map(|d| describe_def(d)).collect::<Vec<_>>(),
+                }))
+            }
+        }
+    }
+
     /// Build an effect def for an inline `{ inline: true, wgsl: ..., inputs: [...] }`
     /// spec. Doesn't touch the registry — inline effects are one-shot.
     pub fn resolve_inline(&self, spec: &InlineEffectSpec) -> Result<EffectDef> {
@@ -371,6 +471,17 @@ pub struct InlineEffectSpec {
     pub name: Option<String>,
     #[serde(default)]
     inputs: Vec<DescriptorInput>,
+}
+
+fn describe_def(def: &EffectDef) -> Value {
+    serde_json::json!({
+        "name": def.name,
+        "kind": match def.kind {
+            EffectKind::BuiltIn { .. } => "builtin",
+            EffectKind::User { .. } => "user",
+        },
+        "inputs": def.inputs.iter().map(InputSlot::describe).collect::<Vec<_>>(),
+    })
 }
 
 fn combined_mtime(shader: &Path, descriptor: &Path) -> Option<SystemTime> {
@@ -411,14 +522,18 @@ fn load_user_effect(name: &str, shader_path: &Path, descriptor_path: &Path) -> R
 
 fn built_in_defs() -> Vec<EffectDef> {
     use builtin_id::*;
+    // §5.5: built-ins declare UI metadata like any user descriptor would, so
+    // `effect.describe` renders controls without guessing ranges.
+    let color = |name: &str, default: [f32; 4]| InputSlot::Color {
+        name: name.into(),
+        default,
+        widget: None,
+    };
     vec![
         EffectDef {
             name: "tint".into(),
             kind: EffectKind::BuiltIn { effect_id: TINT },
-            inputs: vec![InputSlot::Color {
-                name: "color".into(),
-                default: [1.0, 1.0, 1.0, 1.0],
-            }],
+            inputs: vec![color("color", [1.0, 1.0, 1.0, 1.0])],
         },
         EffectDef {
             name: "hueCycle".into(),
@@ -429,11 +544,12 @@ fn built_in_defs() -> Vec<EffectDef> {
                 InputSlot::Scalar {
                     name: "phase".into(),
                     default: 0.0,
+                    meta: ScalarMeta::range(0.0, 1.0, 0.001),
                 },
-                InputSlot::Color { name: "color0".into(), default: [0.1, 0.7, 0.3, 1.0] },
-                InputSlot::Color { name: "color1".into(), default: [0.3, 0.9, 0.4, 1.0] },
-                InputSlot::Color { name: "color2".into(), default: [0.9, 0.7, 0.2, 1.0] },
-                InputSlot::Color { name: "color3".into(), default: [0.6, 0.2, 0.5, 1.0] },
+                color("color0", [0.1, 0.7, 0.3, 1.0]),
+                color("color1", [0.3, 0.9, 0.4, 1.0]),
+                color("color2", [0.9, 0.7, 0.2, 1.0]),
+                color("color3", [0.6, 0.2, 0.5, 1.0]),
             ],
         },
         EffectDef {
@@ -443,9 +559,17 @@ fn built_in_defs() -> Vec<EffectDef> {
             // params_f[1] = base intensity (low-level always-on tint),
             // params_c[0] = flash color.
             inputs: vec![
-                InputSlot::Scalar { name: "envelope".into(), default: 0.0 },
-                InputSlot::Scalar { name: "base".into(), default: 0.0 },
-                InputSlot::Color { name: "color".into(), default: [1.0, 1.0, 1.0, 1.0] },
+                InputSlot::Scalar {
+                    name: "envelope".into(),
+                    default: 0.0,
+                    meta: ScalarMeta::range(0.0, 1.0, 0.005),
+                },
+                InputSlot::Scalar {
+                    name: "base".into(),
+                    default: 0.0,
+                    meta: ScalarMeta::range(0.0, 1.0, 0.005),
+                },
+                color("color", [1.0, 1.0, 1.0, 1.0]),
             ],
         },
         EffectDef {
@@ -456,10 +580,25 @@ fn built_in_defs() -> Vec<EffectDef> {
             // params_f[2] = time (driver),
             // params_c[0] = ink color.
             inputs: vec![
-                InputSlot::Scalar { name: "amp".into(), default: 0.02 },
-                InputSlot::Scalar { name: "freq".into(), default: 8.0 },
-                InputSlot::Scalar { name: "time".into(), default: 0.0 },
-                InputSlot::Color { name: "color".into(), default: [0.8, 0.4, 0.9, 1.0] },
+                InputSlot::Scalar {
+                    name: "amp".into(),
+                    default: 0.02,
+                    meta: ScalarMeta::range(0.0, 0.2, 0.001),
+                },
+                InputSlot::Scalar {
+                    name: "freq".into(),
+                    default: 8.0,
+                    meta: ScalarMeta::range(0.0, 64.0, 0.1),
+                },
+                InputSlot::Scalar {
+                    name: "time".into(),
+                    default: 0.0,
+                    meta: ScalarMeta {
+                        unit: Some("s".into()),
+                        ..Default::default()
+                    },
+                },
+                color("color", [0.8, 0.4, 0.9, 1.0]),
             ],
         },
     ]
@@ -508,6 +647,19 @@ mod tests {
         let err =
             EffectBinding::from_params(def, &json!({"colour": "#fff"})).unwrap_err();
         assert!(format!("{err:#}").contains("has no param"));
+    }
+
+    #[test]
+    fn describe_includes_ui_metadata() {
+        let r = EffectRegistry::new(None);
+        let v = r.describe(Some("wobble")).unwrap();
+        let inputs = v["inputs"].as_array().unwrap();
+        let amp = inputs.iter().find(|i| i["name"] == "amp").unwrap();
+        assert_eq!(amp["type"], "float");
+        assert!((amp["max"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+        let all = r.describe(None).unwrap();
+        assert!(all["effects"].as_array().unwrap().len() >= 4);
+        assert!(r.describe(Some("nope")).is_err());
     }
 
     #[test]

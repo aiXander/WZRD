@@ -55,13 +55,46 @@ pub struct BindingSpec {
     pub params: serde_json::Value,
 }
 
+/// Layer selector. Exactly one of `all` / `id` / `tag` / `group` must be
+/// set (validated in [`resolve_selector`]). The optional `pick` narrows the
+/// resolved set to a single member (§5.2) — statically at scene load or
+/// re-picked on a transport-locked cycle.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum SelectorSpec {
-    All { all: bool },
-    Id { id: String },
-    Tag { tag: String },
-    Group { group: String },
+pub struct SelectorSpec {
+    #[serde(default)]
+    pub all: Option<bool>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub pick: Option<PickSpec>,
+}
+
+/// §5.2 `pick` — choose one member of the resolved selection. Deterministic:
+/// the choice is a pure hash of (binding id, pick cycle), where the cycle
+/// derives from transport time, so identical runs (and the §5.6 design/live
+/// legs) pick identical layers.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PickSpec {
+    pub mode: PickMode,
+    /// Re-pick cadence for `random_each` — a `clock.*` driver object
+    /// (e.g. `{ "driver": "clock.bars", "n": 4 }`). Parsed strictly by
+    /// `drivers::PickRate` at plan build. Required for `random_each`,
+    /// rejected for `random_static`.
+    #[serde(default)]
+    pub rate: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickMode {
+    /// Re-pick one member each time the rate driver wraps.
+    RandomEach,
+    /// Pick once at scene load (stable across runs for the same binding id).
+    RandomStatic,
 }
 
 /// Effect reference. The string form points at a built-in or
@@ -96,6 +129,21 @@ impl SceneFile {
             if !seen.insert(b.id.clone()) {
                 bail!("duplicate binding id {:?}", b.id);
             }
+            if let Some(pick) = &b.select.pick {
+                match pick.mode {
+                    PickMode::RandomEach if pick.rate.is_none() => bail!(
+                        "binding {:?}: pick mode \"random_each\" requires a `rate` \
+                         (e.g. {{ \"driver\": \"clock.bars\", \"n\": 4 }})",
+                        b.id
+                    ),
+                    PickMode::RandomStatic if pick.rate.is_some() => bail!(
+                        "binding {:?}: pick mode \"random_static\" picks once at \
+                         scene load — `rate` is meaningless here, remove it",
+                        b.id
+                    ),
+                    _ => {}
+                }
+            }
         }
         Ok(scene)
     }
@@ -121,31 +169,101 @@ impl SceneFile {
 }
 
 /// Resolve a selector against a loaded pack into an ordered set of slice
-/// indices. Order follows pack manifest order so blend behaviour is stable.
+/// indices. Order is ascending slice index (pack manifest order) so blend
+/// behaviour — and §5.2 `layer_index` / pick indexing — is stable.
+///
+/// `pick` does NOT narrow the set here: the compositor builds passes for
+/// every member and toggles which one draws, so a re-pick is a flag flip,
+/// not a plan rebuild.
 pub fn resolve_selector(selector: &SelectorSpec, pack: &LoadedPack) -> Result<Vec<u32>> {
-    let mut slices: Vec<u32> = match selector {
-        SelectorSpec::All { all } => {
-            if !*all {
-                bail!("selector with `all: false` is meaningless");
-            }
-            (0..pack.layer_count).collect()
-        }
-        SelectorSpec::Id { id } => vec![*pack
+    let mut slices: Vec<u32> = match (
+        &selector.all,
+        &selector.id,
+        &selector.tag,
+        &selector.group,
+    ) {
+        (Some(true), None, None, None) => (0..pack.layer_count).collect(),
+        (Some(false), None, None, None) => bail!("selector with `all: false` is meaningless"),
+        (None, Some(id), None, None) => vec![*pack
             .id_to_slice
             .get(id)
             .ok_or_else(|| anyhow!("selector references unknown layer id {:?}", id))?],
-        SelectorSpec::Tag { tag } => pack
+        (None, None, Some(tag), None) => pack
             .tag_to_slices
             .get(tag)
             .cloned()
             .ok_or_else(|| anyhow!("selector references unknown tag {:?}", tag))?,
-        SelectorSpec::Group { group } => pack
+        (None, None, None, Some(group)) => pack
             .group_to_slices
             .get(group)
             .cloned()
             .ok_or_else(|| anyhow!("selector references unknown group {:?}", group))?,
+        _ => bail!("selector must set exactly one of `all` / `id` / `tag` / `group`"),
     };
     slices.sort_unstable();
     slices.dedup();
     Ok(slices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scene_with_select(select: &str) -> String {
+        format!(
+            r#"{{ "version": 1, "pack": "p", "bindings": [
+                 {{ "id": "b1", "select": {select}, "effect": "tint", "params": {{}} }}
+               ] }}"#
+        )
+    }
+
+    #[test]
+    fn parses_pick_random_each_with_rate() {
+        let scene = SceneFile::parse(&scene_with_select(
+            r#"{ "tag": "leaves", "pick": { "mode": "random_each",
+                 "rate": { "driver": "clock.bars", "n": 4 } } }"#,
+        ))
+        .unwrap();
+        let pick = scene.bindings[0].select.pick.as_ref().unwrap();
+        assert_eq!(pick.mode, PickMode::RandomEach);
+        assert!(pick.rate.is_some());
+    }
+
+    #[test]
+    fn parses_pick_random_static_without_rate() {
+        let scene = SceneFile::parse(&scene_with_select(
+            r#"{ "tag": "leaves", "pick": { "mode": "random_static" } }"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            scene.bindings[0].select.pick.as_ref().unwrap().mode,
+            PickMode::RandomStatic
+        );
+    }
+
+    #[test]
+    fn rejects_random_each_without_rate() {
+        let err = SceneFile::parse(&scene_with_select(
+            r#"{ "tag": "leaves", "pick": { "mode": "random_each" } }"#,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("rate"), "{err}");
+    }
+
+    #[test]
+    fn rejects_random_static_with_rate() {
+        let err = SceneFile::parse(&scene_with_select(
+            r#"{ "tag": "leaves", "pick": { "mode": "random_static",
+                 "rate": { "driver": "clock.bars", "n": 4 } } }"#,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("random_static"), "{err}");
+    }
+
+    #[test]
+    fn plain_selectors_still_parse() {
+        for select in [r#"{ "all": true }"#, r#"{ "id": "x" }"#, r#"{ "tag": "t" }"#, r#"{ "group": "g" }"#] {
+            SceneFile::parse(&scene_with_select(select)).unwrap();
+        }
+    }
 }
