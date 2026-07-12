@@ -63,6 +63,11 @@ export type Masters = {
   saturation: number;
   audioListen: number;
 };
+/** §5.6 — the `masters` channel now carries both legs' values. */
+export type MastersState = {
+  live: Masters;
+  design: Masters;
+};
 export type LogLine = {
   level: string;
   target: string;
@@ -124,9 +129,10 @@ interface Store {
   connectivity: Connectivity | null;
   setConnectivity: (v: Connectivity) => void;
 
-  // §5.4 masters — sticky; engine emits on startup and on every master.set
-  masters: Masters | null;
-  setMasters: (v: Masters) => void;
+  // §5.4/§5.6 masters — sticky, both legs; engine emits on startup, every
+  // master.set, and promote/pull control-state copies.
+  masters: MastersState | null;
+  setMasters: (v: MastersState) => void;
 
   // §5.6 two-deck state — sticky `deck` channel (promote phase, mix,
   // preview source). Null until the engine's first emission arrives.

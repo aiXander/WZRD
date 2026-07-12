@@ -9,10 +9,14 @@ is purely additive.
 
 Since the §5.6 two-deck landing (2026-07-12) the shell drives a **two-leg**
 engine: every edit made here lands on the *design* leg (the projector keeps
-playing the live leg untouched), the Perform deck bar's LIVE⇄DESIGN toggle
-picks which leg the native preview shows, and **PROMOTE** crossfades the
-projector onto the design content (bar-quantized by default). **PULL**
-resets design back to live. New shaders entering design are pre-flight
+playing the live leg untouched), and the Perform deck bar's LIVE⇄DESIGN
+toggle is a **full control switch** — it picks which leg the native preview
+shows *and* which leg the masters row + driver rack read and drive (each
+leg owns its own clock, masters, knobs and overrides, so tuning DESIGN
+never touches the show). **PROMOTE** crossfades the projector onto the
+design content (bar-quantized by default) and copies the design tuning
+live — what you previewed is what the crowd gets. **PULL** resets design
+back to live (content + controls). New shaders entering design are pre-flight
 probed; verdicts (green/yellow/red + predicted full-res p95) surface in the
 Debug hot-reload history, with the A/B thresholds editable in Debug. Full
 contract: `../docs/reference/render-engine.md` §2.6.

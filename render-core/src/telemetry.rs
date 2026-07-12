@@ -265,10 +265,12 @@ impl Bus {
         );
     }
 
-    /// §5.4 masters snapshot — sticky, emitted at startup and on every
-    /// `master.set` (from the WS thread; the bus is thread-safe).
-    pub fn emit_masters(&self, snapshot: crate::drivers::MastersSnapshot) {
-        self.emit("masters", serde_json::to_value(snapshot).expect("masters"));
+    /// §5.4/§5.6 masters snapshot — sticky, emitted at startup, on every
+    /// `master.set`, and when promote/pull copy a leg's control state.
+    /// Carries **both legs** (full-control-switch: the UI shows whichever
+    /// leg the deck toggle selects).
+    pub fn emit_masters(&self, state: MastersState) {
+        self.emit("masters", serde_json::to_value(state).expect("masters"));
     }
 
     pub fn emit_log(&self, level: &str, target: &str, message: &str) {
@@ -306,6 +308,14 @@ pub struct ProbeReport {
     pub band: String,
     pub thumbnail_b64: Option<String>,
     pub verdicts: Vec<crate::probe::KeyVerdict>,
+}
+
+/// §5.4/§5.6 — per-leg masters, the `masters` channel payload. On single-leg
+/// (headless) runs both fields report the one live set.
+#[derive(Debug, Clone, Serialize)]
+pub struct MastersState {
+    pub live: crate::drivers::MastersSnapshot,
+    pub design: crate::drivers::MastersSnapshot,
 }
 
 /// §5.6 deck snapshot — the two-leg state the UI's promote controls render.

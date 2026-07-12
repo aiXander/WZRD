@@ -101,19 +101,32 @@ export const sceneLoad = (jsonText: string) =>
 export const sceneReload = () => invoke<unknown>('scene_reload');
 export const wgslValidate = (source: string) =>
   invoke<WgslValidateResult>('wgsl_validate', { source });
-/** Live knob path — no scene rebuild, engine picks it up next frame. */
-export const paramSet = (name: string, value: number) =>
-  invoke<unknown>('param_set', { name, value });
+/** §5.6 — which leg a control write targets (the deck toggle's position). */
+export type LegName = 'live' | 'design';
+
+/**
+ * Live knob path — no scene rebuild, engine picks it up next frame.
+ * §5.6: per-leg; pass the deck toggle's leg (engine default: design).
+ */
+export const paramSet = (name: string, value: number, leg?: LegName) =>
+  invoke<unknown>('param_set', { name, value, leg: leg ?? null });
 /**
  * §5.5 live per-binding override — pins any scalar param (const or
  * driver-bound) without a rebuild; `null` clears it. Persisted in the
- * session sidecar, never written into scene.json.
+ * session sidecar, never written into scene.json. §5.6: per-leg.
  */
-export const paramOverride = (binding: string, param: string, value: number | null) =>
-  invoke<unknown>('param_override', { binding, param, value });
-/** §5.4 masters — brightness | speed | saturation | audioListen. */
-export const masterSet = (name: string, value: number) =>
-  invoke<unknown>('master_set', { name, value });
+export const paramOverride = (
+  binding: string,
+  param: string,
+  value: number | null,
+  leg?: LegName
+) => invoke<unknown>('param_override', { binding, param, value, leg: leg ?? null });
+/**
+ * §5.4 masters — brightness | speed | saturation | audioListen.
+ * §5.6: per-leg; the deck toggle picks which leg your faders drive.
+ */
+export const masterSet = (name: string, value: number, leg?: LegName) =>
+  invoke<unknown>('master_set', { name, value, leg: leg ?? null });
 /** §5.5 effect input descriptors (ranges/steps/widgets). */
 export const effectDescribe = (name?: string) =>
   invoke<unknown>('effect_describe', { name: name ?? null });

@@ -66,8 +66,8 @@ export function DeckBar() {
             }
             title={
               s === 'live'
-                ? 'preview the projector output (masters applied, no warp)'
-                : 'preview the design scratchpad (un-mastered)'
+                ? 'preview + control the LIVE leg (the show): masters, knobs and overrides drive the projector'
+                : 'preview + control the DESIGN leg (the scratchpad): nothing you tune here touches the show until PROMOTE'
             }
             onClick={() => run(previewSetSource(s))}
           >

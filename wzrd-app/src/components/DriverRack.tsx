@@ -9,12 +9,20 @@
 //   - colour string       → colour picker → debounced scene commit.
 //   - clock./audio. driver→ read-only live value bar (the source drives it).
 //
-// Live values arrive on the `drivers` telemetry channel (~10 Hz).
+// Live values arrive on the `drivers` telemetry channel (~10 Hz) — since
+// §5.6 the engine emits the rows of whichever leg the deck toggle selects,
+// and every knob write here targets that same leg (full-control-switch:
+// tuning DESIGN never touches the show; PROMOTE copies the tuning live).
 
 import { useMemo, useRef, useState } from 'react';
-import { paramOverride, paramSet } from '../api/ipc';
+import { paramOverride, paramSet, type LegName } from '../api/ipc';
 import { commitSceneMutation } from '../state/sceneCommit';
 import { useStore, type DriverRow } from '../state/store';
+
+/** The leg every rack write targets — the deck toggle's position. */
+function controlLeg(): LegName {
+  return useStore.getState().deck?.preview_source ?? 'design';
+}
 
 // Trailing throttle so slider drags don't flood the IPC bridge.
 const throttleTimers: Record<string, number> = {};
@@ -22,7 +30,7 @@ function sendParam(name: string, value: number) {
   if (throttleTimers[name] != null) window.clearTimeout(throttleTimers[name]);
   throttleTimers[name] = window.setTimeout(() => {
     delete throttleTimers[name];
-    paramSet(name, value).catch((e) => console.warn('param.set', name, e));
+    paramSet(name, value, controlLeg()).catch((e) => console.warn('param.set', name, e));
   }, 25);
 }
 
@@ -31,7 +39,7 @@ function sendOverride(binding: string, param: string, value: number) {
   if (throttleTimers[key] != null) window.clearTimeout(throttleTimers[key]);
   throttleTimers[key] = window.setTimeout(() => {
     delete throttleTimers[key];
-    paramOverride(binding, param, value).catch((e) =>
+    paramOverride(binding, param, value, controlLeg()).catch((e) =>
       console.warn('param.set override', key, e)
     );
   }, 25);
@@ -247,7 +255,7 @@ function ConstControl({
 
   function reset() {
     setLocal(null);
-    paramOverride(bindingId, paramName, null).catch((e) =>
+    paramOverride(bindingId, paramName, null, controlLeg()).catch((e) =>
       console.warn('param.set clear', bindingId, paramName, e)
     );
   }

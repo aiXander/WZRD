@@ -7,7 +7,7 @@
 // surface inline. Routes share the top status strip so it's always glanceable.
 
 import { useEffect } from 'react';
-import { useStore, type Masters } from './state/store';
+import { useStore, type MastersState } from './state/store';
 import {
   engineStatus,
   lastPayload,
@@ -61,7 +61,7 @@ export default function App() {
       try {
         // Masters are sticky — the engine emitted them before the webview
         // mounted, so hydrate from the shell's last-payload snapshot.
-        const m = await lastPayload<Masters>('masters');
+        const m = await lastPayload<MastersState>('masters');
         if (m) tStore.setMasters(m);
       } catch (e) {
         console.warn('last_payload(masters):', e);

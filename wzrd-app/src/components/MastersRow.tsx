@@ -1,11 +1,16 @@
 // §5.4 masters row — always visible in Perform. Engine-level, operator-owned
 // globals the AI can never touch: they live outside scene.json entirely and
-// persist via the session sidecar. Live values arrive on the sticky
-// `masters` telemetry channel; a slider drag wins locally so the knob never
-// jumps under the finger.
+// persist via the session sidecar. Values arrive on the sticky `masters`
+// telemetry channel; a slider drag wins locally so the knob never jumps
+// under the finger.
+//
+// §5.6 full-control-switch: the deck toggle picks which leg these faders
+// drive — tuning DESIGN never touches the show; PROMOTE copies the design
+// values live. Switching legs re-reads that leg's values (local drag state
+// resets so the faders snap to the newly selected leg).
 
-import { useState } from 'react';
-import { masterSet } from '../api/ipc';
+import { useEffect, useState } from 'react';
+import { masterSet, type LegName } from '../api/ipc';
 import { useStore, type Masters } from '../state/store';
 
 type MasterDef = {
@@ -26,24 +31,34 @@ const MASTERS: MasterDef[] = [
 // Trailing throttle so drags don't flood the IPC bridge (same cadence as the
 // driver rack's param path).
 const timers: Record<string, number> = {};
-function sendMaster(name: string, value: number) {
+function sendMaster(name: string, value: number, leg: LegName) {
   if (timers[name] != null) window.clearTimeout(timers[name]);
   timers[name] = window.setTimeout(() => {
     delete timers[name];
-    masterSet(name, value).catch((e) => console.warn('master.set', name, e));
+    masterSet(name, value, leg).catch((e) => console.warn('master.set', name, e));
   }, 25);
 }
 
 export function MastersRow() {
   const masters = useStore((s) => s.masters);
+  const leg: LegName = useStore((s) => s.deck?.preview_source) ?? 'design';
   return (
     <div className="flex items-center gap-5">
-      <span className="text-[10px] tracking-widest text-zinc-500">MASTERS</span>
+      <span
+        className={
+          'text-[10px] tracking-widest ' +
+          (leg === 'live' ? 'text-red-300' : 'text-emerald-300')
+        }
+        title="these faders drive the leg selected by the deck toggle"
+      >
+        MASTERS · {leg.toUpperCase()}
+      </span>
       {MASTERS.map((def) => (
         <MasterSlider
           key={def.key}
           def={def}
-          liveValue={masters ? masters[def.key] : undefined}
+          leg={leg}
+          liveValue={masters ? masters[leg]?.[def.key] : undefined}
         />
       ))}
     </div>
@@ -52,20 +67,24 @@ export function MastersRow() {
 
 function MasterSlider({
   def,
+  leg,
   liveValue,
 }: {
   def: MasterDef;
+  leg: LegName;
   liveValue: number | undefined;
 }) {
   // Local value wins while (and after) dragging — a stale telemetry frame
   // must never move a fader mid-set.
   const [local, setLocal] = useState<number | null>(null);
+  // Switching legs must snap the fader to the newly selected leg's value.
+  useEffect(() => setLocal(null), [leg]);
   const shown = local ?? liveValue ?? def.default;
   const isDefault = Math.abs(shown - def.default) < 1e-4;
 
   function set(v: number) {
     setLocal(v);
-    sendMaster(def.key, v);
+    sendMaster(def.key, v, leg);
   }
 
   return (

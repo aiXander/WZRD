@@ -104,6 +104,11 @@ autosave restore). Residue worth knowing:
 - Live-freeze is implemented via **content-derived pipeline keys** + a
   retain-set GC, not by guarding eviction of path-keyed pipelines — an
   edited shader simply gets a new cache slot while live keeps the old one.
+- **Decision reversed same-day (2026-07-12):** the original "knobs shared
+  across legs, no copy needed" call died on first contact — design speed
+  4× also sped the show. The deck toggle is now a **full control switch**:
+  per-leg transport/masters/knobs/overrides, copied design→live on promote
+  and live→design on pull (reference §2.6 has the full rationale).
 - Probe frames interleave with live frames (~3.5 ms/loop-iteration budget);
   overhead is calibrated once per boot against a trivial shader.
 - Headless (no `--ws-addr`) collapses to a single live leg — no design

@@ -42,7 +42,7 @@ use crate::scene::{resolve_selector, SceneFile};
 use crate::session::{self, SessionFile};
 use crate::telemetry::{
     AudioSnapshot, Bus, Connectivity, ConnectivityCell, DeckSnapshot, DriverSnapshot,
-    FpsAccumulator, FrameCounts, HotReloadEvent, PreviewSampler, ProbeReport,
+    FpsAccumulator, FrameCounts, HotReloadEvent, MastersState, PreviewSampler, ProbeReport,
 };
 use crate::watch::{ChangeKind, SceneWatcher};
 use crate::Cli;
@@ -182,16 +182,28 @@ pub struct Core {
     audio_was_fresh: Option<bool>,
     last_audio_pill: Instant,
 
-    /// Live `ui.slider` values, shared with the WS server (`param.set`).
+    /// **Live-leg** `ui.slider` values, shared with the WS server
+    /// (`param.set {leg:"live"}`).
     sliders: Arc<SliderBank>,
 
-    /// §5.4 masters — operator-owned globals shared with the WS server
-    /// (`master.set`). Never reachable from scene.json.
+    /// §5.4 **live-leg** masters — operator-owned globals shared with the WS
+    /// server (`master.set`). Never reachable from scene.json.
     masters: Arc<Masters>,
 
-    /// §5.5 per-binding scalar overrides, shared with the WS server
-    /// (`param.set {binding, param, value}`).
+    /// §5.5 **live-leg** per-binding scalar overrides, shared with the WS
+    /// server (`param.set {binding, param, value}`).
     overrides: Arc<ParamOverrides>,
+
+    /// §5.6 full-control-switch: the design leg's own control state — the
+    /// deck toggle switches the *entire* control surface between legs, so
+    /// tuning design (speed, brightness, knobs…) never touches the show.
+    /// Promote copies design→live (what you previewed is what goes live);
+    /// pull copies live→design. On single-leg runs these alias the live
+    /// Arcs and `design_transport` is simply never stepped.
+    design_sliders: Arc<SliderBank>,
+    design_masters: Arc<Masters>,
+    design_overrides: Arc<ParamOverrides>,
+    design_transport: Transport,
 
     /// §5.3 session sidecar path (`session.json` next to the scene) + the
     /// calibration loaded from it. `session_calibration` takes precedence
@@ -302,9 +314,25 @@ impl Core {
             live_scene_state.set(raw);
         }
 
+        // §5.6: a control surface (WS server — set by the Tauri host too)
+        // means the two-deck topology; headless-only runs stay single-leg.
+        let two_leg = cli.ws_addr.is_some();
+
         let sliders = SliderBank::new();
         let masters = Masters::new();
         let overrides = ParamOverrides::new();
+        // §5.6 full-control-switch: the design leg owns its control state.
+        // Single-leg aliases the live Arcs so the `leg` RPC param is a no-op.
+        let (design_sliders, design_masters, design_overrides) = if two_leg {
+            (SliderBank::new(), Masters::new(), ParamOverrides::new())
+        } else {
+            (
+                Arc::clone(&sliders),
+                Arc::clone(&masters),
+                Arc::clone(&overrides),
+            )
+        };
+        let design_transport = Transport::new(scene.transport.bpm);
         let probe_thresholds = ProbeThresholds::new();
         let session_dirty = Arc::new(AtomicU64::new(0));
 
@@ -329,6 +357,14 @@ impl Core {
                 if let Some(pt) = &s.probe_thresholds {
                     probe_thresholds.restore(pt);
                 }
+                // §5.6 — both legs boot with the same operator state (the
+                // sidecar persists the live/show truth); they diverge only
+                // through leg-targeted writes.
+                if two_leg {
+                    design_masters.copy_from(&masters);
+                    design_sliders.copy_from(&sliders);
+                    design_overrides.copy_from(&overrides);
+                }
                 log::info!(
                     "restored session sidecar {} ({} knobs, {} overrides{})",
                     session_path.display(),
@@ -349,7 +385,10 @@ impl Core {
         }
         // Seed the sticky masters channel so late subscribers see the
         // restored values, not defaults.
-        bus.emit_masters(masters.snapshot());
+        bus.emit_masters(MastersState {
+            live: masters.snapshot(),
+            design: design_masters.snapshot(),
+        });
 
         // §5.11 — a termination signal snapshots the session before exit, so
         // a power-blink/systemd-stop comes back close to where it was.
@@ -377,6 +416,9 @@ impl Core {
             sliders: Arc::clone(&sliders),
             masters: Arc::clone(&masters),
             overrides: Arc::clone(&overrides),
+            design_sliders: Arc::clone(&design_sliders),
+            design_masters: Arc::clone(&design_masters),
+            design_overrides: Arc::clone(&design_overrides),
             session_dirty: Arc::clone(&session_dirty),
             probe_thresholds: Arc::clone(&probe_thresholds),
         };
@@ -403,9 +445,6 @@ impl Core {
             log::info!("frame cap disabled (--frame-cap-hz 0)");
         }
 
-        // §5.6: a control surface (WS server — set by the Tauri host too)
-        // means the two-deck topology; headless-only runs stay single-leg.
-        let two_leg = cli.ws_addr.is_some();
         if two_leg {
             log::info!("two-deck mode: authoring targets the design leg; `promote` goes live");
         }
@@ -445,6 +484,10 @@ impl Core {
             sliders,
             masters,
             overrides,
+            design_sliders,
+            design_masters,
+            design_overrides,
+            design_transport,
             session_path,
             session_calibration,
             scene_calib_warned: false,
@@ -521,6 +564,9 @@ impl Core {
                 raw: raw.clone(),
                 autosave_dirty_at: None,
             });
+            // Design clock starts in lockstep with live (§5.6 — they
+            // diverge only when the operator bends design speed/tempo).
+            self.design_transport.sync_from(&self.transport);
             self.emit_deck();
 
             // §5.6 design-leg autosave restore: a crash mid-design must not
@@ -872,8 +918,9 @@ impl Core {
                         scalar_metas.get(i).copied().flatten(),
                         scalar_names
                             .get(i)
-                            .and_then(|n| self.overrides.get(&binding.id, n)),
-                        &self.sliders,
+                            .and_then(|n| self.design_overrides.get(&binding.id, n)),
+                        // Probing gates the *design* leg — its knobs apply.
+                        &self.design_sliders,
                     )
                 })
                 .collect();
@@ -1016,6 +1063,11 @@ impl Core {
                 design.plan = Some(plan);
                 design.raw = raw.clone();
                 design.autosave_dirty_at = Some(Instant::now());
+                // The design leg's clock follows the design scene's tempo
+                // (§5.6 full-control-switch: live tempo is untouched until
+                // promote).
+                self.design_transport
+                    .set_bpm(design.scene.transport.bpm);
                 self.scene_state.set(raw);
                 self.gc_pipelines();
                 let probe_json = probe_report
@@ -1089,9 +1141,10 @@ impl Core {
 
     // ---------- §5.6 promote / pull / preview source ----------
 
-    /// Current transport bar time (4 beats/bar, matching `FrameContext`).
+    /// Current **live** transport bar time (4 beats/bar, matching
+    /// `FrameContext`) — promote quantizes to the crowd's musical time.
     fn bar_time(&self) -> f32 {
-        self.transport.elapsed_sec() * self.scene.transport.bpm.max(1.0) / 60.0 / 4.0
+        self.transport.elapsed_sec() * self.transport.bpm().max(1.0) / 60.0 / 4.0
     }
 
     /// `promote {fade_ms, quantize}` — crossfade the projector to the design
@@ -1173,8 +1226,18 @@ impl Core {
         design.raw = raw.clone();
         design.autosave_dirty_at = Some(Instant::now());
         self.scene_state.set(raw);
+        // §5.6 full-control-switch: pull copies the whole live control
+        // state back too — design becomes an exact replica of the show.
+        self.design_masters.copy_from(&self.masters);
+        self.design_sliders.copy_from(&self.sliders);
+        self.design_overrides.copy_from(&self.overrides);
+        self.design_transport.sync_from(&self.transport);
+        self.bus.emit_masters(MastersState {
+            live: self.masters.snapshot(),
+            design: self.design_masters.snapshot(),
+        });
         self.gc_pipelines();
-        log::info!("pull: design leg reset to the live scene");
+        log::info!("pull: design leg reset to the live scene (content + controls)");
         self.emit_deck();
         Ok(serde_json::json!({ "ok": true }))
     }
@@ -1247,7 +1310,20 @@ impl Core {
         self.scene = design.scene.clone();
         let raw = design.raw.clone();
         self.live_scene_state.set(raw);
-        self.transport.set_bpm(self.scene.transport.bpm);
+        // §5.6 full-control-switch: live adopts design's *entire* control
+        // state — masters (incl. speed), knobs, overrides, and the design
+        // clock itself — so the promoted content continues exactly as it
+        // looked in the design preview. Design keeps its copies (promote is
+        // a copy, not an exchange).
+        self.masters.copy_from(&self.design_masters);
+        self.sliders.copy_from(&self.design_sliders);
+        self.overrides.copy_from(&self.design_overrides);
+        self.transport.sync_from(&self.design_transport);
+        session::touch(&self.session_dirty);
+        self.bus.emit_masters(MastersState {
+            live: self.masters.snapshot(),
+            design: self.design_masters.snapshot(),
+        });
         // Both composites hold identical content at this instant (the fade
         // just finished at mix=1), so snapping mix back to 0 is invisible.
         self.mix = 0.0;
@@ -1416,10 +1492,15 @@ impl Core {
             return;
         }
         if let Some(gpu) = self.gpu.as_ref() {
+            // §5.6 full-control-switch: each position shows its own leg's
+            // masters — the preview is WYSIWYG for the leg you're driving.
             let source = if self.two_leg { self.preview_source } else { Leg::Live };
             let (b, s) = match source {
                 Leg::Live => (self.masters.brightness(), self.masters.saturation()),
-                Leg::Design => (1.0, 1.0),
+                Leg::Design => (
+                    self.design_masters.brightness(),
+                    self.design_masters.saturation(),
+                ),
             };
             if let Err(e) = gpu.render_preview(source, b, s) {
                 log::warn!("preview present failed: {e}");
@@ -1443,10 +1524,12 @@ impl Core {
         preview.maybe_capture(gpu, bus, texture);
     }
 
-    /// The plan whose structure telemetry reports (§5.6 blanket leg rule:
-    /// `frame_stats` pass counts + the `drivers` channel follow design).
+    /// The plan whose structure telemetry reports — §5.6 full-control-switch:
+    /// `frame_stats` counts + the `drivers` channel follow the deck toggle
+    /// (the leg the UI is currently driving), so the rack shows the values
+    /// your knobs actually move.
     fn stats_plan(&self) -> Option<&PassPlan> {
-        if self.two_leg {
+        if self.two_leg && self.preview_source == Leg::Design {
             self.design.as_ref().and_then(|d| d.plan.as_ref())
         } else {
             self.plan.as_ref()
@@ -1479,29 +1562,39 @@ impl Core {
             .or(self.scene.projector_calibration)
     }
 
-    /// Tick both legs against the shared transport/audio bus (§5.6: both
-    /// tick every frame so pick/phase state stays coherent; rendering the
-    /// design composite is demand-gated separately).
+    /// Tick both legs, each against **its own** control state (§5.6
+    /// full-control-switch: own transport/speed, own knobs, own overrides,
+    /// own audioListen — shared raw audio signal). Both tick every frame;
+    /// rendering the design composite is demand-gated separately.
     fn tick_legs(&mut self) {
         let Self {
             gpu,
             plan,
             design,
             transport,
+            design_transport,
             audio_state,
             sliders,
             masters,
             overrides,
+            design_sliders,
+            design_masters,
+            design_overrides,
             ..
         } = self;
         let Some(gpu) = gpu.as_ref() else { return };
-        let ctx = transport.frame_context(audio_state, sliders, masters.audio_listen());
         if let Some(plan) = plan.as_mut() {
+            let ctx = transport.frame_context(audio_state, sliders, masters.audio_listen());
             plan.tick(gpu, &ctx, overrides);
         }
         if let Some(d) = design.as_mut() {
             if let Some(p) = d.plan.as_mut() {
-                p.tick(gpu, &ctx, overrides);
+                let ctx = design_transport.frame_context(
+                    audio_state,
+                    design_sliders,
+                    design_masters.audio_listen(),
+                );
+                p.tick(gpu, &ctx, design_overrides);
             }
         }
     }
@@ -1512,8 +1605,12 @@ impl Core {
     /// on `OutOfMemory` it should shut down.
     pub fn redraw(&mut self) -> Result<(), wgpu::SurfaceError> {
         // §5.4 speed master bends the musical clock (integrated, never a
-        // scaled absolute time).
+        // scaled absolute time). §5.6: each leg's clock bends under its own
+        // speed master — design at 4× never touches the show.
         self.transport.step(self.masters.speed());
+        if self.two_leg {
+            self.design_transport.step(self.design_masters.speed());
+        }
         self.update_promote();
         let calibration = self.effective_calibration();
         if self.gpu.is_none() || self.plan.is_none() {
@@ -1573,6 +1670,9 @@ impl Core {
     /// by design, the preview shows the un-mastered composite.
     pub fn render_offscreen_frame(&mut self) {
         self.transport.step(self.masters.speed());
+        if self.two_leg {
+            self.design_transport.step(self.design_masters.speed());
+        }
         self.update_promote();
         if self.gpu.is_none() || self.plan.is_none() {
             return;
@@ -1627,14 +1727,26 @@ impl Core {
         }
 
         if self.last_drivers_emit.elapsed() >= Duration::from_millis(100) {
-            // §5.6 blanket leg rule: the driver rack reads the design leg.
+            // §5.6 full-control-switch: the driver rack reads whichever leg
+            // the deck toggle selects, evaluated with that leg's own
+            // transport/knobs/overrides.
+            let control_design = self.two_leg && self.preview_source == Leg::Design;
             if let Some(plan) = self.stats_plan() {
-                let ctx = self.transport.frame_context(
-                    &self.audio_state,
-                    &self.sliders,
-                    self.masters.audio_listen(),
-                );
-                let rows = plan.driver_rows(&ctx, &self.overrides);
+                let rows = if control_design {
+                    let ctx = self.design_transport.frame_context(
+                        &self.audio_state,
+                        &self.design_sliders,
+                        self.design_masters.audio_listen(),
+                    );
+                    plan.driver_rows(&ctx, &self.design_overrides)
+                } else {
+                    let ctx = self.transport.frame_context(
+                        &self.audio_state,
+                        &self.sliders,
+                        self.masters.audio_listen(),
+                    );
+                    plan.driver_rows(&ctx, &self.overrides)
+                };
                 self.bus.emit_drivers(DriverSnapshot { drivers: rows });
             }
             self.last_drivers_emit = Instant::now();

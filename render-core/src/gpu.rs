@@ -239,8 +239,6 @@ pub struct GpuContext {
 
     pub layer_bind_group_layout: wgpu::BindGroupLayout,
     pub layer_pipeline_layout: wgpu::PipelineLayout,
-    /// Shared per-frame uniform. Written each frame; read by every pass.
-    pub frame_state_buffer: wgpu::Buffer,
 
     /// Pipeline cache keyed by `pipeline_key`. Built-ins share
     /// `BUILTIN_PIPELINE_KEY`; user effects each get their own slot.
@@ -344,12 +342,6 @@ impl GpuContext {
             push_constant_ranges: &[],
         });
 
-        let frame_state_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("frame state uniform"),
-            contents: bytemuck::bytes_of(&FrameStateGpu::zeroed(composite_width, composite_height)),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         let mut pipeline_cache = HashMap::new();
         let builtin_pipeline = build_effect_pipeline(
             &device,
@@ -413,7 +405,6 @@ impl GpuContext {
             mask_sampler,
             layer_bind_group_layout,
             layer_pipeline_layout,
-            frame_state_buffer,
             pipeline_cache,
             homography_bind_group_layout,
             homography_pipeline,
@@ -640,11 +631,6 @@ impl GpuContext {
         pass.set_pipeline(&self.homography_pipeline);
         pass.set_bind_group(0, &self.homography_bind_group, &[]);
         pass.draw(0..3, 0..1);
-    }
-
-    pub fn write_frame_state(&self, state: &FrameStateGpu) {
-        self.queue
-            .write_buffer(&self.frame_state_buffer, 0, bytemuck::bytes_of(state));
     }
 
     /// Compile (or recompile) a user-authored effect pipeline. Caller is

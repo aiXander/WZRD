@@ -55,6 +55,13 @@ impl SliderBank {
             .map(|(k, v)| (k.clone(), *v))
             .collect()
     }
+
+    /// §5.6 full-control-switch: replace this bank's contents with a copy of
+    /// `other` (promote copies design→live; pull copies live→design).
+    pub fn copy_from(&self, other: &SliderBank) {
+        let src = other.values.read().expect("slider bank lock").clone();
+        *self.values.write().expect("slider bank lock") = src;
+    }
 }
 
 /// §5.4 masters — engine-level, operator-owned globals. Deliberately outside
@@ -154,6 +161,11 @@ impl Masters {
         let _ = self.set("saturation", snap.saturation);
         let _ = self.set("audioListen", snap.audio_listen);
     }
+
+    /// §5.6 full-control-switch: adopt `other`'s values wholesale.
+    pub fn copy_from(&self, other: &Masters) {
+        self.restore(&other.snapshot());
+    }
 }
 
 /// §5.5 per-binding param override table. `param.set {binding, param, value}`
@@ -217,6 +229,12 @@ impl ParamOverrides {
                     .map(move |(p, v)| (b.clone(), p.clone(), *v))
             })
             .collect()
+    }
+
+    /// §5.6 full-control-switch: replace this table with a copy of `other`.
+    pub fn copy_from(&self, other: &ParamOverrides) {
+        let src = other.values.read().expect("param overrides lock").clone();
+        *self.values.write().expect("param overrides lock") = src;
     }
 }
 
@@ -522,6 +540,21 @@ impl Transport {
 
     pub fn elapsed_sec(&self) -> f32 {
         self.time_sec as f32
+    }
+
+    pub fn bpm(&self) -> f32 {
+        self.bpm
+    }
+
+    /// §5.6 full-control-switch: adopt `other`'s musical position + tempo.
+    /// On promote the live leg adopts the design clock wholesale, so the
+    /// promoted content continues *exactly* as it looked in the design
+    /// preview (phases, picks and all — the old live content is gone, so
+    /// its phase continuity no longer matters).
+    pub fn sync_from(&mut self, other: &Transport) {
+        self.bpm = other.bpm;
+        self.time_sec = other.time_sec;
+        self.last_step = Instant::now();
     }
 
     pub fn frame_context<'a>(

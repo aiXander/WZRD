@@ -52,13 +52,19 @@ pub fn scene_reload(state: State<AppState>) -> Result<Value, String> {
 
 /// Live knob path — sets a named `ui.slider` value inside the engine. No
 /// scene rebuild, no disk write; the bound params pick it up next frame.
+/// §5.6: `leg` targets the deck-toggle leg (engine default: design).
 #[tauri::command]
-pub fn param_set(state: State<AppState>, name: String, value: f64) -> Result<Value, String> {
+pub fn param_set(
+    state: State<AppState>,
+    name: String,
+    value: f64,
+    leg: Option<String>,
+) -> Result<Value, String> {
     state
         .engine
         .request(
             "param.set",
-            json!({ "name": name, "value": value }),
+            json!({ "name": name, "value": value, "leg": leg }),
             DEFAULT_TIMEOUT,
         )
         .map_err(|e| format!("{e:#}"))
@@ -67,34 +73,40 @@ pub fn param_set(state: State<AppState>, name: String, value: f64) -> Result<Val
 /// §5.5 live per-binding override — `param.set { binding, param, value }`.
 /// `value: None` clears the override (the param falls back to its scene
 /// value / driver next frame). Zero rebuild, persisted via the session
-/// sidecar.
+/// sidecar. §5.6: per-leg via `leg`.
 #[tauri::command]
 pub fn param_override(
     state: State<AppState>,
     binding: String,
     param: String,
     value: Option<f64>,
+    leg: Option<String>,
 ) -> Result<Value, String> {
     state
         .engine
         .request(
             "param.set",
-            json!({ "binding": binding, "param": param, "value": value }),
+            json!({ "binding": binding, "param": param, "value": value, "leg": leg }),
             DEFAULT_TIMEOUT,
         )
         .map_err(|e| format!("{e:#}"))
 }
 
 /// §5.4 masters — operator-owned globals (brightness / speed / saturation /
-/// audioListen). Live values come back on the sticky `masters` telemetry
-/// channel.
+/// audioListen), per leg since §5.6 (the deck toggle picks the target).
+/// Both legs' values come back on the sticky `masters` telemetry channel.
 #[tauri::command]
-pub fn master_set(state: State<AppState>, name: String, value: f64) -> Result<Value, String> {
+pub fn master_set(
+    state: State<AppState>,
+    name: String,
+    value: f64,
+    leg: Option<String>,
+) -> Result<Value, String> {
     state
         .engine
         .request(
             "master.set",
-            json!({ "name": name, "value": value }),
+            json!({ "name": name, "value": value, "leg": leg }),
             DEFAULT_TIMEOUT,
         )
         .map_err(|e| format!("{e:#}"))

@@ -101,16 +101,24 @@ pub struct RpcContext {
     pub live_scene_state: Arc<parking_lot_lite::SwapValue>,
     pub effects_dir: Option<PathBuf>,
     pub bus: Bus,
-    /// Live `ui.slider` values. `param.set` writes here directly (no
+    /// **Live-leg** `ui.slider` values. `param.set` writes here directly (no
     /// render-thread hop) — the render thread reads it on its next tick, so
     /// knob latency is bounded by one frame.
     pub sliders: Arc<SliderBank>,
-    /// §5.4 masters — written inline by `master.set`, same latency contract
-    /// as the slider bank.
+    /// §5.4 **live-leg** masters — written inline by `master.set`, same
+    /// latency contract as the slider bank.
     pub masters: Arc<Masters>,
-    /// §5.5 per-binding scalar overrides — written inline by the
-    /// `param.set {binding, param, value}` form.
+    /// §5.5 **live-leg** per-binding scalar overrides — written inline by
+    /// the `param.set {binding, param, value}` form.
     pub overrides: Arc<ParamOverrides>,
+    /// §5.6 full-control-switch: the design leg's own control state. On
+    /// single-leg (headless) runs these alias the live Arcs, so the `leg`
+    /// param is a no-op there. `param.set`/`master.set` default to the
+    /// design leg (blanket leg rule); the UI passes `leg` explicitly from
+    /// the deck toggle.
+    pub design_sliders: Arc<SliderBank>,
+    pub design_masters: Arc<Masters>,
+    pub design_overrides: Arc<ParamOverrides>,
     /// §5.3 dirty stamp (epoch ms of last operator-state change; 0 = clean).
     /// The render thread debounces session sidecar writes on it.
     pub session_dirty: Arc<AtomicU64>,
@@ -181,6 +189,44 @@ impl PackInfo {
             layers,
             groups,
         }
+    }
+}
+
+/// §5.6 — the leg a control-surface write targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegSel {
+    Live,
+    Design,
+}
+
+impl LegSel {
+    fn as_str(&self) -> &'static str {
+        match self {
+            LegSel::Live => "live",
+            LegSel::Design => "design",
+        }
+    }
+}
+
+/// Default is design (blanket leg rule — agents/authoring never touch the
+/// crowd by accident); the UI passes the deck toggle's leg explicitly.
+/// Single-leg runs alias both legs to the same state, so this is a no-op
+/// there.
+fn parse_leg(leg: Option<&str>) -> Result<LegSel, RpcError> {
+    match leg {
+        None | Some("design") => Ok(LegSel::Design),
+        Some("live") => Ok(LegSel::Live),
+        Some(other) => Err(RpcError::message(format!(
+            "unknown leg {other:?} (\"design\" | \"live\")"
+        ))),
+    }
+}
+
+/// Both legs' masters — the `masters` telemetry / `master.list` payload.
+pub fn masters_state(ctx: &RpcContext) -> crate::telemetry::MastersState {
+    crate::telemetry::MastersState {
+        live: ctx.masters.snapshot(),
+        design: ctx.design_masters.snapshot(),
     }
 }
 
@@ -361,8 +407,10 @@ pub fn dispatch(
         //   { binding, param, value }  → §5.5 override of any scalar param
         //                                on a binding — const or driver
         //                                output alike; value: null clears.
-        // Both mark the §5.3 session sidecar dirty so tuning survives a
-        // restart.
+        // §5.6 full-control-switch: each leg owns its knobs. Optional
+        // `leg: "design"` (default) | "live" picks the target; the UI passes
+        // it from the deck toggle. Both forms mark the §5.3 session sidecar
+        // dirty so tuning survives a restart.
         "param.set" => {
             #[derive(Deserialize)]
             struct Params {
@@ -374,6 +422,8 @@ pub fn dispatch(
                 param: Option<String>,
                 #[serde(default)]
                 value: Option<f32>,
+                #[serde(default)]
+                leg: Option<String>,
             }
             let p: Params = serde_json::from_value(req.params.clone())
                 .map_err(|e| RpcError::message(format!("params: {e}")))?;
@@ -382,20 +432,25 @@ pub fn dispatch(
                     return Err(RpcError::message("value must be finite"));
                 }
             }
+            let leg = parse_leg(p.leg.as_deref())?;
+            let (sliders, overrides) = match leg {
+                LegSel::Live => (&ctx.sliders, &ctx.overrides),
+                LegSel::Design => (&ctx.design_sliders, &ctx.design_overrides),
+            };
             match (p.name, p.binding, p.param) {
                 (Some(name), None, None) => {
                     let value = p.value.ok_or_else(|| {
                         RpcError::message("slider form requires `value`")
                     })?;
-                    ctx.sliders.set(&name, value);
+                    sliders.set(&name, value);
                     session::touch(&ctx.session_dirty);
-                    Ok(json!({ "ok": true, "name": name, "value": value }))
+                    Ok(json!({ "ok": true, "name": name, "value": value, "leg": leg.as_str() }))
                 }
                 (None, Some(binding), Some(param)) => {
                     match p.value {
-                        Some(v) => ctx.overrides.set(&binding, &param, v),
+                        Some(v) => overrides.set(&binding, &param, v),
                         None => {
-                            ctx.overrides.clear(&binding, &param);
+                            overrides.clear(&binding, &param);
                         }
                     }
                     session::touch(&ctx.session_dirty);
@@ -404,24 +459,40 @@ pub fn dispatch(
                         "binding": binding,
                         "param": param,
                         "value": p.value,
+                        "leg": leg.as_str(),
                     }))
                 }
                 _ => Err(RpcError::message(
                     "param.set takes either { name, value } or { binding, param, value } \
-                     (value: null clears an override)",
+                     (value: null clears an override; optional leg: \"design\" | \"live\")",
                 )),
             }
         }
 
         "param.list" => {
-            let sliders: serde_json::Map<String, Value> = ctx
-                .sliders
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct Params {
+                leg: Option<String>,
+            }
+            let p: Params = if req.params.is_null() {
+                Params::default()
+            } else {
+                serde_json::from_value(req.params.clone())
+                    .map_err(|e| RpcError::message(format!("params: {e}")))?
+            };
+            let leg = parse_leg(p.leg.as_deref())?;
+            let (bank, table) = match leg {
+                LegSel::Live => (&ctx.sliders, &ctx.overrides),
+                LegSel::Design => (&ctx.design_sliders, &ctx.design_overrides),
+            };
+            let sliders: serde_json::Map<String, Value> = bank
                 .snapshot()
                 .into_iter()
                 .map(|(k, v)| (k, json!(v)))
                 .collect();
             let mut overrides = serde_json::Map::new();
-            for (binding, param, value) in ctx.overrides.snapshot() {
+            for (binding, param, value) in table.snapshot() {
                 overrides
                     .entry(binding)
                     .or_insert_with(|| json!({}))
@@ -429,33 +500,43 @@ pub fn dispatch(
                     .expect("override entry is object")
                     .insert(param, json!(value));
             }
-            Ok(json!({ "sliders": sliders, "overrides": overrides }))
+            Ok(json!({ "sliders": sliders, "overrides": overrides, "leg": leg.as_str() }))
         }
 
         // §5.4 masters — operator-owned globals, deliberately not reachable
         // through scene.json. Inline write, one-frame latency, sticky
         // `masters` telemetry so every client converges on the same values.
+        // §5.6: per-leg (`leg` optional, design default); the telemetry
+        // payload carries both legs.
         "master.set" => {
             #[derive(Deserialize)]
             struct Params {
                 name: String,
                 value: f32,
+                #[serde(default)]
+                leg: Option<String>,
             }
             let p: Params = serde_json::from_value(req.params.clone())
                 .map_err(|e| RpcError::message(format!("params: {e}")))?;
             if !p.value.is_finite() {
                 return Err(RpcError::message("value must be finite"));
             }
-            let stored = ctx
-                .masters
+            let leg = parse_leg(p.leg.as_deref())?;
+            let masters = match leg {
+                LegSel::Live => &ctx.masters,
+                LegSel::Design => &ctx.design_masters,
+            };
+            let stored = masters
                 .set(&p.name, p.value)
                 .map_err(|e| RpcError::message(format!("{e:#}")))?;
             session::touch(&ctx.session_dirty);
-            ctx.bus.emit_masters(ctx.masters.snapshot());
-            Ok(json!({ "ok": true, "name": p.name, "value": stored }))
+            ctx.bus.emit_masters(masters_state(ctx));
+            Ok(json!({ "ok": true, "name": p.name, "value": stored, "leg": leg.as_str() }))
         }
 
-        "master.list" => Ok(serde_json::to_value(ctx.masters.snapshot()).expect("masters")),
+        "master.list" => {
+            Ok(serde_json::to_value(masters_state(ctx)).expect("masters"))
+        }
 
         "scene.load" => {
             #[derive(Deserialize)]

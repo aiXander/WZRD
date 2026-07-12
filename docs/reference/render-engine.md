@@ -284,11 +284,11 @@ stable, period."
 | `effect.describe {name?}` | queued | §5.5 — input descriptors (type, default, `min`/`max`/`step`/`unit`/`widget`) for one effect, or the whole catalog (built-ins included) when `name` is omitted. |
 | `wgsl.validate {source}` | inline | naga diagnostics remapped to user-source lines (drives Monaco squiggles). |
 | `telemetry.channels` | inline | The list of live channel names (`telemetry::ALL_CHANNELS`). |
-| `param.set {name, value}` | **inline** | Writes the `SliderBank`; bound `ui.slider` params update next frame. **No rebuild, no disk write — this is the live knob path.** |
-| `param.set {binding, param, value}` | **inline** | §5.5 override form — pins any *scalar* param on a binding (const or driver output alike) in the engine-side override table; `value: null` clears. Same zero-rebuild property; survives plan rebuilds as long as a scalar param with that name exists (the carry-forward rule). |
-| `param.list` | inline | `{ sliders, overrides }` — current knob values + the override table. |
-| `master.set {name, value}` | **inline** | §5.4 — `brightness` \| `speed` \| `saturation` \| `audioListen`. Clamped, applied next frame, echoed on the sticky `masters` channel. Not reachable from scene.json by design. |
-| `master.list` | inline | Current masters snapshot. |
+| `param.set {name, value, leg?}` | **inline** | Writes the target leg's `SliderBank` (§2.6 — `leg` default `"design"`; the UI passes the deck toggle's leg); bound `ui.slider` params update next frame. **No rebuild, no disk write — this is the live knob path.** |
+| `param.set {binding, param, value, leg?}` | **inline** | §5.5 override form — pins any *scalar* param on a binding (const or driver output alike) in the target leg's override table; `value: null` clears. Same zero-rebuild property; survives plan rebuilds as long as a scalar param with that name exists (the carry-forward rule). |
+| `param.list {leg?}` | inline | `{ sliders, overrides, leg }` — the target leg's knob values + override table (design default). |
+| `master.set {name, value, leg?}` | **inline** | §5.4 — `brightness` \| `speed` \| `saturation` \| `audioListen`, per leg since §2.6 (design default). Clamped, applied next frame, echoed on the sticky `masters` channel. Not reachable from scene.json by design. |
+| `master.list` | inline | Both legs' masters: `{ live: {...}, design: {...} }`. |
 | `session.save` | queued | §5.3 — write the session sidecar now (also happens debounced after master/knob changes and on SIGTERM/SIGINT/window close). |
 | `telemetry.subscribe {channels}` / `.unsubscribe` | per-conn | |
 
@@ -305,7 +305,7 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 | `connectivity` | 1 Hz | osc / file_watcher / ws status cells (sticky). |
 | `hot_reload` | on event | target, ok, elapsed, message, **`probe`** (§2.6 — `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts[]}` when a pre-flight probe ran; sticky). |
 | `log` | on event | Info+ engine log lines (via the tee logger). |
-| `masters` | on `master.set` + startup | §5.4 snapshot `{brightness, speed, saturation, audioListen}` (sticky). |
+| `masters` | on `master.set`, promote/pull control copies + startup | §5.4/§2.6 — both legs: `{live: {brightness, speed, saturation, audioListen}, design: {...}}` (sticky). |
 | `deck` | on promote/pull/preview transitions + ~10 Hz while ramping | §2.6 snapshot `{promote: idle\|pending\|ramping, mix, fade_ms, quantize, preview_source, two_leg}` (sticky). |
 
 ### 2.4 Effect WGSL contract
@@ -361,13 +361,16 @@ and every scene played from that directory shares the physical setup):
   (temp + rename). `session.json` is gitignored.
 - **Read precedence:** sidecar first; a scene-level `projectorCalibration`
   is a deprecated read-only fallback (warn once, never written back).
-- **Masters application:** brightness/saturation ride the final homography
-  pass uniform (composite + preview stay un-mastered — only the projector
-  output scales); speed multiplies the transport's per-frame time
+- **Masters application (per leg since §2.6):** the *live* leg's
+  brightness/saturation ride the final homography pass uniform (composites
+  stay un-mastered; the native preview applies the selected leg's values);
+  each leg's speed multiplies **its own** transport's per-frame time
   integration (`time += dt·speed` — bends time, never jumps it, so picks
-  and phases stay continuous); audioListen scales every `audio.*` read
-  (drivers *and* the `state.audio_*` uniform) toward 0. Master values are
-  clamped: brightness/saturation 0–2, speed 0–8, audioListen 0–1.
+  and phases stay continuous); each leg's audioListen scales its `audio.*`
+  reads (drivers *and* the `state.audio_*` uniform) toward 0. Master values
+  are clamped: brightness/saturation 0–2, speed 0–8, audioListen 0–1. The
+  sidecar persists the **live** leg's masters/knobs/overrides; both legs
+  restore from it at boot.
 - The eventual "show file" (playlist + scenes + session) composes these;
   don't build the umbrella before the §5.6 auto-pilot playlist exists.
 
@@ -432,16 +435,33 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   design leg (probe-gated like any apply). A crash mid-design can't eat
   the draft.
 - **Preview topology: one window, source toggle.** The single native
-  `PreviewTarget` samples either composite. LIVE shows the live composite
-  with **real brightness/saturation masters** and identity homography (the
-  calibration warp only reads right on the physical surface); DESIGN shows
-  the scratch composite un-mastered (§5.4 convention). `preview.setSource`
-  flips it; the UI toggle lives in Perform's deck bar.
-- **What's shared across legs (deliberately):** transport, `SliderBank`,
-  `ParamOverrides`, masters — operator knobs aren't scene content, so a
-  tuned value is identical on both legs and carry-forward across
-  promote/pull falls out for free (spec §4: a knob never jumps under the
-  operator's finger).
+  `PreviewTarget` samples either composite with **that leg's own
+  brightness/saturation masters** and identity homography (the calibration
+  warp only reads right on the physical surface) — WYSIWYG for the leg
+  you're driving. `preview.setSource` flips it; the UI toggle lives in
+  Perform's deck bar.
+- **The deck toggle is a full control switch (decision revised 2026-07-12,
+  same day it landed).** The original §5.6 design shared one venue-level
+  `SliderBank`/`ParamOverrides`/masters/transport across both legs
+  ("operator knobs aren't scene content"). First real use disproved it:
+  setting speed 4 while previewing DESIGN also sped up the show. Now **each
+  leg owns its complete control state** — `Transport` (speed bends time, so
+  independence requires per-leg clocks), `Masters`, `SliderBank`,
+  `ParamOverrides` — and `param.set`/`master.set` take an optional
+  `leg: "design"` (default) | `"live"`; the UI passes the deck toggle's leg
+  on every write, and the `drivers`/`frame_stats` channels follow the
+  toggle too. **Promote copies design's control state (including the design
+  clock) into live at the pointer swap** — what you previewed is exactly
+  what goes live, phases and picks included — and design keeps its copies
+  (still a copy, not an exchange). **Pull copies live's control state back
+  into design.** The `masters` telemetry payload carries both legs
+  (`{live, design}`); the session sidecar persists the **live** set (the
+  show truth) and both legs boot from it. Single-leg (headless) runs alias
+  both legs to one state, so the `leg` param is a no-op there. Consequence
+  worth knowing: with per-leg clocks the legs' bar phases can drift apart
+  while design speed/tempo differ — promote quantizes on the **live** bar
+  boundary (the crowd's musical time), and the clock adoption at swap keeps
+  the promoted content continuous with its preview.
 
 ---
 

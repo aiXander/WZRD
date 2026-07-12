@@ -78,6 +78,12 @@ pub struct PassPlan {
     pub layer_passes: Vec<LayerPass>,
     pub picks: Vec<PickGroup>,
     pub clear_color: wgpu::Color,
+    /// Per-plan FrameState uniform (§5.6 full-control-switch): the two legs
+    /// tick with *different* contexts (own transport speed, own audioListen),
+    /// so the buffer can't be shared on the GpuContext — and it must travel
+    /// with the plan through the promote pointer swap (the bind groups
+    /// reference it).
+    frame_state: wgpu::Buffer,
 }
 
 impl PassPlan {
@@ -94,6 +100,15 @@ impl PassPlan {
     ) -> Result<Self> {
         let mut passes: Vec<LayerPass> = Vec::new();
         let mut picks: Vec<PickGroup> = Vec::new();
+
+        let frame_state = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("plan frame state uniform"),
+            contents: bytemuck::bytes_of(&FrameStateGpu::zeroed(
+                gpu.composite_width,
+                gpu.composite_height,
+            )),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
 
         for binding in &scene.bindings {
             let def = resolve_effect_def(binding, registry)?;
@@ -181,7 +196,7 @@ impl PassPlan {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: gpu.frame_state_buffer.as_entire_binding(),
+                            resource: frame_state.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
@@ -225,6 +240,7 @@ impl PassPlan {
             layer_passes: passes,
             picks,
             clear_color: wgpu::Color::BLACK,
+            frame_state,
         })
     }
 
@@ -284,7 +300,8 @@ impl PassPlan {
                 0.0,
             ],
         };
-        gpu.write_frame_state(&frame);
+        gpu.queue
+            .write_buffer(&self.frame_state, 0, bytemuck::bytes_of(&frame));
 
         // Per-pass params. Driver evaluation is cheap (a few muls + a few
         // atomic loads); we don't bother with dirty tracking. Inactive
