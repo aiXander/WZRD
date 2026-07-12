@@ -153,7 +153,7 @@ pub struct HomographyUniforms {
 }
 
 impl HomographyUniforms {
-    pub fn new(m: Option<[[f32; 3]; 3]>, brightness: f32, saturation: f32) -> Self {
+    pub fn new(m: Option<[[f32; 3]; 3]>, brightness: f32, saturation: f32, mix: f32) -> Self {
         let rows = match m {
             Some(m) => [
                 [m[0][0], m[0][1], m[0][2], 0.0],
@@ -168,23 +168,55 @@ impl HomographyUniforms {
         };
         Self {
             rows,
-            adjust: [brightness, saturation, 0.0, 0.0],
+            adjust: [brightness, saturation, mix, 0.0],
         }
     }
 
     pub fn identity() -> Self {
-        Self::new(None, 1.0, 1.0)
+        Self::new(None, 1.0, 1.0, 0.0)
     }
 }
 
+/// §5.6 — which leg a preview/readback consumer samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leg {
+    Live,
+    Design,
+}
+
+/// Native operator-preview swapchain (app-collapse Step 3): a second
+/// surface the same device blits a composite onto — the Resolume-style
+/// preview. Runs the homography pipeline with an identity matrix (§5.6:
+/// the calibration warp only looks right on the physical surface).
+///
+/// §5.6 source toggle: one bind group per leg; the LIVE position renders
+/// with the *real* brightness/saturation masters (what the crowd sees, sans
+/// warp), the DESIGN position stays neutral/un-mastered (§5.4 convention).
+pub struct PreviewTarget {
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    bind_group_live: wgpu::BindGroup,
+    bind_group_design: wgpu::BindGroup,
+    /// Identity-matrix uniforms, rewritten per present so the LIVE position
+    /// tracks the masters and the DESIGN position stays neutral.
+    buffer: wgpu::Buffer,
+}
+
 pub struct GpuContext {
+    /// Kept so additional surfaces (the preview) can be created against the
+    /// same instance/adapter the device came from.
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
 
-    /// Held to keep the wgpu resource alive; not sampled directly.
-    #[allow(dead_code)]
+    /// Attached/detached by the host at runtime (None headless / pre-attach).
+    pub preview: Option<PreviewTarget>,
+
+    /// LIVE-leg composite — what the projector pass warps to the swapchain.
     pub composite_texture: wgpu::Texture,
     pub composite_view: wgpu::TextureView,
     /// Bound through the homography bind group; not sampled directly.
@@ -192,6 +224,12 @@ pub struct GpuContext {
     pub composite_sampler: wgpu::Sampler,
     pub composite_width: u32,
     pub composite_height: u32,
+
+    /// §5.6 DESIGN-leg composite — the scratchpad target, rendered on demand
+    /// only. `None` in single-leg (headless) mode, where memory stays what
+    /// it was pre-two-deck.
+    pub design_texture: Option<wgpu::Texture>,
+    pub design_view: Option<wgpu::TextureView>,
 
     /// Held to keep the wgpu resource alive; not sampled directly.
     #[allow(dead_code)]
@@ -222,11 +260,17 @@ impl GpuContext {
     /// windowing-crate dependency (app-collapse Step 1). `width`/`height`
     /// are the target's current inner size in physical pixels; a raw handle
     /// can't be queried for its size, so the host passes it in.
+    ///
+    /// `two_leg` (§5.6): allocate the DESIGN composite alongside the LIVE
+    /// one. Headless single-leg passes `false` and stays byte-identical to
+    /// the pre-two-deck engine (the homography bind group then binds the
+    /// live composite to both texture slots; mix is 0).
     pub async fn new(
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
         pack: &LoadedPack,
+        two_leg: bool,
     ) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -282,6 +326,15 @@ impl GpuContext {
         let (composite_texture, composite_view, composite_sampler) =
             create_composite(&device, composite_width, composite_height);
 
+        // §5.6 design leg — a second composite of the same shape. Memory
+        // doubles in two-leg mode (accepted trade in the roadmap).
+        let (design_texture, design_view) = if two_leg {
+            let (t, v, _) = create_composite(&device, composite_width, composite_height);
+            (Some(t), Some(v))
+        } else {
+            (None, None)
+        };
+
         let (mask_atlas, mask_atlas_view, mask_sampler) = upload_mask_atlas(&device, &queue, pack);
 
         let layer_bind_group_layout = create_layer_bind_group_layout(&device);
@@ -331,19 +384,30 @@ impl GpuContext {
                     binding: 2,
                     resource: homography_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(
+                        design_view.as_ref().unwrap_or(&composite_view),
+                    ),
+                },
             ],
         });
 
         Ok(Self {
+            instance,
+            adapter,
             surface,
             surface_config,
             device,
             queue,
+            preview: None,
             composite_texture,
             composite_view,
             composite_sampler,
             composite_width,
             composite_height,
+            design_texture,
+            design_view,
             mask_atlas,
             mask_atlas_view,
             mask_sampler,
@@ -367,18 +431,215 @@ impl GpuContext {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
+    /// Attach the native preview surface (app-collapse Step 3). Idempotent
+    /// per target: a second call replaces the previous preview wholesale.
+    pub fn attach_preview(
+        &mut self,
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let surface = self
+            .instance
+            .create_surface(target)
+            .context("creating preview surface")?;
+        let caps = surface.get_capabilities(&self.adapter);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&self.device, &config);
+
+        // Same pipeline family as the projector pass, compiled for the
+        // preview surface's own format; identity matrix, masters written per
+        // present (real on LIVE, neutral on DESIGN — §5.6 source toggle).
+        let (_, pipeline) = create_homography_pipeline(&self.device, format);
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("preview blit uniform"),
+            contents: bytemuck::bytes_of(&HomographyUniforms::identity()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let make_group = |label: &str, view: &wgpu::TextureView| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.homography_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: buffer.as_entire_binding(),
+                    },
+                    // mix is always 0 on the preview blit; bind the source
+                    // view again to satisfy the layout.
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                ],
+            })
+        };
+        let bind_group_live = make_group("preview blit bind group (live)", &self.composite_view);
+        let bind_group_design = make_group(
+            "preview blit bind group (design)",
+            self.design_view.as_ref().unwrap_or(&self.composite_view),
+        );
+        self.preview = Some(PreviewTarget {
+            surface,
+            config,
+            pipeline,
+            bind_group_live,
+            bind_group_design,
+            buffer,
+        });
+        log::info!("preview surface attached ({width}x{height}, {format:?})");
+        Ok(())
+    }
+
+    pub fn resize_preview(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if let Some(pv) = self.preview.as_mut() {
+            if pv.config.width == width && pv.config.height == height {
+                return;
+            }
+            pv.config.width = width;
+            pv.config.height = height;
+            pv.surface.configure(&self.device, &pv.config);
+        }
+    }
+
+    /// Blit a composite onto the preview surface and present. Self-heals
+    /// `Lost`/`Outdated` by reconfiguring (frame skipped); other errors are
+    /// returned. No-op without an attached preview.
+    ///
+    /// §5.6 source toggle: `source` picks which leg's composite is sampled;
+    /// LIVE applies the real brightness/saturation masters (identity
+    /// homography — the calibration warp only reads right on the physical
+    /// surface), DESIGN stays neutral/un-mastered.
+    ///
+    /// §3.1 caveat: the *caller* must ensure the preview window is visible —
+    /// `get_current_texture` on an occluded macOS window blocks the render
+    /// thread just like the projector swapchain does.
+    pub fn render_preview(
+        &self,
+        source: Leg,
+        brightness: f32,
+        saturation: f32,
+    ) -> Result<(), wgpu::SurfaceError> {
+        let Some(pv) = self.preview.as_ref() else {
+            return Ok(());
+        };
+        let uniforms = match source {
+            Leg::Live => HomographyUniforms::new(None, brightness, saturation, 0.0),
+            Leg::Design => HomographyUniforms::identity(),
+        };
+        self.queue
+            .write_buffer(&pv.buffer, 0, bytemuck::bytes_of(&uniforms));
+        let frame = match pv.surface.get_current_texture() {
+            Ok(f) => f,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                pv.surface.configure(&self.device, &pv.config);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview blit encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("preview blit pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pv.pipeline);
+            pass.set_bind_group(
+                0,
+                match source {
+                    Leg::Live => &pv.bind_group_live,
+                    Leg::Design => &pv.bind_group_design,
+                },
+                &[],
+            );
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+        Ok(())
+    }
+
     /// Refresh the final-pass uniform: calibration matrix + the §5.4 output
-    /// masters. Written once per presented frame (the buffer is 64 bytes; a
-    /// dirty flag would cost more complexity than the write).
+    /// masters + the §5.6 promote mix. Written once per presented frame (the
+    /// buffer is 64 bytes; a dirty flag would cost more complexity).
     pub fn write_homography(
         &self,
         m: Option<[[f32; 3]; 3]>,
         brightness: f32,
         saturation: f32,
+        mix: f32,
     ) {
-        let uniforms = HomographyUniforms::new(m, brightness, saturation);
+        let uniforms = HomographyUniforms::new(m, brightness, saturation, mix);
         self.queue
             .write_buffer(&self.homography_buffer, 0, bytemuck::bytes_of(&uniforms));
+    }
+
+    /// Encode the final homography pass (live composite × design composite
+    /// lerped by the promote mix → masters → warp) onto `target_view`.
+    /// Pulled out of `PassPlan` so the §5.6 frame orchestration in `Core`
+    /// owns pass ordering: live composite, design composite (on demand),
+    /// then this.
+    pub fn encode_final(&self, encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("homography pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.homography_pipeline);
+        pass.set_bind_group(0, &self.homography_bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     pub fn write_frame_state(&self, state: &FrameStateGpu) {
@@ -675,6 +936,18 @@ fn create_homography_pipeline(
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
+                },
+                count: None,
+            },
+            // §5.6 — the design-leg composite (or the live view again in
+            // single-leg mode / preview blits, where mix is 0).
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
                 count: None,
             },

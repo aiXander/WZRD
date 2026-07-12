@@ -1,62 +1,51 @@
-# wzrd-app — Phase 4 Tauri shell
+# wzrd-app — single-process control shell
 
 The control surface that wraps `render-core` for humans. Three routes —
 **Prepare** (surface canvas + Monaco editor + binding inspector), **Perform**
-(preview hero + audio strip + driver rack), **Debug** (collapsible panels).
-The headless agent path (`render-core --scene foo.json`) is unchanged; this
-shell is purely additive.
+(native preview hero + audio strip + driver rack), **Debug** (collapsible
+panels). The headless agent path (`render-core --scene foo.json`, standalone
+binary) is unchanged; this shell is purely additive.
 
-## Architecture
+## Architecture (single-process since 2026-07-12)
 
 ```
-┌──────────────── wzrd-app process (Tauri) ───────────────┐
-│                                                         │
-│  React + TS webview ◀──Tauri invoke──▶  Rust commands   │
-│  (3 routes, Monaco)                     (src-tauri/rpc) │
-│                                                         │
-│                       │                                 │
-│                       │ JSON-RPC over WebSocket         │
-│                       ▼ ws://127.0.0.1:9123             │
-└─────────────────────────────────────────────────────────┘
-                        │
-              ┌─────────▼─────────┐
-              │  render-core      │   ← subprocess (sibling
-              │  (spawned by      │     of audio server in
-              │   the shell)      │     the §3.10 sense)
-              └───────────────────┘
-                        │
-                        ▼
-                projector display
+┌──────────────────── wzrd-app process (Tauri) ────────────────────┐
+│                                                                  │
+│  React + TS webview ◀─Tauri invoke─▶ Rust commands (src-tauri/   │
+│  (3 routes, Monaco)                  rpc.rs) → rpc::dispatch     │
+│      + borderless native preview          │      (direct call)   │
+│        child window over the hero slot    ▼                      │
+│  engine-render thread: render_core::Core                         │
+│    engine output window (wgpu) ───────────────▶ projector        │
+│    native preview blit (same GPU device/composite)               │
+│                                                                  │
+│  WS server ws://127.0.0.1:9123 — same §3.11 dispatch, for        │
+│  external MCP / remote operator clients only                     │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-Why a subprocess and not in-process winit? See decision P4 in
-`../docs/reference/render-engine.md` — short version: it sidesteps the macOS
-NSApp main-thread fight and reuses the *exact* RPC surface Phase 7 needs for
-MCP, with no shim code in between. (The analyzed-but-uncommitted single-process
-alternative lives in `../docs/TODO/single-process-collapse.md`.)
+The engine runs **in-process** as a library (app-collapse Steps 2–3;
+current-state residue in `../docs/reference/render-engine.md` §1b): the
+shell owns the engine output
+window and a borderless preview child window, and drives `Core` on a render
+thread. Local UI calls skip the WS hop entirely; the WS server remains for
+external clients.
 
 ## Dev workflow
 
-Two terminals during development:
-
 ```bash
-# 1. Build the engine so the Tauri shell can spawn it
-(cd ../render-core && cargo build)
-
-# 2. Build + run the Tauri app
 cd wzrd-app
 pnpm install
 WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json \
   pnpm tauri dev
 ```
 
-The shell finds the engine binary by:
-  1. `WZRD_ENGINE_EXE` env var (override),
-  2. `target/{debug,release}/render-core` next to the Tauri executable,
-  3. `../../render-core/target/debug/render-core` (workspace dev layout).
-
-The scene path comes from `WZRD_SCENE` env var or `--scene <path>` passed
-through to `wzrd-app`.
+No separate engine build step — `render-core` compiles in as a Cargo path
+dependency. The scene path comes from `WZRD_SCENE` env var or
+`--scene <path>` passed through to `wzrd-app`. `WZRD_DISPLAY=<idx>` puts the
+engine window borderless-fullscreen on that monitor;
+`WZRD_SPIKE=panic|device_loss` deliberately crashes the render thread ~5 s
+in (crash-containment test hook).
 
 To auto-start the audio feature server alongside the shell, set
 `WZRD_AUDIO=1` (or pass `--audio` through to the binary:
@@ -90,12 +79,12 @@ Routes switch with `⌘1` / `⌘2` / `⌘3` (Ctrl on non-mac).
 
 ## Telemetry channels
 
-Subscribed by the Tauri shell on connect; relayed onto the webview's
-`engine:telemetry` event channel.
+Subscribed in-process off the engine's telemetry bus; relayed onto the
+webview's `engine:telemetry` event channel.
 
 | channel | rate | consumer |
 |---|---|---|
-| `preview` | ~15 fps | corner thumbnail / Perform hero |
+| `preview` | ~15 fps | Prepare surface-canvas underlay (Perform hero is the native surface, not this channel) |
 | `hot_reload` | event | status strip + Debug history |
 | `audio_freshness` | 1 Hz heartbeat + transitions | OSC pill |
 | `fps` | 2 Hz | FPS pill + Debug render-stats |

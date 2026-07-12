@@ -317,13 +317,20 @@ impl PassPlan {
         }
     }
 
-    /// Encode the per-layer composite pass into `encoder`. Shared by the
-    /// presented path and the occluded/offscreen path.
-    fn encode_composite(&self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder) {
+    /// Encode the per-layer composite pass into `encoder`, targeting
+    /// `target_view` — the plan's own leg composite (§5.6: live and design
+    /// each own a target). Shared by the presented path and the
+    /// occluded/offscreen path; `Core` owns pass ordering.
+    pub fn encode_composite(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("composite pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &gpu.composite_view,
+                view: target_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(self.clear_color),
@@ -360,61 +367,11 @@ impl PassPlan {
         }
     }
 
-    /// Render the composite buffer only — no swapchain interaction at all.
-    /// Used while the projector window is occluded: on macOS an occluded
-    /// window's `get_current_texture()` blocks for up to ~1s per frame
-    /// (compositor throttling), which used to stall the entire render thread
-    /// (IPC, preview, hot-reload). The composite keeps updating so the
-    /// operator preview stays live.
-    pub fn render_offscreen(&self, gpu: &GpuContext) {
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("offscreen frame encoder"),
-            });
-        self.encode_composite(gpu, &mut encoder);
-        gpu.queue.submit(std::iter::once(encoder.finish()));
-    }
-
-    pub fn record_and_submit(&self, gpu: &GpuContext) -> Result<(), wgpu::SurfaceError> {
-        let frame = gpu.surface.get_current_texture()?;
-        let swap_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame encoder"),
-            });
-
-        // 1) Per-layer passes into the composite buffer.
-        self.encode_composite(gpu, &mut encoder);
-
-        // 2) Final homography pass onto the swapchain.
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("homography pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &swap_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&gpu.homography_pipeline);
-            pass.set_bind_group(0, &gpu.homography_bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        gpu.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
-        Ok(())
+    /// Snapshot the plan's pipeline cache keys — the §5.6 cross-leg eviction
+    /// guard consults both legs' sets so a design-side edit can never drop a
+    /// pipeline the live plan still draws with.
+    pub fn pipeline_keys(&self) -> impl Iterator<Item = &str> {
+        self.layer_passes.iter().map(|p| p.pipeline_key.as_str())
     }
 
     /// Snapshot every scalar param across the plan's bindings for the
@@ -450,7 +407,9 @@ impl PassPlan {
     }
 }
 
-fn resolve_effect_def(binding: &BindingSpec, registry: &EffectRegistry) -> Result<EffectDef> {
+/// Shared by plan build and the §5.6 probe pre-analysis (which needs to know
+/// which pipelines a scene would pull in before building anything).
+pub(crate) fn resolve_effect_def(binding: &BindingSpec, registry: &EffectRegistry) -> Result<EffectDef> {
     match &binding.effect {
         EffectRef::Named(name) => registry.resolve_named(name),
         EffectRef::Inline(spec) => {

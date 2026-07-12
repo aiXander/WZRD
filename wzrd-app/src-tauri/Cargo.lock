@@ -6628,7 +6628,8 @@ dependencies = [
  "crossbeam-channel",
  "env_logger",
  "log",
- "parking_lot",
+ "objc2 0.5.2",
+ "objc2-foundation 0.2.2",
  "render-core",
  "serde",
  "serde_json",
@@ -6636,7 +6637,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
- "tungstenite",
 ]
 
 [[package]]

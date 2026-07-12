@@ -119,6 +119,65 @@ pub fn session_save(state: State<AppState>) -> Result<Value, String> {
         .map_err(|e| format!("{e:#}"))
 }
 
+/// §5.6 — crossfade the projector to the design composite, then adopt
+/// design's plan into the live slot. `quantize`: "bar" (default — fade
+/// starts on the next bar boundary) | "now". Long timeout: the reply may
+/// wait on a bar boundary decision but not on the fade itself.
+#[tauri::command]
+pub fn promote(
+    state: State<AppState>,
+    fade_ms: Option<f64>,
+    quantize: Option<String>,
+) -> Result<Value, String> {
+    state
+        .engine
+        .request(
+            "promote",
+            json!({ "fade_ms": fade_ms, "quantize": quantize }),
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §5.6 — hard-copy live's scene back into design (the explicit reverse).
+#[tauri::command]
+pub fn pull(state: State<AppState>) -> Result<Value, String> {
+    state
+        .engine
+        .request("pull", json!({}), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §5.6 — LIVE ⇄ DESIGN toggle: which composite the native preview samples.
+#[tauri::command]
+pub fn preview_set_source(state: State<AppState>, source: String) -> Result<Value, String> {
+    state
+        .engine
+        .request("preview.setSource", json!({ "source": source }), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §5.6 — pre-flight probe thresholds A < B (ms of predicted full-res p95).
+#[tauri::command]
+pub fn probe_get_thresholds(state: State<AppState>) -> Result<Value, String> {
+    state
+        .engine
+        .request("probe.getThresholds", json!({}), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn probe_set_thresholds(state: State<AppState>, a_ms: f64, b_ms: f64) -> Result<Value, String> {
+    state
+        .engine
+        .request(
+            "probe.setThresholds",
+            json!({ "a_ms": a_ms, "b_ms": b_ms }),
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 pub fn wgsl_validate(state: State<AppState>, source: String) -> Result<Value, String> {
     state
@@ -163,6 +222,24 @@ pub fn effect_remove(state: State<AppState>, name: String) -> Result<Value, Stri
 #[tauri::command]
 pub fn last_payload(state: State<AppState>, channel: String) -> Option<Value> {
     state.engine.last_payload(&channel)
+}
+
+/// Collapse Step 3 — position the native preview window over the React
+/// layout's preview slot (CSS px, viewport-relative), or hide it.
+#[tauri::command]
+pub fn preview_set_bounds(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    visible: bool,
+) -> Result<(), String> {
+    state
+        .engine
+        .set_preview_bounds(&app, x, y, width, height, visible)
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Convenience for the front-end: read the project-local effects directory

@@ -11,6 +11,16 @@ WZRD has **two halves**:
 
 ## Realtime Render Engine & GUI
 
+**Quick start (copy-paste):**
+
+```bash
+# Full app — UI + engine + native preview, ONE command (single process since 2026-07-12):
+cd wzrd-app && WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
+
+# Engine only, headless (agents / live shows, no UI):
+cd render-core && cargo run -- --scene examples/phase3_smoke.scene.json --windowed --no-osc
+```
+
 > **The one gotcha:** there is no `render-core` command on your PATH. `cargo build` only writes the binary into `render-core/target/`. Always launch it with `cargo run --` or the explicit binary path `./target/release/render-core`. Typing bare `render-core` gives `command not found` — that's expected.
 
 There are **two ways to run** the engine, plus an optional audio server that feeds both:
@@ -19,7 +29,7 @@ There are **two ways to run** the engine, plus an optional audio server that fee
 |                     | What runs                                                        | When to use                                                                |
 | ------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | **Headless engine** | `render-core` alone, a single projector window                   | Live shows, agent deployment, quick iteration on a scene/shader            |
-| **GUI shell**       | Tauri app (`wzrd-app`) that spawns `render-core` as a subprocess | Authoring: Monaco editor, mask overlays, binding inspector, live telemetry |
+| **GUI shell**       | Tauri app (`wzrd-app`) running `render-core` in-process — one app, engine window + native preview included | Authoring: Monaco editor, mask overlays, binding inspector, live telemetry |
 
 
 ### Prerequisites (one-time)
@@ -52,13 +62,9 @@ Prefer the prebuilt binary over `cargo run` once compiled:
 
 ### Option B — GUI control shell (authoring)
 
-The Tauri app spawns `render-core` for you over a JSON-RPC WebSocket, so you get the projector window **plus** the Prepare/Perform/Debug UI.
+The Tauri app runs the engine **in-process** (single process, since 2026-07-12), so you get the projector window **plus** the Prepare/Perform/Debug UI plus a native lossless preview on the Perform route.
 
 ```bash
-# 1. Build the engine binary the shell will spawn (debug is what it looks for by default):
-(cd render-core && cargo build)
-
-# 2. Launch the shell, pointing it at a scene:
 cd wzrd-app
 pnpm install        # one-time
 WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
@@ -67,8 +73,9 @@ WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
 WZRD_AUDIO=1 WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
 ```
 
+- No separate engine build step — `render-core` compiles in as a library dependency.
 - Routes switch with `⌘1` (Prepare) / `⌘2` (Perform) / `⌘3` (Debug).
-- The shell finds the engine via `WZRD_ENGINE_EXE` → `target/{debug,release}/render-core` → `../../render-core/target/debug/render-core`. If it can't spawn it, rebuild step 1.
+- `WZRD_DISPLAY=<idx>` puts the engine output window borderless-fullscreen on that monitor (default: a regular window at pack resolution).
 - `pnpm tauri dev` runs the engine **with OSC enabled**, so `audio.`* layers stay at defaults until the audio server is up. See below.
 
 ### Optional — Realtime Audio Feature Server (makes `audio.*` drivers react)

@@ -23,6 +23,7 @@ pub mod effects;
 pub mod gpu;
 pub mod osc;
 pub mod pack;
+pub mod probe;
 pub mod rpc;
 pub mod scene;
 pub mod session;
@@ -35,6 +36,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+
+/// Re-exported so embedding hosts (the Tauri shell) match on
+/// `wgpu::SurfaceError` etc. against the exact wgpu version Core is built
+/// with, without carrying their own dependency pin.
+pub use wgpu;
 
 /// CLI surface exposed by the standalone binary. Re-used verbatim by Tauri's
 /// sidecar invocation (see `wzrd-app/src-tauri/src/engine.rs`) — there is no
@@ -97,8 +103,11 @@ pub struct Cli {
 /// stretches from ~4 ms to ~110 ms per cycle and the render rate collapses
 /// to ~9 fps even though the window is still visible. A latency-critical
 /// activity assertion is the documented remedy for real-time AV processes.
+///
+/// Public because the collapsed Tauri shell (app-collapse Step 2) hosts the
+/// render thread in its own process and needs the same opt-out.
 #[cfg(target_os = "macos")]
-fn hold_latency_critical_assertion() {
+pub fn hold_latency_critical_assertion() {
     use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
     let info = NSProcessInfo::processInfo();
     let reason = NSString::from_str("realtime projection rendering");

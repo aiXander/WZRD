@@ -2,21 +2,28 @@
 // into the swapchain (D9) and applies the §5.4 output masters (brightness,
 // saturation). Identity matrix = no warp. Calibration UI later edits this
 // matrix; the shader stays unchanged.
+//
+// §5.6 two-deck: the pass samples BOTH legs' composites and lerps between
+// them with adjust.z — the promote crossfade. adjust.z is 0 outside a fade,
+// so the design texture read is free-ish and the output is exactly the live
+// composite. Single-leg (headless) binds the live composite to both slots.
 
 struct Homography {
     // Row-major 3×3, padded to 4×3 because std140 aligns vec3 to 16 bytes.
     m0: vec4<f32>, // (m00, m01, m02, _)
     m1: vec4<f32>, // (m10, m11, m12, _)
     m2: vec4<f32>, // (m20, m21, m22, _)
-    // §5.4 output masters: (brightness, saturation, _, _). Applied here —
-    // the last pass before the projector — so the composite (and the
-    // operator preview that reads it) stays un-mastered.
+    // §5.4 output masters + §5.6 promote mix:
+    // (brightness, saturation, mix live→design, _). Applied here — the last
+    // pass before the projector — so the composites (and the operator
+    // preview that reads them) stay un-mastered.
     adjust: vec4<f32>,
 };
 
 @group(0) @binding(0) var composite_tex: texture_2d<f32>;
 @group(0) @binding(1) var composite_sampler: sampler;
 @group(0) @binding(2) var<uniform> homography: Homography;
+@group(0) @binding(3) var design_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -45,7 +52,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    let c = textureSample(composite_tex, composite_sampler, uv);
+    let c_live = textureSample(composite_tex, composite_sampler, uv);
+    let c_design = textureSample(design_tex, composite_sampler, uv);
+    // §5.6 promote crossfade — 0 outside a fade, ramped 0→1 while promoting.
+    let c = mix(c_live, c_design, homography.adjust.z);
     // Saturation as a lerp from luma, then brightness. Order matters only
     // for readability — both are linear operations on linear-light values.
     let luma = dot(c.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));

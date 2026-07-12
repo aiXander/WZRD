@@ -1,5 +1,18 @@
 # WZRD — app collapse analysis
 
+> **RETIRED 2026-07-12: Steps 2–3 LANDED, plan complete.** Both runtime
+> spikes passed (clean teardown; crash containment + relaunch-to-light
+> ~160–290 ms ≪ 20 s), all §5 validation criteria met (one process, two
+> windows + preview child window, §3.11 identical, WS still serving
+> external clients, headless binary unchanged), and the Step-3 native
+> preview shipped in the same run — including §6.4's demand-gated JPEG
+> capture. Durable residue lives in
+> `../reference/render-engine.md` §1/§1b (topology, TauriHost rules,
+> spike results, known warts). Leftover prerequisites for the first live
+> show on this topology — shader pre-flight probe, design-leg autosave —
+> live in `render-engine-roadmap.md` §5.6/§5.11 (they always did).
+> Everything below is the historical analysis and decision record.
+
 > **Status 2026-07-12: COMMITTED (operator decision).** Collapse is the
 > plan, no longer pending: the two Step-2 runtime spikes (clean GPU
 > teardown on Tauri exit; crash-must-not-corrupt-state + relaunch-to-light

@@ -62,6 +62,27 @@ pub enum EngineCommand {
     SessionSave {
         reply: Sender<Result<Value, String>>,
     },
+    /// §5.6 — crossfade the projector from the live composite to the design
+    /// composite, then adopt design's plan into the live slot. `quantize`
+    /// "bar" defers the ramp start to the next bar boundary; "now" starts
+    /// immediately. Re-entrancy: a *pending* quantized promote is replaced
+    /// by a newer one; while a fade is actively ramping, promote and pull
+    /// are rejected.
+    Promote {
+        fade_ms: f32,
+        quantize: crate::core::Quantize,
+        reply: Sender<Result<Value, String>>,
+    },
+    /// §5.6 — hard-copy live's scene back into design (the explicit
+    /// reverse of promote).
+    Pull {
+        reply: Sender<Result<Value, String>>,
+    },
+    /// §5.6 — select which leg's composite the native preview samples.
+    PreviewSource {
+        source: crate::gpu::Leg,
+        reply: Sender<Result<Value, String>>,
+    },
 }
 
 /// Bound bag of references used to answer the synchronous (read-only)
@@ -71,10 +92,13 @@ pub struct RpcContext {
     /// Static pack info captured at engine start. The current model has no
     /// in-flight pack swap (Phase 6+), so a snapshot is enough.
     pub pack: Arc<PackInfo>,
-    /// Most recent scene JSON as the engine has it on disk + the resolved
-    /// scene path. Updated on every successful reload by the render thread
-    /// via [`RpcContext::set_scene`].
+    /// Most recent **design-leg** scene JSON (§5.6 blanket leg rule: reads
+    /// follow design). Headless single-leg, this is the one live scene.
     pub scene_state: Arc<parking_lot_lite::SwapValue>,
+    /// §5.6 — the **live-leg** scene JSON, served by
+    /// `scene.getState { leg: "live" }` so `pull` is verifiable over RPC.
+    /// Updated at boot and on every promote completion.
+    pub live_scene_state: Arc<parking_lot_lite::SwapValue>,
     pub effects_dir: Option<PathBuf>,
     pub bus: Bus,
     /// Live `ui.slider` values. `param.set` writes here directly (no
@@ -90,6 +114,10 @@ pub struct RpcContext {
     /// §5.3 dirty stamp (epoch ms of last operator-state change; 0 = clean).
     /// The render thread debounces session sidecar writes on it.
     pub session_dirty: Arc<AtomicU64>,
+    /// §5.6 probe thresholds A < B — written inline by
+    /// `probe.setThresholds`, read by the render thread at probe verdicts,
+    /// persisted in the session sidecar.
+    pub probe_thresholds: Arc<crate::probe::ProbeThresholds>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -179,11 +207,136 @@ pub fn dispatch(
         "pack.info" => Ok(serde_json::to_value(ctx.pack.as_ref()).expect("pack info")),
 
         "scene.getState" => {
-            let raw = ctx
-                .scene_state
+            // §5.6 blanket leg rule: reads follow design by default; the
+            // optional `leg` param makes `pull` verifiable over RPC.
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct Params {
+                leg: Option<String>,
+            }
+            let p: Params = if req.params.is_null() {
+                Params::default()
+            } else {
+                serde_json::from_value(req.params.clone())
+                    .map_err(|e| RpcError::message(format!("params: {e}")))?
+            };
+            let state = match p.leg.as_deref() {
+                None | Some("design") => &ctx.scene_state,
+                Some("live") => &ctx.live_scene_state,
+                Some(other) => {
+                    return Err(RpcError::message(format!(
+                        "unknown leg {other:?} (\"design\" | \"live\")"
+                    )))
+                }
+            };
+            let raw = state
                 .get()
                 .ok_or_else(|| RpcError::message("no scene loaded"))?;
-            Ok(json!({ "json": raw }))
+            Ok(json!({ "json": raw, "leg": p.leg.unwrap_or_else(|| "design".into()) }))
+        }
+
+        // §5.6 probe thresholds — inline like the masters (venue state,
+        // written from the GUI, persisted in the session sidecar).
+        "probe.getThresholds" => {
+            Ok(serde_json::to_value(ctx.probe_thresholds.snapshot()).expect("thresholds"))
+        }
+
+        "probe.setThresholds" => {
+            #[derive(Deserialize)]
+            struct Params {
+                a_ms: f32,
+                b_ms: f32,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            ctx.probe_thresholds
+                .set(p.a_ms, p.b_ms)
+                .map_err(|e| RpcError::message(format!("{e:#}")))?;
+            session::touch(&ctx.session_dirty);
+            Ok(serde_json::to_value(ctx.probe_thresholds.snapshot()).expect("thresholds"))
+        }
+
+        // §5.6 two-deck verbs — queued: they mutate render-thread state and
+        // the re-entrancy rules (pending replaced / mid-ramp rejected) must
+        // be evaluated on the thread that owns the fade.
+        "promote" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct Params {
+                fade_ms: Option<f32>,
+                quantize: Option<String>,
+            }
+            let p: Params = if req.params.is_null() {
+                Params::default()
+            } else {
+                serde_json::from_value(req.params.clone())
+                    .map_err(|e| RpcError::message(format!("params: {e}")))?
+            };
+            let fade_ms = p.fade_ms.unwrap_or(500.0);
+            if !fade_ms.is_finite() || fade_ms < 0.0 {
+                return Err(RpcError::message("fade_ms must be finite and >= 0"));
+            }
+            let quantize = match p.quantize.as_deref() {
+                None | Some("bar") => crate::core::Quantize::Bar,
+                Some("now") => crate::core::Quantize::Now,
+                Some(other) => {
+                    return Err(RpcError::message(format!(
+                        "unknown quantize {other:?} (\"bar\" | \"now\")"
+                    )))
+                }
+            };
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::Promote {
+                    fade_ms,
+                    quantize,
+                    reply: reply_tx,
+                })
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
+        "pull" => {
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::Pull { reply: reply_tx })
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
+        "preview.setSource" => {
+            #[derive(Deserialize)]
+            struct Params {
+                source: String,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            let source = match p.source.as_str() {
+                "live" => crate::gpu::Leg::Live,
+                "design" => crate::gpu::Leg::Design,
+                other => {
+                    return Err(RpcError::message(format!(
+                        "unknown preview source {other:?} (\"live\" | \"design\")"
+                    )))
+                }
+            };
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::PreviewSource {
+                    source,
+                    reply: reply_tx,
+                })
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
         }
 
         "wgsl.validate" => {
@@ -429,21 +582,14 @@ pub fn dispatch(
 pub fn handle(core: &mut Core, cmd: EngineCommand) {
     match cmd {
         EngineCommand::SceneLoad { json, reply } => {
-            let res = core
-                .apply_scene_json(&json)
-                .map(|_| json!({ "ok": true }))
-                .map_err(|e| format!("{e:#}"));
-            let _ = reply.send(res);
+            // §5.6 — authoring targets the design leg; the reply may be
+            // deferred through a probe session (new pipelines are probed
+            // before they may enter design).
+            core.scene_load_rpc(json, reply);
         }
         EngineCommand::SceneReload { reply } => {
             match std::fs::read_to_string(core.scene_path()) {
-                Ok(raw) => {
-                    let res = core
-                        .apply_scene_json(&raw)
-                        .map(|_| json!({ "ok": true }))
-                        .map_err(|e| format!("{e:#}"));
-                    let _ = reply.send(res);
-                }
+                Ok(raw) => core.scene_load_rpc(raw, reply),
                 Err(e) => {
                     let _ = reply.send(Err(format!("read scene file: {e}")));
                 }
@@ -482,6 +628,19 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
                 .map(|path| json!({ "ok": true, "path": path.display().to_string() }))
                 .map_err(|e| format!("{e:#}"));
             let _ = reply.send(res);
+        }
+        EngineCommand::Promote {
+            fade_ms,
+            quantize,
+            reply,
+        } => {
+            let _ = reply.send(core.cmd_promote(fade_ms, quantize));
+        }
+        EngineCommand::Pull { reply } => {
+            let _ = reply.send(core.cmd_pull());
+        }
+        EngineCommand::PreviewSource { source, reply } => {
+            let _ = reply.send(core.cmd_preview_source(source));
         }
     }
 }

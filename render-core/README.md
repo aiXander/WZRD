@@ -38,8 +38,9 @@ render-core --scene scene.json --windowed --no-osc
 # Bind on all interfaces (audio server on another machine):
 render-core --scene scene.json --windowed --osc-addr 0.0.0.0:9000
 
-# Expose the Phase 4 JSON-RPC WebSocket so the Tauri shell (or any other
-# §3.11 client) can drive scene / effect / telemetry. Omit for headless:
+# Expose the JSON-RPC WebSocket so external §3.11 clients (remote operator,
+# future MCP wrapper) can drive scene / effect / telemetry. Omit for headless.
+# (The Tauri shell no longer uses this — it embeds the engine in-process.)
 render-core --scene scene.json --windowed --ws-addr 127.0.0.1:9123
 ```
 

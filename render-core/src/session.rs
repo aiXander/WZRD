@@ -37,6 +37,9 @@ pub struct SessionFile {
     pub params: BTreeMap<String, f32>,
     /// §5.5 per-binding scalar overrides: binding id → param name → value.
     pub overrides: BTreeMap<String, BTreeMap<String, f32>>,
+    /// §5.6 pre-flight probe thresholds A < B (ms). Venue state — they
+    /// describe *this GPU + projector*, not a scene — so they live here.
+    pub probe_thresholds: Option<crate::probe::ProbeThresholdsSnapshot>,
 }
 
 impl Default for SessionFile {
@@ -47,6 +50,7 @@ impl Default for SessionFile {
             masters: None,
             params: BTreeMap::new(),
             overrides: BTreeMap::new(),
+            probe_thresholds: None,
         }
     }
 }

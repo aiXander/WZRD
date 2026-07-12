@@ -88,6 +88,17 @@ export const writeSceneFile = (contents: string) =>
   invoke<void>('write_scene_file', { contents });
 export const readMaskPng = (maskPath: string) =>
   invoke<string>('read_mask_png', { maskPath });
+/**
+ * Collapse Step 3 — position the native (lossless, full-rate) preview
+ * window over a measured layout slot, or hide it. CSS px, viewport-relative.
+ */
+export const previewSetBounds = (
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  visible: boolean
+) => invoke<void>('preview_set_bounds', { x, y, width, height, visible });
 
 // ---------- events ----------
 

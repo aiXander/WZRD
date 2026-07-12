@@ -42,29 +42,86 @@ of scope.
 
 ## 1. System shape (as built)
 
-Four sibling processes, each independently restartable, communicating only
-over wires and files:
+**Single-process collapse landed 2026-07-12** (Steps 2–3; the plan doc is
+retired to `docs/finished/` — everything durable is in §1b below). The operator app is **one process, three native windows**;
+the engine runs as a library on an in-process render thread. The standalone
+`render-core` binary remains a separate deployment target for headless
+agents.
 
 ```
-┌────────────────────────────┐   layerpack/ (pack.json + masks/)   ┌──────────────────────────────┐
-│ OFFLINE — Python           │ ───────────────────────────────────▶│ render-core (Rust + wgpu)    │
-│ wzrd/ + wzrd_mcp/          │                                     │  - projector window (winit)  │
-│ photo→detect→align→darken  │                                     │  - mask atlas + pass plan    │
-│ →islands→layerpack         │                                     │  - driver bus + slider bank  │
-└────────────────────────────┘                                     │  - file watcher hot-reload   │
-                                                                   │  - WS JSON-RPC + telemetry   │
-┌────────────────────────────┐   OSC /audio/* → udp 127.0.0.1:9000 │    (only with --ws-addr)     │
-│ Audio Feature Server       │ ───────────────────────────────────▶│                              │
-│ (~/GitHub/Realtime_PyAudio │                                     └──────────────┬───────────────┘
-│ _FFT, separate repo)       │                                                    │ ws://127.0.0.1:9123
-└────────────────────────────┘                                     ┌──────────────▼───────────────┐
-                                                                   │ wzrd-app (Tauri shell)       │
-                                                                   │  spawns render-core, proxies │
-                                                                   │  RPC + telemetry to a React  │
-                                                                   │  webview (Prepare/Perform/   │
-                                                                   │  Debug routes)               │
-                                                                   └──────────────────────────────┘
+┌────────────────────────────┐   layerpack/ (pack.json + masks/)
+│ OFFLINE — Python           │ ──────────────────────────────────────────┐
+│ wzrd/ + wzrd_mcp/          │                                           ▼
+│ photo→detect→align→darken  │      ┌──────────────────────────────────────────────────┐
+│ →islands→layerpack         │      │ wzrd-app (Tauri, ONE process)                    │
+└────────────────────────────┘      │  main thread: webview window (React UI) +        │
+                                    │    borderless native preview child window        │
+┌────────────────────────────┐      │  engine-render thread: render-core::Core         │
+│ Audio Feature Server       │      │    - engine output window (wgpu, tao handle)     │
+│ (~/GitHub/Realtime_PyAudio │ ────▶│    - mask atlas + pass plan + driver bus         │
+│ _FFT, separate repo)       │ OSC  │    - file watcher hot-reload                     │
+└────────────────────────────┘ :9000│    - native preview blit (same device/composite) │
+                                    │  ws threads: JSON-RPC server ws://127.0.0.1:9123 │
+┌────────────────────────────┐      │    for external MCP / remote operators           │
+│ render-core binary         │      └──────────────────────────────────────────────────┘
+│ (headless agent path,      │      Tauri commands → rpc::dispatch directly (no WS hop);
+│ winit-hosted, unchanged)   │      the WS server runs the same dispatch for externals.
+└────────────────────────────┘
 ```
+
+### 1b. Collapse residue (Step 2–3, landed + spike-verified 2026-07-12)
+
+- **`wzrd-app/src-tauri/src/engine.rs` is the TauriHost.**
+  `EngineHandle::start_in_process` builds `Core::new`, creates the engine
+  output window (tauri `WindowBuilder`, needs the `unstable` tauri
+  feature), hands the window into `Core::init_gpu` (tauri windows are
+  rwh-0.6, exactly as the 2026-07-10 spike predicted), and drives Core
+  from an `engine-render` thread with the same per-frame contract
+  `WinitHost` uses. `Core::control_channel()` exposes the WS server's own
+  `RpcContext` + `EngineCommand` sender, so Tauri commands run
+  `rpc::dispatch` directly — one dispatch path for local UI, remote WS,
+  and the future MCP wrapper.
+- **Occlusion is polled, not evented** — tao has no `Occluded` event. The
+  render thread reads `NSWindow.occlusionState` (one objc msg_send) per
+  frame for *both* the engine window and the preview window, upholding
+  §3.1 for both swapchains.
+- **Render-thread rule (deadlock):** the render thread must never call a
+  tauri window method that dispatches to the main thread (`inner_size`,
+  `set_*`…) — sync Tauri commands run *on* the main thread and block on
+  render-thread replies, so that's a deadlock. Sizes flow in via `Resized`
+  events through shared state (`SizeState`).
+- **Native preview (Step 3):** a borderless, hidden-by-default tauri
+  window (`label: "preview"`) attached as a **macOS child window** of the
+  main window (`addChildWindow:ordered:` — follows drags, stacks above the
+  webview). React's `NativePreview` component (Perform hero) measures its
+  slot and pushes CSS-px bounds through the `preview_set_bounds` command;
+  the backend converts to physical screen coords and moves the child
+  window; the render thread blits the composite onto it via
+  `gpu::PreviewTarget` — the homography pipeline with identity matrix +
+  neutral masters, so preview color = projector color, un-mastered
+  (§5.4). Lossless, full-rate, same GPU device, zero readback.
+- **Crash containment (spike b):** the render loop runs under
+  `catch_unwind`; a render-thread panic (incl. wgpu's fatal-by-default
+  validation panic after device loss) kills the engine but not the
+  webview; `engine:status {running:false, last_error}` is emitted. Session
+  sidecar + scene file stay byte-identical (atomic writes). Measured
+  relaunch-to-first-presented-frame: **~160–290 ms** (dev build) — the
+  ≤20 s contract has ~two orders of magnitude of margin.
+- **Clean teardown (spike a):** every exit path funnels through
+  `RunEvent::ExitRequested` → `EngineHandle::shutdown()` → stop flag →
+  join render thread (Core saves the session and drops the GPU context on
+  that thread, *before* tauri destroys windows) → audio child killed.
+- **Env knobs:** `WZRD_DISPLAY=<idx>` → engine window borderless
+  fullscreen on that monitor (default: decorated window at pack
+  resolution); `WZRD_SPIKE=panic|device_loss` → deliberate render-thread
+  crash ~5 s after launch (test hook, never in a show).
+- **Known warts:** (1) after an engine crash, SIGTERM is a no-op (the
+  signal-hook flag's poller is dead) — quit via Cmd+Q/window close, which
+  still works; (2) the `NativePreview` placeholder div assumes a
+  height-constrained slot when honouring pack aspect; (3) `engine.rs`
+  spawns one short-lived helper thread per *queued* RPC so the request
+  timeout holds even if the render thread wedges — inline methods dispatch
+  on the caller.
 
 **The headless agent path is sacred.** `render-core --scene foo.json` with no
 `--ws-addr` runs with no control surface at all: an agent writes `scene.json`
@@ -86,7 +143,7 @@ Still committed, condensed (historical rationale in the retired v1 plan):
 | D13 | `scene.json` is canonical on disk and on the wire. No TS DSL on any critical path. |
 | D14 | Python stays Python (offline segmentation, content generation via `wzrd_mcp`). |
 | D15 | Effects are user-authored WGSL (inline or `effects/<name>/`), naga-validated, swap-on-success hot-reload. Built-ins are reference implementations, not a ceiling. |
-| P4 | Tauri shell ↔ engine as **subprocess over localhost JSON-RPC WS**, not shared-process winit. Phase 7's MCP wrapper connects to the same WS — the shell is not a privileged client. (A staged collapse plan — one process for a lossless preview — lives in `docs/TODO/single-process-collapse.md`. Its Step 1 **landed 2026-07-10**: engine logic now lives in a host-agnostic `core.rs::Core`, `app.rs` is a thin `WinitHost`, and the static spikes are answered — tao has no occlusion event (needs an `NSWindow.occlusionState` poll in a TauriHost), wgpu-on-tao is rwh-0.6-compatible. The full collapse call stays gated on the runtime spikes, the crash-recovery precondition, and the §5.6 design review.) |
+| P4 | **Superseded 2026-07-12 by the single-process collapse.** The Tauri shell now hosts the engine **in-process** (Core on a render thread; §1b): Tauri commands call `rpc::dispatch` directly, the WS server on `127.0.0.1:9123` serves the identical §3.11 surface to external MCP / remote clients, and the headless `render-core` binary (winit-hosted) is unchanged. The subprocess split served Phases 4.1–4.2 and was retired after both runtime spikes passed (clean teardown; crash containment + relaunch-with-restore ≪ 20 s). Decision history: the retired plan in `docs/finished/`. |
 
 Additive blending (`One + One` into an `Rgba16Float` composite, premultiplied
 RGBA out of every effect) is the pixel-level embodiment of the thesis — do
@@ -100,9 +157,9 @@ not "fix" it to alpha blending.
 |---|---|
 | `lib.rs` | `Cli` + `run()` — shared entry for the binary and any embedder. |
 | `main.rs` | CLI parse + **tee logger** (stderr + `log` telemetry channel via `telemetry::global_bus`). |
-| `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, session persistence (§5.3 restore-at-boot, debounced write, SIGTERM/SIGINT snapshot → `exit_requested()`), plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. |
+| `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, session persistence (§5.3 restore-at-boot, debounced write, SIGTERM/SIGINT snapshot → `exit_requested()`), plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. Step-2/3 additions: `control_channel()` (hands an embedding host the WS server's `RpcContext` + command sender — one dispatch path for every consumer), `attach_preview_surface`/`resize_preview_surface`/`set_preview_visible` (native preview; host owns §3.1 for it), `spike_force_device_loss()` (crash-spike test hook). The command channel + `RpcContext` now always exist (headless just never sends). |
 | `app.rs` | Thin `WinitHost` — window creation/fullscreen/display selection, winit event delegation into `Core`, exit decisions. The only winit-aware file besides `lib.rs`. |
-| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, composite target, pipeline cache, WGSL composer (`prelude + body + main`), homography pipeline. |
+| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, composite target, pipeline cache, WGSL composer (`prelude + body + main`), homography pipeline. Step 3: keeps `instance`/`adapter` so `PreviewTarget` (second swapchain, homography pipeline with identity/neutral uniforms) can attach at runtime; `render_preview()` self-heals `Lost`/`Outdated`. |
 | `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick(&mut)` (driver eval → uniforms, §5.2 pick re-rolls via `active` flags); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). Owns the stable hashes (`fnv1a`/`seed01`/`pick_choice`) behind layer_seed + pick determinism. |
 | `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
 | `session.rs` | §5.3 session sidecar: `SessionFile` load/save (atomic temp+rename), `session_path` (`session.json` next to the scene), the shared dirty stamp the debounced write keys off. |
@@ -112,17 +169,19 @@ not "fix" it to alpha blending.
 | `osc.rs` | UDP OSC sink for `/audio/lmh` + `/audio/onset/*` → lock-free `AudioFeatures` atomics. |
 | `rpc.rs` | JSON-RPC dispatch: inline read-only + live-tuning methods (`param.set` both forms, `master.set`) + queued `EngineCommand`s for mutations (`scene.load`, `effect.*`, `session.save`); `wgsl.validate` with user-source line remapping. |
 | `ws.rs` | tungstenite server, thread-per-connection, telemetry fan-out. |
-| `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (non-blocking composite readback → JPEG @ ~15 fps), payload types. |
+| `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay + `subscriber_count`), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (non-blocking composite readback → JPEG @ ~15 fps — **demand-gated since Step 3**: capture only runs with ≥1 `preview` subscriber), payload types. |
 | `watch.rs` | notify-based watcher over the scene file + effects dir. |
 
-**`wzrd-app/`** — `src-tauri/src/{lib,engine,rpc}.rs` (spawn + single-IO-thread
-JSON-RPC client + command proxies) and `src/` (React: Zustand store,
-`state/sceneCommit.ts` debounced commit path, `SurfaceCanvas`, `MonacoPanel`,
-`BindingInspector`, `DriverRack`, `MastersRow`, `AudioStrip`,
-`PreviewThumbnail`, `StatusStrip`, three routes). Numeric const rows in the
-driver rack tune through the §5.5 override path (amber = overridden, ↺
-clears back to the scene value); colours still go through the debounced
-scene commit.
+**`wzrd-app/`** — `src-tauri/src/{lib,engine,rpc}.rs` (in-process TauriHost —
+see §1b: engine window + render thread + telemetry fan-in + preview child
+window; `rpc.rs` command wrappers are unchanged from the subprocess era) and
+`src/` (React: Zustand store, `state/sceneCommit.ts` debounced commit path,
+`SurfaceCanvas` (still consumes the JPEG `preview` channel as its canvas
+underlay), `NativePreview` (Step-3 native hero on Perform), `MonacoPanel`,
+`BindingInspector`, `DriverRack`, `MastersRow`, `AudioStrip`, `StatusStrip`,
+three routes). Numeric const rows in the driver rack tune through the §5.5
+override path (amber = overridden, ↺ clears back to the scene value);
+colours still go through the debounced scene commit.
 
 ---
 
@@ -227,7 +286,7 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 
 | Channel | Rate | Payload |
 |---|---|---|
-| `preview` | ~15 fps | 320px JPEG of the composite, base64. |
+| `preview` | ~15 fps | 320px JPEG of the composite, base64. **Demand-gated**: captured only while ≥1 subscriber listens. Consumers: remote WS clients + the webview's Prepare canvas underlay. The Perform hero uses the native preview surface instead (§1b). |
 | `fps` | 2 Hz | Honest throughput (frames/wall-second) + p50 frame time. |
 | `frame_stats` | 2 Hz | p50/p95/p99 + mask-slice / pipeline / pass counts. |
 | `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). |
@@ -450,21 +509,17 @@ Ranked; none currently show-stopping at 5–20 layers.
    layers × many bindings. The v1 plan (§4.2) already mandates stable
    binding ids as the diff key — implement diff-based rebuild when scenes
    get big enough to notice (see §5.6).
-2. **Polling IPC loops.** The engine WS connection thread and the Tauri
-   engine-io thread each sleep 8 ms between polls (~16 ms worst-case added
-   RPC latency, constant low CPU). Human-scale traffic doesn't care;
-   replace with blocking reads + a wake channel (or async tungstenite) only
-   if profiling ever blames it.
-3. **Preview pipeline is JPEG→base64→JSON→Tauri event→`<img>`.** ~15 fps at
-   320px is cheap, but it's a dead end for a bigger/faster preview. The
-   right next step is binary WS frames (skip base64+JSON) and, later, a
-   shared-texture path. Also: the sampler captures even with zero preview
-   subscribers — the `Bus` knows subscriber counts; gate capture on demand
-   when it matters. (The radical alternative — single-process collapse for
-   a lossless Resolume-style preview — is staged in
-   `docs/TODO/single-process-collapse.md`; the call is gated on its Step-2
-   spikes and the §5.6 design review, and the binary-frames work here is
-   on hold until that call — roadmap §5.8 has the gate.)
+2. **Polling IPC loops.** The engine WS connection threads sleep 8 ms
+   between polls (~8 ms worst-case added RPC latency for *remote* clients,
+   constant low CPU). Local Tauri commands are direct dispatch since the
+   collapse — no polling on that path. Replace with blocking reads + a
+   wake channel only if profiling ever blames it.
+3. ~~Preview pipeline is a dead end~~ — **resolved locally by the collapse
+   (2026-07-12)**: the Perform hero samples the composite natively (§1b),
+   and JPEG capture is demand-gated on subscriber count. The JPEG path
+   remains (deliberately) for remote WS clients and the Prepare canvas
+   underlay; upgrade it to binary WS frames only if remote operation ever
+   becomes a primary workflow.
 4. **`thread::sleep` frame pacing.** Works (winit `ControlFlow::Poll` +
    sleep in `about_to_wait`), but a `WaitUntil`-based schedule would be
    cleaner and free the thread for command handling during the sleep.
@@ -519,10 +574,15 @@ All **§5.x** references in this doc resolve there (numbering preserved).
 - **Verify headless first.** `cd render-core && cargo run -- --scene
   examples/phase3_smoke.scene.json --windowed --no-osc`. The example pack is
   built by `python ../test.py layerpack`. Then the shell:
-  `(cd render-core && cargo build) && cd wzrd-app && WZRD_SCENE=... pnpm tauri dev`.
+  `cd wzrd-app && WZRD_SCENE=... pnpm tauri dev` (the engine compiles in as
+  a library — no separate render-core build step for the shell since the
+  collapse).
 - **Never block the render thread** — not on swapchains of possibly-hidden
-  windows, not on buffer maps (`PreviewSampler` shows the non-blocking
-  pattern), not on channels with unbounded senders.
+  windows (this now covers *two* swapchains: engine window and native
+  preview), not on buffer maps (`PreviewSampler` shows the non-blocking
+  pattern), not on channels with unbounded senders, and — TauriHost — not
+  on tauri window methods that dispatch to the main thread (§1b deadlock
+  rule).
 - **Swap-on-success everywhere.** Scene loads, effect compiles, plan
   rebuilds: build the new thing completely, validate, then atomically
   replace. A failed edit must never blank the projector or crash the engine.

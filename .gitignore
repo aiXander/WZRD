@@ -55,3 +55,6 @@ node_modules/
 *.tsbuildinfo
 # WZRD engine-written session sidecars (operator state, per-venue — not source)
 session.json
+
+# §5.6 engine-written design-leg autosave (crash-recovery draft — not source)
+.wzrd/

@@ -36,6 +36,7 @@ pub const ALL_CHANNELS: &[&str] = &[
     "audio",
     "connectivity",
     "masters",
+    "deck",
 ];
 
 /// What an emitter pushes onto the bus and what a subscriber sees on the
@@ -106,6 +107,21 @@ impl Bus {
         subs.retain(|s| s.id != id);
     }
 
+    /// How many live subscribers listen on `channel`. Lets emitters skip
+    /// expensive work (e.g. the preview JPEG readback) when nobody is
+    /// listening (§6.4 demand-gated capture).
+    pub fn subscriber_count(&self, channel: &str) -> usize {
+        self.inner
+            .subscribers
+            .lock()
+            .map(|subs| {
+                subs.iter()
+                    .filter(|s| s.channels.contains(channel))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     /// Update the set of channels a live subscriber is listening on.
     pub fn update_channels(&self, id: u64, channels: HashSet<String>) {
         let mut subs = self.inner.subscribers.lock().expect("subscribers lock");
@@ -121,7 +137,7 @@ impl Bus {
     pub fn emit(&self, channel: &str, payload: Value) {
         let sticky = matches!(
             channel,
-            "hot_reload" | "audio_freshness" | "connectivity" | "masters"
+            "hot_reload" | "audio_freshness" | "connectivity" | "masters" | "deck"
         );
         if sticky {
             if let Ok(mut s) = self.inner.sticky.lock() {
@@ -194,6 +210,10 @@ impl Bus {
     }
 
     pub fn emit_hot_reload(&self, event: HotReloadEvent) {
+        let probe = event
+            .probe
+            .as_ref()
+            .map(|p| serde_json::to_value(p).expect("probe report"));
         self.emit(
             "hot_reload",
             json!({
@@ -201,8 +221,15 @@ impl Bus {
                 "ok": event.ok,
                 "elapsed_ms": event.elapsed_ms,
                 "message": event.message,
+                "probe": probe,
             }),
         );
+    }
+
+    /// §5.6 two-deck snapshot — sticky, emitted on every promote/pull/preview
+    /// transition (plus a ~10 Hz trickle while a fade ramps).
+    pub fn emit_deck(&self, snapshot: DeckSnapshot) {
+        self.emit("deck", serde_json::to_value(snapshot).expect("deck snapshot"));
     }
 
     pub fn emit_preview_jpeg(&self, jpeg_bytes: &[u8], width: u32, height: u32) {
@@ -263,6 +290,38 @@ pub struct HotReloadEvent {
     pub ok: bool,
     pub elapsed_ms: f32,
     pub message: Option<String>,
+    /// §5.6 pre-flight probe outcome, when one ran for this reload —
+    /// `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts}` so the
+    /// authoring agent self-corrects on performance, not just compiles.
+    pub probe: Option<ProbeReport>,
+}
+
+/// The probe payload that rides `hot_reload` (§5.6). `predicted_p95_ms` /
+/// `band` / `thumbnail_b64` describe the *worst* probed pipeline;
+/// `verdicts` carries the per-pipeline breakdown.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeReport {
+    pub compiled: bool,
+    pub predicted_p95_ms: f32,
+    pub band: String,
+    pub thumbnail_b64: Option<String>,
+    pub verdicts: Vec<crate::probe::KeyVerdict>,
+}
+
+/// §5.6 deck snapshot — the two-leg state the UI's promote controls render.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeckSnapshot {
+    /// "idle" | "pending" (bar-quantized, waiting for the boundary) |
+    /// "ramping" (fade in flight).
+    pub promote: String,
+    /// Live→design crossfade position, 0..1.
+    pub mix: f32,
+    pub fade_ms: Option<f32>,
+    pub quantize: Option<String>,
+    /// Which composite the native preview samples: "live" | "design".
+    pub preview_source: String,
+    /// False on headless single-leg runs (promote/pull unavailable).
+    pub two_leg: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -472,7 +531,11 @@ impl PreviewSampler {
         }
     }
 
-    pub fn maybe_capture(&mut self, gpu: &GpuContext, bus: &Bus) {
+    /// `texture` is the composite this sampler reads — the design leg's in
+    /// two-leg mode (§5.6 blanket leg rule: the JPEG channel is an authoring
+    /// surface), the live composite headless. Must match the pack's
+    /// composite shape (`gpu.composite_width/height`).
+    pub fn maybe_capture(&mut self, gpu: &GpuContext, bus: &Bus, texture: &wgpu::Texture) {
         // Drive any pending map callback forward. Non-blocking — returns
         // immediately whether work has finished or not, and fires any
         // completed callbacks along the way.
@@ -544,7 +607,7 @@ impl PreviewSampler {
             });
         enc.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: &gpu.composite_texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -618,7 +681,7 @@ fn linear_to_srgb(c: f32) -> f32 {
     }
 }
 
-fn encode_jpeg_thumbnail(
+pub(crate) fn encode_jpeg_thumbnail(
     src: &[u8],
     src_w: u32,
     src_h: u32,

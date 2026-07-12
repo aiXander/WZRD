@@ -136,8 +136,12 @@ pub enum EffectKind {
     /// switches between them.
     BuiltIn { effect_id: u32 },
     /// User WGSL — body of `fn effect(...)`. Pipeline key uniquely identifies
-    /// the pipeline cache slot; for inline effects it's the content hash, for
-    /// project-local effects it's the file path.
+    /// the pipeline cache slot; it is **content-derived** (path + source
+    /// hash for project-local effects, source hash for inline ones) so an
+    /// edited shader gets a *new* cache slot — the §5.6 live leg keeps
+    /// drawing the old pipeline until promote, and cache cleanup is a GC
+    /// pass over the keys both legs still reference (never an eviction of a
+    /// referenced key).
     User {
         pipeline_key: String,
         /// WGSL source as it was last successfully loaded. Used at pipeline
@@ -512,7 +516,9 @@ fn load_user_effect(name: &str, shader_path: &Path, descriptor_path: &Path) -> R
     Ok(EffectDef {
         name: name.to_string(),
         kind: EffectKind::User {
-            pipeline_key: format!("file:{}", shader_path.display()),
+            // Content-derived (§5.6): an edit yields a fresh key, so the
+            // old pipeline survives in the cache for the live leg.
+            pipeline_key: format!("file:{}#{}", shader_path.display(), short_hash(&wgsl)),
             wgsl,
             source_path: Some(shader_path.to_path_buf()),
         },

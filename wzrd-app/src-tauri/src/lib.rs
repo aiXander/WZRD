@@ -1,22 +1,54 @@
-//! WZRD Tauri shell — Phase 4 wrapper around the `render-core` engine.
+//! WZRD Tauri shell — single-process host for the `render-core` engine
+//! (app-collapse Step 2).
 //!
-//! The shell spawns `render-core` as a subprocess (`--ws-addr
-//! 127.0.0.1:9123`) and proxies every Tauri command through its JSON-RPC
-//! WebSocket. The same RPC surface (§3.11, D13) is what Phase 7 will expose
-//! to MCP — no second contract, no shim code in between. The headless agent
-//! path (`render-core --scene foo.json` with no `--ws-addr`) is unchanged.
+//! The shell runs the engine as a library on an in-process render thread:
+//! one process, two windows (webview + engine output). Tauri commands call
+//! `rpc::dispatch` directly — the same §3.11 surface the engine's WS server
+//! (still alive on 127.0.0.1:9123) serves to external MCP / remote clients.
+//! The headless agent path (`render-core --scene foo.json`, winit-hosted)
+//! is unchanged and lives in the separate `render-core` binary.
 
 mod engine;
 mod rpc;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-use serde_json::json;
 use tauri::Manager;
 
 use crate::engine::EngineHandle;
+
+/// Tee logger: stderr via env_logger + the engine's `log` telemetry channel
+/// once the bus exists (Core::new sets the global). Same shape as the
+/// standalone binary's logger — the webview's Debug log stream depends on
+/// it. Only Info and louder are forwarded; the bus internals log at trace,
+/// which also breaks any recursion.
+struct TeeLogger {
+    inner: env_logger::Logger,
+}
+
+impl log::Log for TeeLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        self.inner.log(record);
+        if record.level() <= log::Level::Info && self.inner.matches(record) {
+            if let Some(bus) = render_core::telemetry::global_bus() {
+                bus.emit_log(
+                    record.level().as_str().to_ascii_lowercase().as_str(),
+                    record.target(),
+                    &record.args().to_string(),
+                );
+            }
+        }
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+}
 
 pub struct AppState {
     pub engine: Arc<EngineHandle>,
@@ -130,37 +162,32 @@ fn spawn_audio_server() -> Result<std::process::Child, String> {
         .map_err(|e| format!("spawning audio server in {}: {e}", dir.display()))
 }
 
-fn resolve_engine_exe() -> PathBuf {
-    // `cargo tauri dev` puts both binaries in `target/debug`. In bundled
-    // release the engine should sit next to wzrd-app in the same dir; we
-    // search both. WZRD_ENGINE_EXE overrides for non-standard layouts.
-    if let Ok(p) = std::env::var("WZRD_ENGINE_EXE") {
-        return PathBuf::from(p);
-    }
-    let candidates = [
-        // Tauri convention: target/{debug,release}/render-core
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("render-core"))),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("render-core.exe"))),
-        Some(PathBuf::from("../../render-core/target/debug/render-core")),
-        Some(PathBuf::from("../render-core/target/debug/render-core")),
-    ];
-    for c in candidates.into_iter().flatten() {
-        if c.exists() {
-            return c;
+/// Full teardown, callable from any exit path: stop + join the render
+/// thread (Core persists the session and drops the GPU context on that
+/// thread), then kill the audio child. Idempotent.
+fn shutdown_all(state: &AppState) {
+    state.engine.shutdown();
+    if let Ok(mut guard) = state.audio_child.lock() {
+        if let Some(mut c) = guard.take() {
+            let _ = c.kill();
+            let _ = c.wait();
         }
     }
-    PathBuf::from("render-core")
 }
 
 pub fn run() {
-    env_logger::Builder::from_env(
+    let inner = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"),
     )
-    .init();
+    .build();
+    log::set_max_level(inner.filter());
+    log::set_boxed_logger(Box::new(TeeLogger { inner })).expect("logger already set");
+
+    // The engine render thread now lives in this process — hold the same
+    // App Nap / timer-coalescing opt-out the standalone binary takes, or
+    // the frame rate collapses to ~9 fps when the app loses focus (§3.1b).
+    #[cfg(target_os = "macos")]
+    render_core::hold_latency_critical_assertion();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -180,18 +207,17 @@ pub fn run() {
                 .parent()
                 .map(|p| p.join("effects"))
                 .filter(|p| p.exists());
-            let exe = resolve_engine_exe();
             log::info!(
-                "scene={} effects_dir={:?} engine_exe={}",
+                "scene={} effects_dir={:?} (engine in-process)",
                 scene_path.display(),
                 effects_dir,
-                exe.display()
             );
 
-            let handle = match EngineHandle::spawn(app.handle().clone(), scene_path.clone(), exe) {
+            let handle = match EngineHandle::start_in_process(app.handle().clone(), scene_path.clone())
+            {
                 Ok(h) => Arc::new(h),
                 Err(e) => {
-                    log::error!("could not spawn render-core: {e:#}");
+                    log::error!("could not start in-process engine: {e:#}");
                     return Err(e.to_string().into());
                 }
             };
@@ -232,10 +258,16 @@ pub fn run() {
             rpc::master_set,
             rpc::effect_describe,
             rpc::session_save,
+            rpc::promote,
+            rpc::pull,
+            rpc::preview_set_source,
+            rpc::probe_get_thresholds,
+            rpc::probe_set_thresholds,
             rpc::wgsl_validate,
             rpc::effect_upsert,
             rpc::effect_remove,
             rpc::last_payload,
+            rpc::preview_set_bounds,
             rpc::list_effects,
             rpc::read_effect,
             rpc::read_scene_file,
@@ -243,21 +275,26 @@ pub fn run() {
             rpc::read_mask_png,
         ])
         .on_window_event(|window, event| {
+            // The engine window has its own handler (engine.rs); closing the
+            // operator (webview) window quits the app — teardown is
+            // centralized in the ExitRequested handler below.
+            if window.label() != "main" {
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                if let Some(state) = window.try_state::<AppState>() {
-                    state.engine.shutdown();
-                    if let Ok(mut guard) = state.audio_child.lock() {
-                        if let Some(mut c) = guard.take() {
-                            let _ = c.kill();
-                            let _ = c.wait();
-                        }
-                    }
-                }
+                window.app_handle().exit(0);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running WZRD Tauri shell");
-
-    let _ = json!(0); // ensure serde_json import not pruned in release
-    let _ = Duration::from_secs(0);
+        .build(tauri::generate_context!())
+        .expect("error while building WZRD Tauri shell")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // Joins the render thread *before* tauri destroys windows —
+                // Core's surface (and its window handle) drop while the
+                // native window is still alive (spike a: clean teardown).
+                if let Some(state) = app.try_state::<AppState>() {
+                    shutdown_all(&state);
+                }
+            }
+        });
 }
