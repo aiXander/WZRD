@@ -16,6 +16,7 @@ import {
   onTelemetry,
   packInfo,
   readSceneFile,
+  type DeckPayload,
 } from './api/ipc';
 import { StatusStrip } from './components/StatusStrip';
 import { TopBar } from './components/TopBar';
@@ -65,6 +66,13 @@ export default function App() {
       } catch (e) {
         console.warn('last_payload(masters):', e);
       }
+      try {
+        // §5.6 deck state is sticky too (emitted at design-leg boot).
+        const d = await lastPayload<DeckPayload>('deck');
+        if (d) tStore.setDeck(d);
+      } catch (e) {
+        console.warn('last_payload(deck):', e);
+      }
 
       unlistenT = await onTelemetry((frame) => {
         const st = useStore.getState();
@@ -93,6 +101,9 @@ export default function App() {
             break;
           case 'masters':
             st.setMasters(frame.payload);
+            break;
+          case 'deck':
+            st.setDeck(frame.payload);
             break;
           case 'preview':
             st.setPreview(frame.payload);

@@ -44,11 +44,58 @@ export type EngineStatus = {
   last_error: string | null;
 };
 
+/** §5.6 — one probed pipeline's verdict. */
+export type ProbeVerdict = {
+  key: string;
+  label: string;
+  predicted_p95_ms: number;
+  band: 'green' | 'yellow' | 'red';
+  thumbnail_b64: string | null;
+};
+
+/** §5.6 — pre-flight probe report riding `hot_reload` + apply replies. */
+export type ProbeReport = {
+  compiled: boolean;
+  predicted_p95_ms: number;
+  band: 'green' | 'yellow' | 'red';
+  thumbnail_b64: string | null;
+  verdicts: ProbeVerdict[];
+};
+
+/** §5.6 — sticky `deck` channel payload (two-leg state). */
+export type DeckPayload = {
+  promote: 'idle' | 'pending' | 'ramping';
+  mix: number;
+  fade_ms: number | null;
+  quantize: string | null;
+  preview_source: 'live' | 'design';
+  two_leg: boolean;
+};
+
+export type ProbeThresholds = { a_ms: number; b_ms: number };
+
 // ---------- commands ----------
 
 export const engineStatus = () => invoke<EngineStatus>('engine_status');
 export const packInfo = () => invoke<PackInfo>('pack_info');
 export const sceneGetState = () => invoke<{ json: string }>('scene_get_state');
+/**
+ * §5.6 promote — crossfade the projector to the design composite, then adopt
+ * design's plan into the live slot. quantize 'bar' (default) starts the fade
+ * on the next bar boundary; 'now' starts immediately.
+ */
+export const promote = (fadeMs: number, quantize: 'bar' | 'now') =>
+  invoke<{ ok: boolean; state: string }>('promote', { fadeMs, quantize });
+/** §5.6 pull — hard-copy live's scene back into design. */
+export const pull = () => invoke<{ ok: boolean }>('pull');
+/** §5.6 — which composite the native preview samples (LIVE ⇄ DESIGN). */
+export const previewSetSource = (source: 'live' | 'design') =>
+  invoke<{ ok: boolean; source: string }>('preview_set_source', { source });
+/** §5.6 probe thresholds A < B (ms of predicted full-res p95). */
+export const probeGetThresholds = () =>
+  invoke<ProbeThresholds>('probe_get_thresholds');
+export const probeSetThresholds = (aMs: number, bMs: number) =>
+  invoke<ProbeThresholds>('probe_set_thresholds', { aMs, bMs });
 export const sceneLoad = (jsonText: string) =>
   invoke<unknown>('scene_load', { jsonText });
 export const sceneReload = () => invoke<unknown>('scene_reload');

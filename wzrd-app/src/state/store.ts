@@ -9,7 +9,7 @@
 // history.
 
 import { create } from 'zustand';
-import type { PackInfo } from '../api/ipc';
+import type { DeckPayload, PackInfo, ProbeReport } from '../api/ipc';
 
 export type FpsPayload = {
   fps: number;
@@ -26,6 +26,8 @@ export type HotReload = {
   ok: boolean;
   elapsed_ms: number;
   message: string | null;
+  /** §5.6 — pre-flight probe verdict, when one ran for this reload. */
+  probe?: ProbeReport | null;
 };
 export type AudioPayload = {
   band_low: number;
@@ -126,6 +128,11 @@ interface Store {
   masters: Masters | null;
   setMasters: (v: Masters) => void;
 
+  // §5.6 two-deck state — sticky `deck` channel (promote phase, mix,
+  // preview source). Null until the engine's first emission arrives.
+  deck: DeckPayload | null;
+  setDeck: (v: DeckPayload) => void;
+
   preview: { width: number; height: number; data_b64: string } | null;
   setPreview: (v: Store['preview']) => void;
 
@@ -193,6 +200,9 @@ export const useStore = create<Store>((set) => ({
 
   masters: null,
   setMasters: (v) => set({ masters: v }),
+
+  deck: null,
+  setDeck: (v) => set({ deck: v }),
 
   preview: null,
   setPreview: (v) => set({ preview: v }),

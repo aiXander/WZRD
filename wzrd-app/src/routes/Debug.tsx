@@ -6,7 +6,8 @@
 //
 // The page I'll stare at most while iterating on shaders, per the spec.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { probeGetThresholds, probeSetThresholds } from '../api/ipc';
 import { useStore } from '../state/store';
 
 function Panel({
@@ -161,6 +162,23 @@ export function DebugRoute() {
               />
               <span className="font-mono">{h.target}</span>
               <span className="text-zinc-500">{h.elapsed_ms.toFixed(0)}ms</span>
+              {h.probe && (
+                <span
+                  className={
+                    'px-1.5 rounded text-[10px] tracking-wider ' +
+                    (h.probe.band === 'green'
+                      ? 'bg-emerald-500/20 text-emerald-300'
+                      : h.probe.band === 'yellow'
+                      ? 'bg-amber-500/20 text-amber-300'
+                      : 'bg-red-500/20 text-red-300')
+                  }
+                  title={h.probe.verdicts
+                    .map((v) => `${v.label}: ${v.predicted_p95_ms.toFixed(1)} ms (${v.band})`)
+                    .join('\n')}
+                >
+                  probe {h.probe.band} · {h.probe.predicted_p95_ms.toFixed(1)}ms
+                </span>
+              )}
               {h.message && (
                 <span className="text-accent-red truncate flex-1">
                   {h.message.split('\n')[0]}
@@ -172,6 +190,10 @@ export function DebugRoute() {
             <div className="text-zinc-500">no events yet</div>
           )}
         </div>
+      </Panel>
+
+      <Panel title="Pre-flight probe thresholds" defaultOpen>
+        <ProbeThresholdsPanel />
       </Panel>
 
       <Panel title="Log stream">
@@ -233,6 +255,74 @@ export function DebugRoute() {
           </div>
         </div>
       </Panel>
+    </div>
+  );
+}
+
+/// §5.6 — venue-level probe thresholds A < B (predicted full-res p95, ms).
+/// Persisted engine-side in the session sidecar; frame budget @60 Hz is
+/// 16.6 ms. Green < A, yellow A..B (flagged, still enters design), red > B
+/// (refused entry).
+function ProbeThresholdsPanel() {
+  const [a, setA] = useState<string>('');
+  const [b, setB] = useState<string>('');
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    probeGetThresholds()
+      .then((t) => {
+        setA(String(t.a_ms));
+        setB(String(t.b_ms));
+      })
+      .catch((e) => setStatus(String(e)));
+  }, []);
+
+  function save() {
+    const aMs = parseFloat(a);
+    const bMs = parseFloat(b);
+    if (!isFinite(aMs) || !isFinite(bMs)) {
+      setStatus('thresholds must be numbers');
+      return;
+    }
+    probeSetThresholds(aMs, bMs)
+      .then((t) => {
+        setA(String(t.a_ms));
+        setB(String(t.b_ms));
+        setStatus('saved (persists in session.json)');
+      })
+      .catch((e) => setStatus(String(e)));
+  }
+
+  return (
+    <div className="flex items-center gap-3 text-xs">
+      <label className="flex items-center gap-1.5">
+        <span className="text-zinc-500">A (green below)</span>
+        <input
+          className="w-16 bg-ink-900 border border-ink-600 rounded px-1.5 py-0.5 font-mono"
+          value={a}
+          onChange={(e) => setA(e.target.value)}
+        />
+        <span className="text-zinc-500">ms</span>
+      </label>
+      <label className="flex items-center gap-1.5">
+        <span className="text-zinc-500">B (red above)</span>
+        <input
+          className="w-16 bg-ink-900 border border-ink-600 rounded px-1.5 py-0.5 font-mono"
+          value={b}
+          onChange={(e) => setB(e.target.value)}
+        />
+        <span className="text-zinc-500">ms</span>
+      </label>
+      <button
+        className="px-2.5 py-0.5 rounded border border-ink-600 text-zinc-300 hover:bg-ink-700"
+        onClick={save}
+      >
+        save
+      </button>
+      <span className="text-zinc-500">
+        budget 16.6 ms @ 60 Hz · yellow enters design flagged · red is refused
+      </span>
+      {status && <span className="text-zinc-400">{status}</span>}
     </div>
   );
 }

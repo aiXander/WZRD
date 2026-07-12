@@ -655,7 +655,7 @@ fn telemetry_loop(inner: Arc<EngineInner>, app: AppHandle, bus: render_core::tel
             Ok(frame) => {
                 if matches!(
                     frame.channel.as_str(),
-                    "hot_reload" | "audio_freshness" | "connectivity" | "fps" | "masters"
+                    "hot_reload" | "audio_freshness" | "connectivity" | "fps" | "masters" | "deck"
                 ) {
                     inner
                         .last_payloads
