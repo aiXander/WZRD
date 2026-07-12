@@ -8,15 +8,14 @@
 >
 > Ordered by leverage toward `../reference/user_design_spec.md`. Each item is
 > scoped so an agent can pick it up standalone. **General rule: engine first,
-> headless-verifiable, UI second.** §5.1–§5.5 are resolved (landed or
-> dropped, 2026-07-11). The single-process collapse (Steps 2–3) **LANDED
-> 2026-07-12** — both runtime spikes passed; current topology + residue in
-> [../reference/render-engine.md](../reference/render-engine.md) §1/§1b.
-> **Next up: §5.6 (two-deck) — all gating operator decisions are now made
-> (2026-07-12); the section is execution-ready with an ordered build
-> sequence.** Its design-leg preview builds on the native preview surface
-> that now exists. Hard prerequisite before the collapsed build plays a live
-> show: the §5.6 shader pre-flight probe (step 4 of the sequence).
+> headless-verifiable, UI second.** §5.1–§5.6 are resolved (landed or
+> dropped). The single-process collapse (Steps 2–3) and the §5.6 two-deck
+> architecture (incl. the shader pre-flight probe — the hard pre-live-show
+> prerequisite) **LANDED 2026-07-12**; current contracts in
+> [../reference/render-engine.md](../reference/render-engine.md) §1/§1b/§2.6.
+> **Next up by leverage: the §5.6 auto-pilot playlist follow-up (thin
+> scheduler over existing verbs), §5.7 (layer object), or §5.11 hardening
+> (probation window + headless status file).**
 
 ### 5.1 ~~Live transport: music-locked BPM~~ — DROPPED (2026-07-11)
 
@@ -65,8 +64,8 @@ preview deliberately shows the un-mastered composite); speed as per-frame
 every `audio.*` read including the `state.audio_*` uniform. RPC
 `master.set`/`master.list` + sticky `masters` telemetry; persisted in the
 sidecar; always-visible row in Perform (double-click a label to reset).
-**Crossfade-time master still pending** — it only means something once
-§5.6's promote exists; add it there.
+**Crossfade-time master still pending** — promote exists now (§5.6, landed);
+tracked in the §5.6 leftovers alongside the auto-pilot playlist.
 
 ### 5.5 Params first-class: descriptor knobs + overrides — LANDED (2026-07-11)
 
@@ -89,239 +88,35 @@ every file re-implementing `permute()`/`hsv2rgb()`. WGSL has no native
 `naga`. The compile entry point is still the single `gpu::compose_shader` /
 `build_effect_pipeline` pair, so wedging it in stays a one-layer change.
 
-### 5.6 Design/Live legs + Promote/Pull (the two-deck architecture)
+### 5.6 Design/Live legs + Promote/Pull (the two-deck architecture) — LANDED (2026-07-12)
 
-The single biggest structural feature (spec: "two legs, one deck"). All the
-gating operator decisions are now made (2026-07-12) — this section is
-**execution-ready**; the ordered build sequence is at the end. A design-review
-pass (2026-07-12) folded in the amendments marked below: pointer-swap promote,
-cross-leg pipeline-cache guard, probe calibration + pessimistic drivers,
-demand-gated design rendering, the blanket leg rule, and promote re-entrancy.
+Implemented in full (execution steps 1–6, engine + UI) — the complete
+contract now lives in
+[../reference/render-engine.md](../reference/render-engine.md) **§2.6**
+(legs + blanket leg rule, promote/pull semantics + re-entrancy,
+demand-gated design rendering, content-hashed pipeline keys + cross-leg GC,
+pre-flight probe with calibration + pessimistic drivers, design autosave,
+single-window preview source toggle) and §2.3 (new RPC verbs + `deck`
+channel + `hot_reload.probe`). Verified over WS with a 31-check smoke
+(edit-isolation, promote/pull, re-entrancy, probe green/red gating,
+autosave restore). Residue worth knowing:
 
-- Engine holds **two `PassPlan` slots**: `live` (drives the projector) and
-  `design` (renders only to its own offscreen composite). Each leg owns its
-  own composite target (memory doubles — acceptable). All authoring RPCs
-  (`scene.load`, `effect.upsert`, param edits) target `design` by default;
-  `live` is immutable except via:
-  - `promote {fade_ms, quantize}` — crossfade the projector output from the
-    live composite to the design composite (two composites already exist as
-    textures; the final pass lerps), then **copy** design's scene into the
-    live slot. **Implementation (amendment 2026-07-12): the copy is a
-    plan-pointer swap, not a live-slot rebuild.** On ramp completion, live
-    adopts design's already-built `PassPlan` (zero rebuild, zero hitch on
-    the projector leg); design's plan is then rebuilt from the same scene
-    JSON in the background — the expensive part lands on the leg nobody is
-    projecting. Safe because picks are stateless (§5.2: a pure hash of
-    binding id + transport cycle, so the rebuilt design plan picks
-    identically) and pipelines cache-hit (no recompiles).
-    **Quantize (operator decision 2026-07-12):**
-    `quantize: "bar" | "now"`, default `"bar"` — the fade *starts* on the
-    next bar boundary so the visual change lands on a downbeat (both legs
-    tick the same transport, so the boundary is well-defined); `"now"`
-    starts immediately. Surface it as a toggle next to the promote control.
-    **Promote is semantically a copy, not an exchange:** design keeps its
-    content (now identical to live), so the performer keeps iterating on the
-    same idea — the scratchpad never snaps back to the pre-promote look, and
-    "promote, push further, promote again" needs no manual `pull` between
-    rounds. (The pointer swap above is invisible to the operator — both legs
-    end up holding the same content.)
-  - `pull` — hard-copy live's scene back into design (the explicit reverse).
-  - **Re-entrancy (amendment 2026-07-12), part of the RPC contract:** a
-    *pending* bar-quantized promote (fade not yet started) is **replaced**
-    by a newer `promote`; while a fade is actively ramping, `promote` and
-    `pull` are **rejected** with an error until the ramp completes. The
-    auto-pilot playlist will hit these paths programmatically — the rule
-    must be deterministic, not UI polish.
-- **Shared `pipeline_cache` needs a cross-leg eviction guard (amendment
-  2026-07-12).** Pipelines are cached per effect key in `gpu.pipeline_cache`;
-  `effect.remove` evicts keys, and `PassPlan` passes *silently skip* on a
-  cache miss (`compositor.rs`). Safe today with one plan — but with two
-  legs, an eviction driven by a *design* edit can remove a pipeline the
-  *live* plan still references, and live layers stop drawing mid-show with
-  no error. Eviction must consult both plans' live `pipeline_key` sets:
-  evict only when unreferenced by either leg. Lands in build step 1.
-- **Design-leg rendering is demand-gated (amendment 2026-07-12); ticking is
-  not.** Both legs tick every frame (cheap; keeps transport/pick state
-  coherent), but design's render passes only run when something consumes
-  the result: the preview toggle is on DESIGN, ≥1 WS `preview` subscriber
-  exists (the `Bus::subscriber_count` gate the JPEG sampler already uses),
-  or a promote fade is in flight (both composites must be current while the
-  final pass lerps). Otherwise the design leg costs zero GPU — the probe
-  exists to protect live headroom; the architecture shouldn't spend half of
-  it by default.
-- **Knob/override carry across legs — resolved to "no copy needed"
-  (operator decision 2026-07-12):** the §5.5 `SliderBank` + `ParamOverrides`
-  tables stay **single, shared, venue-level** state (keyed by slider name /
-  by binding id + param name), consulted by *both* legs' `tick()`. Operator
-  knobs aren't scene content, so a tuned value is automatically identical on
-  both legs — carry-forward across promote/pull falls out for free, and a
-  knob can never jump under the operator's finger (spec §4). No per-leg
-  override table, no copy step on promote/pull. (Edge case, accepted: if
-  design and live momentarily hold a same-id binding with *different*
-  effects mid-edit, the shared override applies to both — which is exactly
-  the intended carry-forward, not a bug.)
-- Both plans tick from the **same shared transport/audio bus** (already how
-  the driver bus is built) so a bar-quantized promote lands in sync.
-- The AI/agent only ever sees the design leg (spec §5: drafts never reach
-  the crowd). **Blanket leg rule (amendment 2026-07-12): every authoring
-  and observability surface follows design** — the file watcher, the JPEG
-  `preview` channel, the Prepare canvas underlay, `scene.getState`, the
-  `drivers` channel, and `frame_stats` pass counts. Only the projector and
-  the preview toggle's LIVE position show live. `scene.getState` gains an
-  optional `leg: "design" | "live"` param (default `design`) so `pull` is
-  verifiable over RPC and the §5.10 MCP wrapper stays unambiguous.
-  Divergence between legs is transient (promote/pull re-converge them), so
-  the rule costs nothing in practice. Headless-only runs (no WS) collapse
-  to a single live leg exactly as today — watcher binds live.
-- Prerequisite: diff-based plan rebuild (reference §4 weakness 1) is *not*
-  required.
+- Live-freeze is implemented via **content-derived pipeline keys** + a
+  retain-set GC, not by guarding eviction of path-keyed pipelines — an
+  edited shader simply gets a new cache slot while live keeps the old one.
+- Probe frames interleave with live frames (~3.5 ms/loop-iteration budget);
+  overhead is calibrated once per boot against a trivial shader.
+- Headless (no `--ws-addr`) collapses to a single live leg — no design
+  composite, no probe — byte-identical to the pre-two-deck engine.
 
-This also creates the natural home for the **auto-pilot playlist**
-(spec §13): a queue of saved scenes promoted on a bar/minute schedule with
-per-entry dwell, skipping entries that fail to build. **Deferred (operator
-decision 2026-07-12): explicitly out of §5.6 scope** — it ships as a thin
-follow-up layer once promote is proven solid live. Design constraint on
-§5.6 so the deferral stays cheap: the playlist must need no new engine
-verbs — a scheduler composing existing calls (`scene.load` → design, wait
-for build/probe OK, `promote {quantize:"bar"}`, dwell, repeat, skip on
-failure).
-
-**Shader pre-flight probe — a load *predictor* (operator decision
-2026-07-12).** The design leg shares the process and GPU with the live leg,
-so a pathological AI-written shader entering *design* still stalls the *live*
-output. The probe answers one question before a shader is allowed in: *how
-much load will this put on the GPU at full resolution and full fps — will it
-drown the framerate?* The gate covers **any new pipeline entering design,
-whatever the entry path** (amendment 2026-07-12) — `effect.upsert`, watcher
-reloads, *and* `scene.load` (a scene can pull in new effects; the auto-pilot's
-"wait for build/probe OK" step already assumes this). The engine
-(a) naga-compiles, (b) renders the effect ~60 frames to a scratch offscreen
-target at **half** pack resolution, (c) measures p95 frame time and
-**scales it up to a predicted full-res p95** (fragment cost scales with
-pixel count).
-
-**Scaling must calibrate out fixed overhead (amendment 2026-07-12).** Naive
-`predicted ≈ measured × full_px/probe_px` assumes the measured time is all
-fragment work; at reduced res a probe frame is dominated by fixed per-frame
-cost (encoder submit, scheduling, an unsaturated GPU), and multiplying that
-overhead by the pixel ratio predicts red for shaders that are actually fine.
-Fix: probe a trivial shader once at boot to measure the fixed floor, then
-`predicted = overhead + (measured − overhead) × full_px/probe_px`. Half res
-(4× ratio) keeps the correction small — quarter res (16×) would amplify any
-calibration error, which is why it was dropped.
-
-**Probe with pessimistic driver values (amendment 2026-07-12).** A shader
-whose cost scales with an audio-driven param (iteration counts, ray steps)
-probes cheap in silence and blows the budget on the first drop. During probe
-frames, drivers evaluate pessimistically: `audio.*` pinned to 1.0, scalar
-params at their descriptor `max` where one exists (current value otherwise).
-The probe answers "worst case at this venue", not "cost at this instant".
-
-**Three-band verdict against two operator-set thresholds A < B** (predicted
-full-res p95, in ms; budget = 16.6 ms @ 60 Hz):
-
-- **predicted < A → green** — passes clean into the design plan.
-- **A ≤ predicted ≤ B → yellow** ("heavy but doable") — **still swaps into
-  design** so the operator/agent can iterate on the look, but flagged; the
-  §5.11 full-res probation window is the live safety net if it's later
-  promoted.
-- **predicted > B → red** — refused entry to design entirely (same as a
-  compile error); the previous pipeline stays. This is the only hard gate.
-
-So the probe is **advisory in the middle band, hard gate above B** — not a
-binary pass/fail. **A and B live in the session sidecar** (§2.5 / §5.3),
-not scene.json: they describe *this GPU + projector*, which is venue-level
-state alongside calibration and masters, so they persist per-venue and are
-set from the GUI. Defaults ≈ A 8 ms / B 14 ms, tunable. New RPC
-`probe.setThresholds {a_ms, b_ms}` (inline, sidecar-persisted) +
-`probe.getThresholds`.
-
-The probe result — `{compiled, predicted_p95_ms, band, thumbnail}` — goes
-out on `hot_reload` telemetry and the §5.11 status file, so the authoring
-agent self-corrects on *performance and look*, not just compile errors,
-before the operator ever sees the draft. Runs on a single M2 GPU: same
-device, probe frames sequenced between live frames (a few ms/frame of budget
-during the burst). Known residual risk: an in-process probe cannot contain a
-shader that *hangs* the GPU device — that class is covered by the §5.11
-recovery contract (relaunch + restore), and a separate probe *process* with
-its own Metal device stays available as optional hardening if hangs show up
-in practice. Defense order: pre-flight keeps red shaders out of both legs;
-the §5.11 probation window catches yellow shaders that blow the budget at
-full res once promoted.
-
-**Design-leg autosave.** Once design state lives behind RPC edits (not just
-the scene file), a crash mid-design must not eat the draft: debounce-write
-the design leg's scene to `<scene_dir>/.wzrd/design.scene.json` (~every few
-seconds / on every applied edit), and offer it for restore on next boot.
-Together with the §5.3 sidecar this is the Resolume-style "reload and
-continue in under a minute" contract — see §5.11.
-
-**Preview topology — RESOLVED (operator decision 2026-07-12):
-single window, source toggle (Resolume-style).** The collapse already
-landed the native preview surface (`gpu::PreviewTarget` blitting a composite
-onto a child window — reference §1b). The two-deck build keeps **one**
-preview window in the GUI with a **LIVE ⇄ DESIGN toggle** that selects
-*which composite the single `PreviewTarget` samples* — not a second window,
-not a second pane. Consequences that fall out of the toggle:
-- **LIVE** shows the live composite with **real masters applied**
-  (brightness/saturation as the crowd sees them) — but *not* literally "the
-  presented frame" (swapchain frames aren't sampled; `PreviewTarget` re-runs
-  the homography pipeline against a composite) and **not** the calibration
-  warp: the warp only looks right on the physical surface — in a flat
-  preview window it's just keystone distortion. Mechanically: live composite
-  + non-neutral master uniforms + identity homography (amendment 2026-07-12).
-- **DESIGN** shows the scratch composite un-mastered (the §5.4 convention the
-  current preview already follows), so preview colour = raw effect colour.
-- Mechanically: the design leg gets its own composite; `PreviewTarget` gains
-  a one-line source select (which composite view its bind group samples) and
-  its master uniforms flip with the toggle (real masters on LIVE, neutral on
-  DESIGN), re-bound when the toggle flips. The delivery mechanism
-  (child-window blit, demand-gated readback) is unchanged. Both runtime
-  spikes passed, so the subprocess fallback (§5.8) is retired.
-
----
-
-### 5.6 execution order (engine-first, headless-verifiable)
-
-Each step is independently landable and testable over RPC before any UI
-exists. Ship in this order:
-
-1. **Two composites + two `PassPlan` slots.** Move composite ownership out of
-   the single `GpuContext.composite_*` into per-leg targets; `Core` holds
-   `live` + `design` plans. Includes the **cross-leg `pipeline_cache`
-   eviction guard** (evict only when unreferenced by either leg) — the
-   silent-skip-on-cache-miss failure mode must be closed before two plans
-   exist. Headless still constructs only `live`. Verify: headless output
-   byte-identical to today (design leg dormant).
-2. **Authoring RPCs target `design`; `live` frozen.** Route `scene.load`,
-   `effect.*`, param edits, and the file watcher at the design plan, per the
-   blanket leg rule (reads/telemetry follow design; `scene.getState` gains
-   the `leg` param). Design's render passes are **demand-gated** from the
-   start (preview toggle / WS subscriber / fade in flight). Confirm over WS
-   that editing never disturbs the live composite and an idle design leg
-   adds zero GPU work. Shared `SliderBank`/`ParamOverrides` already feed
-   both `tick()` calls — verify a knob reads identically on both legs.
-3. **`promote {fade_ms, quantize}` + `pull`.** Final pass samples both
-   composites + a `mix` uniform ramped over `fade_ms`; `quantize:"bar"`
-   defers the ramp start to the next transport bar boundary, `"now"` starts
-   immediately. On ramp completion, live adopts design's built plan by
-   **pointer swap** and design rebuilds in the background (promote) /
-   live→design scene copy (pull). Implement the re-entrancy rule (pending
-   quantized promote replaced; mid-ramp promote/pull rejected). Verify a
-   bar-quantized promote lands on the downbeat with no frame hitch and the
-   knobs don't jump.
-4. **Pre-flight probe + `probe.set/getThresholds`.** Half-res 60-frame
-   render with overhead-calibrated scaling and pessimistic driver values
-   (see the probe amendments above) → predicted full-res p95 → three-band
-   verdict; gate **every new pipeline entering design** (upsert, watcher,
-   `scene.load`) on red, flag on yellow; emit `{compiled, predicted_p95_ms,
-   band, thumbnail}` on `hot_reload`. Thresholds in the session sidecar.
-   This is the **hard prerequisite before any live show** — land it before
-   UI go-live.
-5. **Design-leg autosave** to `<scene_dir>/.wzrd/design.scene.json` (see the
-   autosave paragraph above) + restore-on-boot offer.
-6. **UI last:** the LIVE⇄DESIGN preview toggle, the Promote control with the
-   bar/now quantize toggle + `pull`, and a threshold-A/B settings control.
+**Still open (deferred out of §5.6 scope by design, 2026-07-12): the
+auto-pilot playlist** (spec §13) — a thin scheduler composing existing
+verbs, no new engine code: `scene.load` → design, wait for build/probe OK
+(the `scene.load` reply already carries the probe verdict), `promote
+{quantize:"bar"}`, dwell, repeat, skip entries that fail. Ship it once
+promote has been proven solid at a real show. The §5.4 **crossfade-time
+master** ("promote fade default" as an operator master) also still waits —
+add it alongside the playlist if hand-set fade times get old.
 
 ### 5.7 Layer object + intensity (carried over from v1 review #2/#9)
 

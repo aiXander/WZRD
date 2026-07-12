@@ -41,6 +41,9 @@ render-core --scene scene.json --windowed --osc-addr 0.0.0.0:9000
 # Expose the JSON-RPC WebSocket so external §3.11 clients (remote operator,
 # future MCP wrapper) can drive scene / effect / telemetry. Omit for headless.
 # (The Tauri shell no longer uses this — it embeds the engine in-process.)
+# NOTE: --ws-addr also switches the engine into §5.6 two-deck mode — all
+# authoring lands on the design leg and goes live via `promote`. Headless
+# (no --ws-addr) stays single-leg: the watcher hot-reloads live directly.
 render-core --scene scene.json --windowed --ws-addr 127.0.0.1:9123
 ```
 

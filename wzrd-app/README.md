@@ -2,9 +2,20 @@
 
 The control surface that wraps `render-core` for humans. Three routes —
 **Prepare** (surface canvas + Monaco editor + binding inspector), **Perform**
-(native preview hero + audio strip + driver rack), **Debug** (collapsible
-panels). The headless agent path (`render-core --scene foo.json`, standalone
-binary) is unchanged; this shell is purely additive.
+(native preview hero + §5.6 deck bar + masters + audio strip + driver rack),
+**Debug** (collapsible panels). The headless agent path
+(`render-core --scene foo.json`, standalone binary) is unchanged; this shell
+is purely additive.
+
+Since the §5.6 two-deck landing (2026-07-12) the shell drives a **two-leg**
+engine: every edit made here lands on the *design* leg (the projector keeps
+playing the live leg untouched), the Perform deck bar's LIVE⇄DESIGN toggle
+picks which leg the native preview shows, and **PROMOTE** crossfades the
+projector onto the design content (bar-quantized by default). **PULL**
+resets design back to live. New shaders entering design are pre-flight
+probed; verdicts (green/yellow/red + predicted full-res p95) surface in the
+Debug hot-reload history, with the A/B thresholds editable in Debug. Full
+contract: `../docs/reference/render-engine.md` §2.6.
 
 ## Architecture (single-process since 2026-07-12)
 
@@ -93,7 +104,8 @@ webview's `engine:telemetry` event channel.
 | `drivers` | 30 Hz (when present) | Perform driver rack + Debug |
 | `connectivity` | ad-hoc | Debug connectivity |
 | `log` | ad-hoc | Debug log stream |
+| `deck` | transitions + ~10 Hz while a fade ramps | Perform deck bar (promote phase, mix, preview source) |
 
-Sticky channels (`hot_reload`, `audio_freshness`, `connectivity`, `fps`)
-are replayed to new subscribers so a freshly-opened webview shows the
-right pills immediately.
+Sticky channels (`hot_reload`, `audio_freshness`, `connectivity`, `fps`,
+`masters`, `deck`) are replayed to new subscribers so a freshly-opened
+webview shows the right pills immediately.

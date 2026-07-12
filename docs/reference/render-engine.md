@@ -96,10 +96,14 @@ agents.
   webview). React's `NativePreview` component (Perform hero) measures its
   slot and pushes CSS-px bounds through the `preview_set_bounds` command;
   the backend converts to physical screen coords and moves the child
-  window; the render thread blits the composite onto it via
-  `gpu::PreviewTarget` — the homography pipeline with identity matrix +
-  neutral masters, so preview color = projector color, un-mastered
-  (§5.4). Lossless, full-rate, same GPU device, zero readback.
+  window; the render thread blits a composite onto it via
+  `gpu::PreviewTarget` — the homography pipeline with identity matrix.
+  Since §2.6 the preview has a LIVE⇄DESIGN source toggle: DESIGN (the
+  authoring default) shows the design composite un-mastered (§5.4
+  convention); LIVE shows the live composite with the real
+  brightness/saturation masters (still no calibration warp — it only
+  reads right on the physical surface). Lossless, full-rate, same GPU
+  device, zero readback.
 - **Crash containment (spike b):** the render loop runs under
   `catch_unwind`; a render-thread panic (incl. wgpu's fatal-by-default
   validation panic after device loss) kills the engine but not the
@@ -159,7 +163,8 @@ not "fix" it to alpha blending.
 | `main.rs` | CLI parse + **tee logger** (stderr + `log` telemetry channel via `telemetry::global_bus`). |
 | `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, session persistence (§5.3 restore-at-boot, debounced write, SIGTERM/SIGINT snapshot → `exit_requested()`), plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. Step-2/3 additions: `control_channel()` (hands an embedding host the WS server's `RpcContext` + command sender — one dispatch path for every consumer), `attach_preview_surface`/`resize_preview_surface`/`set_preview_visible` (native preview; host owns §3.1 for it), `spike_force_device_loss()` (crash-spike test hook). The command channel + `RpcContext` now always exist (headless just never sends). |
 | `app.rs` | Thin `WinitHost` — window creation/fullscreen/display selection, winit event delegation into `Core`, exit decisions. The only winit-aware file besides `lib.rs`. |
-| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, composite target, pipeline cache, WGSL composer (`prelude + body + main`), homography pipeline. Step 3: keeps `instance`/`adapter` so `PreviewTarget` (second swapchain, homography pipeline with identity/neutral uniforms) can attach at runtime; `render_preview()` self-heals `Lost`/`Outdated`. |
+| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → homography). Step 3: keeps `instance`/`adapter` so `PreviewTarget` (second swapchain; §5.6 source toggle — one bind group per leg, LIVE renders with real masters, DESIGN neutral) can attach at runtime; `render_preview()` self-heals `Lost`/`Outdated`. |
+| `probe.rs` | §5.6 shader pre-flight probe: `ProbeThresholds` (A/B atomics, sidecar-persisted), `ProbeSession` (half-res interleaved probe frames, overhead-calibrated full-res p95 prediction, pessimistic driver values), three-band verdict + JPEG thumbnail. |
 | `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick(&mut)` (driver eval → uniforms, §5.2 pick re-rolls via `active` flags); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). Owns the stable hashes (`fnv1a`/`seed01`/`pick_choice`) behind layer_seed + pick determinism. |
 | `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
 | `session.rs` | §5.3 session sidecar: `SessionFile` load/save (atomic temp+rename), `session_path` (`session.json` next to the scene), the shared dirty stamp the debounced write keys off. |
@@ -233,7 +238,7 @@ each time the rate clock wraps; `random_static` picks once at scene load. A
 re-pick is an `active`-flag flip on the pass plan — zero rebuild, zero GPU
 work. Rate drivers are restricted to `clock.bars`/`clock.beats`/
 `clock.phase`, and the choice is a pure hash of (binding id, cycle count) —
-no RNG state — so runs are deterministic and the future §5.6 design leg
+no RNG state — so runs are deterministic and the §2.6 design leg
 picks the same layer its promote will. Strictness: `random_each` without
 `rate`, `random_static` with `rate`, and selectors setting more or fewer
 than one of `all`/`id`/`tag`/`group` are all load errors.
@@ -266,10 +271,15 @@ stable, period."
 | Method | Kind | Notes |
 |---|---|---|
 | `pack.info` | inline | Static pack snapshot (layers, tags, groups, bbox, centroid, z). |
-| `scene.getState` | inline | Last-good scene JSON. |
-| `scene.load {json}` | queued | Parse + full plan rebuild; on error the previous plan keeps rendering. |
-| `scene.reload` | queued | Re-read from disk. |
-| `effect.upsert {name, wgsl, descriptor?}` | queued | Writes `effects/<name>/`, registry + watcher pick it up. |
+| `scene.getState {leg?}` | inline | Last-good scene JSON. §5.6: `leg: "design"` (default — reads follow design) \| `"live"`. |
+| `scene.load {json}` | queued | Parse + plan rebuild **on the design leg** (§2.6); new pipelines are probe-gated, so the reply can carry a `probe` report. On error the previous design plan keeps rendering; live is never touched. Headless single-leg: applies to live as before. |
+| `scene.reload` | queued | Re-read from disk (same design-leg routing). |
+| `promote {fade_ms?, quantize?}` | queued | §2.6 — crossfade projector live→design over `fade_ms` (default 500), then live adopts design's plan (pointer swap). `quantize: "bar"` (default) starts the fade on the next bar boundary; `"now"` immediately. Pending promote replaced by a newer one; **rejected while a fade is ramping**. |
+| `pull` | queued | §2.6 — hard-copy live's scene back into design. Rejected mid-ramp; cancels a pending promote + any in-flight probe apply. |
+| `preview.setSource {source}` | queued | §2.6 — `"live"` \| `"design"`: which composite the native preview blits. |
+| `probe.setThresholds {a_ms, b_ms}` | inline | §2.6 probe bands, A < B, ms of predicted full-res p95. Sidecar-persisted (venue state). |
+| `probe.getThresholds` | inline | Current `{a_ms, b_ms}`. |
+| `effect.upsert {name, wgsl, descriptor?}` | queued | Writes `effects/<name>/`, registry + watcher pick it up (the watcher path routes into the design leg + probe gate). |
 | `effect.remove {name}` | queued | |
 | `effect.describe {name?}` | queued | §5.5 — input descriptors (type, default, `min`/`max`/`step`/`unit`/`widget`) for one effect, or the whole catalog (built-ins included) when `name` is omitted. |
 | `wgsl.validate {source}` | inline | naga diagnostics remapped to user-source lines (drives Monaco squiggles). |
@@ -286,16 +296,17 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 
 | Channel | Rate | Payload |
 |---|---|---|
-| `preview` | ~15 fps | 320px JPEG of the composite, base64. **Demand-gated**: captured only while ≥1 subscriber listens. Consumers: remote WS clients + the webview's Prepare canvas underlay. The Perform hero uses the native preview surface instead (§1b). |
+| `preview` | ~15 fps | 320px JPEG of a composite, base64 — the **design** composite in two-leg mode (§2.6 blanket leg rule), live headless. **Demand-gated**: captured only while ≥1 subscriber listens. Consumers: remote WS clients + the webview's Prepare canvas underlay. The Perform hero uses the native preview surface instead (§1b). |
 | `fps` | 2 Hz | Honest throughput (frames/wall-second) + p50 frame time. |
-| `frame_stats` | 2 Hz | p50/p95/p99 + mask-slice / pipeline / pass counts. |
-| `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). |
+| `frame_stats` | 2 Hz | p50/p95/p99 + mask-slice / pipeline / pass counts (counts follow the **design** plan in two-leg mode — §2.6). |
+| `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). Rows come from the **design** plan in two-leg mode. |
 | `audio` | 30 Hz | L/M/H bands + onset envelopes. |
 | `audio_freshness` | 1 Hz + edges | fresh/stale/down (sticky). |
 | `connectivity` | 1 Hz | osc / file_watcher / ws status cells (sticky). |
-| `hot_reload` | on event | target, ok, elapsed, message (sticky). |
+| `hot_reload` | on event | target, ok, elapsed, message, **`probe`** (§2.6 — `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts[]}` when a pre-flight probe ran; sticky). |
 | `log` | on event | Info+ engine log lines (via the tee logger). |
 | `masters` | on `master.set` + startup | §5.4 snapshot `{brightness, speed, saturation, audioListen}` (sticky). |
+| `deck` | on promote/pull/preview transitions + ~10 Hz while ramping | §2.6 snapshot `{promote: idle\|pending\|ramping, mix, fade_ms, quantize, preview_source, two_leg}` (sticky). |
 
 ### 2.4 Effect WGSL contract
 
@@ -335,7 +346,8 @@ and every scene played from that directory shares the physical setup):
   "projectorCalibration": null,      // 3×3 row-major or null — moved out of scene.json
   "masters": { "brightness": 1.0, "speed": 1.0, "saturation": 1.0, "audioListen": 1.0 },
   "params": { "flash_base": 0.35 },  // SliderBank snapshot, by slider name
-  "overrides": { "wobble_demo": { "amp": 0.05 } }  // §5.5 per-binding scalar overrides
+  "overrides": { "wobble_demo": { "amp": 0.05 } },  // §5.5 per-binding scalar overrides
+  "probeThresholds": { "a_ms": 8.0, "b_ms": 14.0 }  // §2.6 probe bands — venue state
 }
 ```
 
@@ -358,6 +370,78 @@ and every scene played from that directory shares the physical setup):
   clamped: brightness/saturation 0–2, speed 0–8, audioListen 0–1.
 - The eventual "show file" (playlist + scenes + session) composes these;
   don't build the umbrella before the §5.6 auto-pilot playlist exists.
+
+### 2.6 Two-deck architecture: design/live legs + promote/pull (§5.6, landed 2026-07-12)
+
+The spec's "two legs, one deck". The engine holds **two `PassPlan` slots**
+with per-leg composite targets: `live` drives the projector; `design` is the
+AI/operator scratchpad, rendered offscreen only. Two-leg mode is on whenever
+a control surface exists (`--ws-addr` — the Tauri host always sets it);
+**headless-only runs collapse to a single live leg exactly as pre-two-deck**
+(watcher binds live, no design composite allocated, no probe).
+
+- **Blanket leg rule: every authoring and observability surface follows
+  design.** `scene.load`/`scene.reload`, the file watcher, effect changes,
+  the JPEG `preview` channel, `scene.getState` (default), the `drivers`
+  channel and `frame_stats` counts all target/read the design leg. Only the
+  projector and the preview toggle's LIVE position show live. Live is
+  immutable except via `promote`.
+- **Both legs tick every frame** (shared transport/audio bus — bar-quantized
+  promotes land in sync; §5.2 picks are stateless hashes, so the legs pick
+  identically). Design's **render passes are demand-gated**: they run only
+  when the preview toggle sits on DESIGN, ≥1 WS `preview` subscriber exists,
+  or a promote is pending/ramping. An idle design leg costs zero GPU.
+- **Promote = crossfade, then pointer swap.** The final homography pass
+  samples both composites and lerps by a `mix` uniform ramped over
+  `fade_ms` (wall time). On completion live **adopts design's already-built
+  plan** (zero rebuild on the projector leg) and design rebuilds from the
+  same scene JSON (pipelines cache-hit — buffers/bind groups only).
+  Semantically a **copy, not an exchange**: design keeps its content, so
+  "promote, push further, promote again" needs no `pull` between rounds.
+  Re-entrancy (deterministic — the auto-pilot playlist will drive it):
+  pending quantized promote → *replaced* by a newer promote; actively
+  ramping → `promote`/`pull` *rejected*. `pull` also cancels a pending
+  promote and any in-flight probe apply.
+- **Pipeline cache is GC'd, never evicted by key.** User pipeline keys are
+  **content-derived** (`file:<path>#<hash>`, `inline:<hash>`), so an edited
+  shader gets a fresh cache slot while live keeps drawing the old one.
+  After every plan swap the cache retains only keys referenced by *either*
+  leg (+ built-ins, the probe calibration shader, in-flight probe keys) —
+  this closes the old evict-by-key failure mode where a design edit could
+  silently stop live layers drawing (passes skip on cache miss).
+- **Pre-flight probe** (`probe.rs`): any pipeline *new to the cache*
+  entering design — via `scene.load`, watcher reload, or upsert — is first
+  rendered ~60 frames at **half** pack resolution to a scratch target,
+  interleaved with live frames (~3.5 ms budget per loop iteration, never a
+  stall). Predicted full-res p95 = `overhead + (measured − overhead) × 4`,
+  where `overhead` is a once-per-boot calibration run of a trivial shader
+  (naive scaling multiplies fixed per-frame cost by the pixel ratio and
+  flags fine shaders red). Probe uniforms are **pessimistic**: `audio.*`
+  pinned to 1.0, scalars at descriptor `max` where declared — "worst case
+  at this venue", not "cost right now". Verdict vs sidecar thresholds
+  A < B: green passes; **yellow still enters design, flagged** (the §5.11
+  probation window is the live-side net); **red is refused** — the only
+  hard gate — and the previous design plan stays. Result rides `hot_reload`
+  (`probe` field, incl. a JPEG thumbnail) so the authoring agent
+  self-corrects on performance and look. Known residual risk: an
+  in-process probe can't contain a shader that *hangs* the device — that's
+  §5.11's recovery contract.
+- **Design-leg autosave**: every applied design edit debounce-writes the
+  draft to `<scene_dir>/.wzrd/design.scene.json` (atomic, gitignored);
+  at boot a draft that differs from `scene.json` is restored into the
+  design leg (probe-gated like any apply). A crash mid-design can't eat
+  the draft.
+- **Preview topology: one window, source toggle.** The single native
+  `PreviewTarget` samples either composite. LIVE shows the live composite
+  with **real brightness/saturation masters** and identity homography (the
+  calibration warp only reads right on the physical surface); DESIGN shows
+  the scratch composite un-mastered (§5.4 convention). `preview.setSource`
+  flips it; the UI toggle lives in Perform's deck bar.
+- **What's shared across legs (deliberately):** transport, `SliderBank`,
+  `ParamOverrides`, masters — operator knobs aren't scene content, so a
+  tuned value is identical on both legs and carry-forward across
+  promote/pull falls out for free (spec §4: a knob never jumps under the
+  operator's finger).
 
 ---
 
