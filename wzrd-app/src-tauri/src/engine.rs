@@ -55,6 +55,7 @@ const QUEUED_METHODS: &[&str] = &[
     "promote",
     "pull",
     "preview.setSource",
+    "identity.setGroups",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -381,8 +382,11 @@ impl EngineHandle {
             method: method.to_string(),
             params,
         };
+        // §5.10 actor identity: Tauri direct dispatch is always the local
+        // operator UI (per-connection default, never per call).
         if !QUEUED_METHODS.contains(&method) {
-            return rpc::dispatch(&self.inner.ctx, &self.inner.cmd_tx, &req)
+            let mut actor = rpc::Actor::Ui;
+            return rpc::dispatch(&self.inner.ctx, &self.inner.cmd_tx, &req, &mut actor)
                 .map_err(|e| anyhow!(e.message));
         }
         let ctx = self.inner.ctx.clone();
@@ -391,7 +395,8 @@ impl EngineHandle {
         thread::Builder::new()
             .name("engine-rpc".into())
             .spawn(move || {
-                let _ = tx.send(rpc::dispatch(&ctx, &cmd_tx, &req));
+                let mut actor = rpc::Actor::Ui;
+                let _ = tx.send(rpc::dispatch(&ctx, &cmd_tx, &req, &mut actor));
             })
             .context("spawning rpc helper thread")?;
         match rx.recv_timeout(timeout) {
@@ -655,7 +660,8 @@ fn telemetry_loop(inner: Arc<EngineInner>, app: AppHandle, bus: render_core::tel
             Ok(frame) => {
                 if matches!(
                     frame.channel.as_str(),
-                    "hot_reload" | "audio_freshness" | "connectivity" | "fps" | "masters" | "deck"
+                    "hot_reload" | "audio_freshness" | "connectivity" | "fps" | "masters"
+                        | "deck" | "changes"
                 ) {
                     inner
                         .last_payloads

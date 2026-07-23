@@ -28,6 +28,20 @@ _DEFAULT_TOOLS = {
     "nano_banana_pro": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "simulate_view": {"enabled": True, "timeout": 300},
     "capture_camera_snapshot": {"enabled": True, "timeout": 30},
+    # §5.10 engine authoring tools — localhost-only (the engine WS binds
+    # 127.0.0.1:9123), so they default OFF; the local tools_config.json
+    # flips them on. The Modal image also never installs `websockets`, so a
+    # cloud deployment cannot carry them regardless of config.
+    "get_scene_context": {"enabled": False, "timeout": 60},
+    "upsert_binding": {"enabled": False, "timeout": 30},
+    "remove_binding": {"enabled": False, "timeout": 30},
+    "upsert_effect": {"enabled": False, "timeout": 30},
+    "remove_effect": {"enabled": False, "timeout": 30},
+    "set_groups": {"enabled": False, "timeout": 30},
+    "set_labels": {"enabled": False, "timeout": 30},
+    "set_scene": {"enabled": False, "timeout": 30},
+    "validate_wgsl": {"enabled": False, "timeout": 30},
+    "get_preview": {"enabled": False, "timeout": 30},
 }
 
 
@@ -65,18 +79,34 @@ def get_timeout(tool_name: str) -> float:
 mcp = FastMCP(
     "WZRD",
     instructions=(
-        "WZRD is a VJ projection mapping toolkit. It provides tools for:\n"
-        "- Background subtraction (frame and video) for extracting creatures/subjects\n"
-        "- Projection surface detection from photos\n"
-        "- Image alignment (feature matching + template matching + ECC)\n"
-        "- Surface darkening for additive projection\n"
-        "- Color region segmentation (islands)\n"
-        "- Video reprojection for layer compositing\n"
-        "- TextureFlow: AI video generation from style images (remote Modal GPU endpoint)\n"
-        "- Kling v3: Image-to-video generation (3-15s cinematic videos via FAL)\n"
-        "- Nano Banana Pro: Text-to-image and image editing (via FAL)\n\n"
-        "Typical workflow: detect surface → prepare surface → generate content (e.g. texture_flow) → "
-        "subtract background → (optionally segment into islands → reproject)\n\n"
+        "WZRD is a VJ projection-mapping toolkit. It spans two areas — load the\n"
+        "tools for whichever the task needs; tool names are self-describing.\n\n"
+        "1) OFFLINE CONTENT PIPELINE — prepare surfaces and generate/segment the\n"
+        "content that becomes a layer pack. Load these when the task is about\n"
+        "producing assets from photos or prompts (not driving the live engine):\n"
+        "- prepare_surface / extract_color_regions / build_layerpack — surface prep,\n"
+        "  color-region segmentation (islands), and authoring the layer pack.\n"
+        "- subtract_background_video / reproject_video / simulate_view — extract\n"
+        "  moving content, reposition island regions, preview additive projection.\n"
+        "- texture_flow (morphing AI loops, remote Modal GPU), kling_v25_image_to_video\n"
+        "  (5/10s image→video via FAL), nano_banana_pro (text→image + edit via FAL).\n"
+        "Typical flow: prepare_surface → generate content (e.g. texture_flow) →\n"
+        "subtract_background_video → (optionally extract_color_regions → reproject_video)\n"
+        "→ build_layerpack.\n\n"
+        "2) LIVE ENGINE AUTHORING — drive the realtime render-core over its WS\n"
+        "(ws://127.0.0.1:9123). Load these when the operator wants to change what's\n"
+        "rendering NOW (bindings, WGSL effects, layer labels/groups). ALWAYS call\n"
+        "get_scene_context FIRST — it reflects the human's live UI edits and tells\n"
+        "you what exists before you mutate:\n"
+        "- get_scene_context / get_preview — read live state; grab a design-composite frame.\n"
+        "- upsert_binding / remove_binding — add/replace/remove one binding (granular,\n"
+        "  CAS-guarded). set_scene only for initial authoring or a full structural rewrite.\n"
+        "- upsert_effect / remove_effect / validate_wgsl — author project-local WGSL\n"
+        "  effects (naga-validated, pre-flight probed; validate_wgsl is a cheap dry run).\n"
+        "- set_labels / set_groups — name layers and define groups so later commands\n"
+        "  can target the operator's surface-language ('the trunk', group 'canopy').\n"
+        "Writes target the DESIGN leg only; promoting design→live is a human UI act.\n"
+        "Requires the local `.[engine]` extra (websockets); absent on Modal.\n\n"
         "All image/video inputs accept URLs or local file paths.\n"
         "All outputs include the processed file and an info dict with metadata."
     ),
@@ -87,6 +117,7 @@ mcp = FastMCP(
 from . import tools as _tools  # noqa: E402, F401
 from . import fal_tools as _fal_tools  # noqa: E402, F401
 from . import local_tools as _local_tools  # noqa: E402, F401
+from . import engine_tools as _engine_tools  # noqa: E402, F401  (§5.10 — no-op without `websockets`)
 
 # ---------------------------------------------------------------------------
 # Filter out disabled tools based on config

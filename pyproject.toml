@@ -30,6 +30,9 @@ modal = [
     "boto3>=1.34",
     "modal>=0.73",
 ]
+# §5.10 engine authoring tools (localhost WS client into render-core).
+# Deliberately separate from `mcp` so the Modal/cloud image never carries it.
+engine = ["websockets>=12"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

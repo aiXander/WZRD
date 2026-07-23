@@ -1,0 +1,30 @@
+{
+  "inputs": [
+    {
+      "default": 2,
+      "max": 8,
+      "min": -8,
+      "name": "speed",
+      "type": "float"
+    },
+    {
+      "default": 24,
+      "max": 200,
+      "min": 1,
+      "name": "count",
+      "type": "float"
+    },
+    {
+      "default": 0.5,
+      "max": 0.98,
+      "min": 0.02,
+      "name": "duty",
+      "type": "float"
+    },
+    {
+      "default": "#00ffea",
+      "name": "color",
+      "type": "color"
+    }
+  ]
+}

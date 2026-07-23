@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::compositor::{resolve_effect_def, PassPlan};
-use crate::drivers::{Masters, ParamOverrides, SliderBank, Transport};
+use crate::drivers::{Crossfade, Masters, ParamOverrides, SliderBank, Transport};
 use crate::effects::{EffectKind, EffectRegistry, InputSlot};
 use crate::gpu::{GpuContext, Leg, LayerIdentity, LayerParamsGpu};
 use crate::osc::{try_spawn, AudioFeatures, OscListener};
@@ -37,11 +37,13 @@ use crate::pack::LoadedPack;
 use crate::probe::{
     self, Band, ProbeItemSpec, ProbeSession, ProbeThresholds, PROBE_NULL_KEY, PROBE_NULL_WGSL,
 };
-use crate::rpc::{self, parking_lot_lite::SwapValue, EngineCommand, PackInfo, RpcContext};
+use crate::rpc::{
+    self, parking_lot_lite::SwapValue, Actor, EngineCommand, PackInfo, PackInfoCell, RpcContext,
+};
 use crate::scene::{resolve_selector, SceneFile};
 use crate::session::{self, SessionFile};
 use crate::telemetry::{
-    AudioSnapshot, Bus, Connectivity, ConnectivityCell, DeckSnapshot, DriverSnapshot,
+    AudioSnapshot, Bus, ChangeLog, Connectivity, ConnectivityCell, DeckSnapshot, DriverSnapshot,
     FpsAccumulator, FrameCounts, HotReloadEvent, MastersState, PreviewSampler, ProbeReport,
 };
 use crate::watch::{ChangeKind, SceneWatcher};
@@ -95,6 +97,9 @@ struct PendingDesignApply {
     scene: SceneFile,
     raw: String,
     target_label: String,
+    /// §5.10 — who caused this apply; carried into the change ring and the
+    /// hot_reload correlation stamp when the probe resolves.
+    actor: Actor,
     reply: Option<crossbeam_channel::Sender<Result<serde_json::Value, String>>>,
     started: Instant,
     session: ProbeSession,
@@ -140,6 +145,10 @@ pub struct Core {
     /// Kept alive for the lifetime of the engine — the OSC recv thread is
     /// detached and pumps `audio_state` from the audio feature server.
     _osc_listener: Option<OscListener>,
+
+    /// §5.10 — design rev counter + boot epoch + change ring, shared with
+    /// the RPC surface (status headers, `changes.list`, `base_rev` CAS).
+    changes: Arc<ChangeLog>,
 
     /// Telemetry bus shared with the WS server (if any). Always present;
     /// when no subscribers are attached, emission is a noop write to a
@@ -189,6 +198,10 @@ pub struct Core {
     /// §5.4 **live-leg** masters — operator-owned globals shared with the WS
     /// server (`master.set`). Never reachable from scene.json.
     masters: Arc<Masters>,
+
+    /// §5.4 crossfade-time master — engine-wide default promote fade
+    /// (seconds), shared with the WS server. Not per leg (see [`Crossfade`]).
+    crossfade: Arc<Crossfade>,
 
     /// §5.5 **live-leg** per-binding scalar overrides, shared with the WS
     /// server (`param.set {binding, param, value}`).
@@ -333,6 +346,8 @@ impl Core {
             )
         };
         let design_transport = Transport::new(scene.transport.bpm);
+        // §5.4 crossfade-time master — engine-wide (not per leg).
+        let crossfade = Crossfade::new();
         let probe_thresholds = ProbeThresholds::new();
         let session_dirty = Arc::new(AtomicU64::new(0));
 
@@ -345,6 +360,9 @@ impl Core {
                 session_calibration = s.projector_calibration;
                 if let Some(m) = &s.masters {
                     masters.restore(m);
+                }
+                if let Some(cf) = s.crossfade {
+                    crossfade.set(cf);
                 }
                 for (name, value) in &s.params {
                     sliders.set(name, *value);
@@ -388,6 +406,7 @@ impl Core {
         bus.emit_masters(MastersState {
             live: masters.snapshot(),
             design: design_masters.snapshot(),
+            crossfade: crossfade.seconds(),
         });
 
         // §5.11 — a termination signal snapshots the session before exit, so
@@ -407,14 +426,17 @@ impl Core {
         // `control_channel` even without a WS server. Headless with no
         // consumers, the channel just stays empty.
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let changes = Arc::new(ChangeLog::new());
         let rpc_ctx = RpcContext {
-            pack: Arc::new(PackInfo::from_pack(&pack)),
+            pack: Arc::new(PackInfoCell::new(PackInfo::from_pack(&pack))),
+            changes: Arc::clone(&changes),
             scene_state: Arc::clone(&scene_state),
             live_scene_state: Arc::clone(&live_scene_state),
             effects_dir: effects_dir.clone(),
             bus: bus.clone(),
             sliders: Arc::clone(&sliders),
             masters: Arc::clone(&masters),
+            crossfade: Arc::clone(&crossfade),
             overrides: Arc::clone(&overrides),
             design_sliders: Arc::clone(&design_sliders),
             design_masters: Arc::clone(&design_masters),
@@ -468,6 +490,7 @@ impl Core {
             transport,
             audio_state,
             _osc_listener: osc_listener,
+            changes,
             bus,
             scene_state,
             cmd_rx,
@@ -483,6 +506,7 @@ impl Core {
             last_audio_pill: Instant::now(),
             sliders,
             masters,
+            crossfade,
             overrides,
             design_sliders,
             design_masters,
@@ -578,7 +602,7 @@ impl Core {
                         "restoring design draft from {} (differs from scene.json)",
                         autosave.display()
                     );
-                    self.apply_design_scene(draft, "design-autosave", None);
+                    self.apply_design_scene(draft, "design-autosave", Actor::System, None);
                 }
                 _ => {}
             }
@@ -589,6 +613,30 @@ impl Core {
             Err(err) => log::warn!("hot-reload disabled: {err:#}"),
         }
         Ok(())
+    }
+
+    /// §5.10 — emit a `hot_reload` event stamped with the correlation
+    /// triplet `{epoch, rev, actor}` (rev = current design rev *after* any
+    /// ring record for this event).
+    fn emit_hot(
+        &self,
+        target: &str,
+        ok: bool,
+        elapsed_ms: f32,
+        message: Option<String>,
+        probe: Option<ProbeReport>,
+        actor: Actor,
+    ) {
+        self.bus.emit_hot_reload(HotReloadEvent {
+            target: target.into(),
+            ok,
+            elapsed_ms,
+            message,
+            probe,
+            epoch: self.changes.epoch(),
+            rev: self.changes.rev(),
+            actor: actor.as_str().into(),
+        });
     }
 
     /// Build the **live** plan from the live scene. Used at boot and on
@@ -604,13 +652,14 @@ impl Core {
                 log::info!("scene plan built ({} layer passes)", plan.layer_passes.len());
                 self.plan = Some(plan);
                 self.gc_pipelines();
-                self.bus.emit_hot_reload(HotReloadEvent {
-                    target: "scene".into(),
-                    ok: true,
-                    elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
-                    message: None,
-                    probe: None,
-                });
+                self.emit_hot(
+                    "scene",
+                    true,
+                    started.elapsed().as_secs_f32() * 1000.0,
+                    None,
+                    None,
+                    Actor::System,
+                );
                 self.transport.set_bpm(self.scene.transport.bpm);
                 // §5.3 — calibration now lives in session.json; the scene
                 // field is a deprecated read-only fallback, never written.
@@ -629,13 +678,14 @@ impl Core {
             }
             Err(err) => {
                 log::error!("rejecting scene update: {err:#}");
-                self.bus.emit_hot_reload(HotReloadEvent {
-                    target: "scene".into(),
-                    ok: false,
-                    elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
-                    message: Some(format!("{err:#}")),
-                    probe: None,
-                });
+                self.emit_hot(
+                    "scene",
+                    false,
+                    started.elapsed().as_secs_f32() * 1000.0,
+                    Some(format!("{err:#}")),
+                    None,
+                    Actor::System,
+                );
                 Err(err)
             }
         }
@@ -653,7 +703,7 @@ impl Core {
             Ok(raw) if self.two_leg => {
                 // §5.6 blanket leg rule: the watcher authors the design leg.
                 log::info!("hot-reloading {} into the design leg", self.scene_path.display());
-                self.apply_design_scene(raw, "scene", None);
+                self.apply_design_scene(raw, "scene", Actor::System, None);
             }
             Ok(raw) => match SceneFile::parse(&raw) {
                 Ok(scene) => {
@@ -662,30 +712,38 @@ impl Core {
                     if self.rebuild_plan().is_ok() {
                         self.scene_state.set(raw.clone());
                         self.live_scene_state.set(raw);
+                        self.changes.record(
+                            &self.bus,
+                            Actor::System.as_str(),
+                            "bindings",
+                            "scene hot-reloaded from disk",
+                        );
                     }
                 }
                 Err(err) => {
                     log::error!(
                         "ignoring scene reload (parse failed): {err:#}; previous plan remains active"
                     );
-                    self.bus.emit_hot_reload(HotReloadEvent {
-                        target: "scene".into(),
-                        ok: false,
-                        elapsed_ms: 0.0,
-                        message: Some(format!("{err:#}")),
-                        probe: None,
-                    });
+                    self.emit_hot(
+                        "scene",
+                        false,
+                        0.0,
+                        Some(format!("{err:#}")),
+                        None,
+                        Actor::System,
+                    );
                 }
             },
             Err(err) => {
                 log::error!("ignoring scene reload (read failed): {err:#}");
-                self.bus.emit_hot_reload(HotReloadEvent {
-                    target: "scene".into(),
-                    ok: false,
-                    elapsed_ms: 0.0,
-                    message: Some(format!("{err:#}")),
-                    probe: None,
-                });
+                self.emit_hot(
+                    "scene",
+                    false,
+                    0.0,
+                    Some(format!("{err:#}")),
+                    None,
+                    Actor::System,
+                );
             }
         }
     }
@@ -708,7 +766,7 @@ impl Core {
                 .map(|d| d.raw.clone())
                 .or_else(|| self.scene_state.get());
             if let Some(raw) = raw {
-                self.apply_design_scene(raw, "effects", None);
+                self.apply_design_scene(raw, "effects", Actor::System, None);
             }
         } else {
             let _ = self.rebuild_plan();
@@ -730,17 +788,42 @@ impl Core {
     /// `scene.load` / `scene.reload` entry point (render thread). Two-leg:
     /// route at the design leg, deferring the reply through the probe when
     /// new pipelines are involved. Single-leg: the pre-two-deck live apply.
+    ///
+    /// §5.10 `base_rev` compare-and-swap: evaluated here on the render
+    /// thread (the single writer of design state), so a read-splice-write
+    /// caller can never silently clobber a concurrent edit — the reject is a
+    /// prescriptive one-turn recovery instead.
     pub fn scene_load_rpc(
         &mut self,
         raw: String,
+        base_rev: Option<u64>,
+        actor: Actor,
         reply: crossbeam_channel::Sender<Result<serde_json::Value, String>>,
     ) {
+        if let Some(base) = base_rev {
+            let current = self.changes.rev();
+            if base != current {
+                let _ = reply.send(Err(format!(
+                    "design moved to rev {current} since your read (base_rev {base}); \
+                     re-read and retry"
+                )));
+                return;
+            }
+        }
         if self.two_leg {
-            self.apply_design_scene(raw, "scene", Some(reply));
+            self.apply_design_scene(raw, "scene", actor, Some(reply));
         } else {
             let res = self
                 .apply_scene_json(&raw)
-                .map(|_| serde_json::json!({ "ok": true }))
+                .map(|_| {
+                    let rev = self.changes.record(
+                        &self.bus,
+                        actor.as_str(),
+                        "bindings",
+                        "scene applied (single-leg)",
+                    );
+                    serde_json::json!({ "ok": true, "epoch": self.changes.epoch(), "rev": rev })
+                })
                 .map_err(|e| format!("{e:#}"));
             let _ = reply.send(res);
         }
@@ -755,10 +838,12 @@ impl Core {
         &mut self,
         raw: String,
         target_label: &str,
+        actor: Actor,
         reply: Option<crossbeam_channel::Sender<Result<serde_json::Value, String>>>,
     ) {
         let started = Instant::now();
-        let fail = |bus: &Bus, msg: String, reply: Option<crossbeam_channel::Sender<Result<serde_json::Value, String>>>| {
+        let changes = Arc::clone(&self.changes);
+        let fail = move |bus: &Bus, msg: String, reply: Option<crossbeam_channel::Sender<Result<serde_json::Value, String>>>| {
             log::error!("rejecting design update ({target_label}): {msg}");
             bus.emit_hot_reload(HotReloadEvent {
                 target: target_label.into(),
@@ -766,6 +851,9 @@ impl Core {
                 elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
                 message: Some(msg.clone()),
                 probe: None,
+                epoch: changes.epoch(),
+                rev: changes.rev(),
+                actor: actor.as_str().into(),
             });
             if let Some(r) = reply {
                 let _ = r.send(Err(msg));
@@ -794,7 +882,7 @@ impl Core {
             }
         };
         if specs.is_empty() {
-            self.finish_design_apply(scene, raw, target_label, reply, None, started);
+            self.finish_design_apply(scene, raw, target_label, actor, reply, None, started);
             return;
         }
 
@@ -855,6 +943,7 @@ impl Core {
             scene,
             raw,
             target_label: target_label.to_string(),
+            actor,
             reply,
             started,
             session,
@@ -1000,13 +1089,14 @@ impl Core {
                 self.probe_thresholds.b_ms()
             );
             log::error!("{msg}");
-            self.bus.emit_hot_reload(HotReloadEvent {
-                target: pending.target_label.clone(),
-                ok: false,
-                elapsed_ms: pending.started.elapsed().as_secs_f32() * 1000.0,
-                message: Some(msg.clone()),
-                probe: Some(report),
-            });
+            self.emit_hot(
+                &pending.target_label,
+                false,
+                pending.started.elapsed().as_secs_f32() * 1000.0,
+                Some(msg.clone()),
+                Some(report),
+                pending.actor,
+            );
             if let Some(r) = pending.reply {
                 let _ = r.send(Err(msg));
             }
@@ -1025,6 +1115,7 @@ impl Core {
             pending.scene,
             pending.raw,
             &pending.target_label,
+            pending.actor,
             pending.reply,
             Some(report),
             pending.started,
@@ -1032,12 +1123,17 @@ impl Core {
     }
 
     /// Build + swap a probe-cleared (or pipeline-neutral) scene into the
-    /// design leg. Live is untouched by construction.
+    /// design leg. Live is untouched by construction. §5.10: records the
+    /// mutation in the change ring, mirrors agent-authored scenes to
+    /// `.wzrd/scene_agent_latest.json`, and stamps reply + hot_reload with
+    /// `{epoch, rev, actor}`.
+    #[allow(clippy::too_many_arguments)]
     fn finish_design_apply(
         &mut self,
         scene: SceneFile,
         raw: String,
         target_label: &str,
+        actor: Actor,
         reply: Option<crossbeam_channel::Sender<Result<serde_json::Value, String>>>,
         probe_report: Option<ProbeReport>,
         started: Instant,
@@ -1058,6 +1154,7 @@ impl Core {
                     "design plan built ({} layer passes)",
                     plan.layer_passes.len()
                 );
+                let binding_count = scene.bindings.len();
                 let design = self.design.as_mut().expect("two-leg checked");
                 design.scene = scene;
                 design.plan = Some(plan);
@@ -1068,40 +1165,180 @@ impl Core {
                 // promote).
                 self.design_transport
                     .set_bpm(design.scene.transport.bpm);
-                self.scene_state.set(raw);
+                self.scene_state.set(raw.clone());
                 self.gc_pipelines();
+
+                // §5.10 change ring — method→facet is static: effect-target
+                // applies land as `effects`, everything else as `bindings`.
+                let facet = if target_label.starts_with("effect") {
+                    "effects"
+                } else {
+                    "bindings"
+                };
+                let summary = format!("{target_label} applied ({binding_count} bindings)");
+                let rev = self
+                    .changes
+                    .record(&self.bus, actor.as_str(), facet, summary);
+
+                // §5.10 persistence — the agent never decides when to save:
+                // every successful agent-actor design apply mirrors to
+                // `.wzrd/scene_agent_latest.json`; promotion to scene.json
+                // stays a manual operator act.
+                if actor == Actor::Agent {
+                    if let Err(e) = write_agent_mirror(&self.scene_path, &raw) {
+                        log::warn!("agent scene mirror write failed: {e:#}");
+                    }
+                }
+
                 let probe_json = probe_report
                     .as_ref()
                     .map(|p| serde_json::to_value(p).expect("probe report"));
-                self.bus.emit_hot_reload(HotReloadEvent {
-                    target: target_label.into(),
-                    ok: true,
-                    elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
-                    message: None,
-                    probe: probe_report,
-                });
+                self.emit_hot(
+                    target_label,
+                    true,
+                    started.elapsed().as_secs_f32() * 1000.0,
+                    None,
+                    probe_report,
+                    actor,
+                );
                 if let Some(r) = reply {
-                    let _ = r.send(Ok(
-                        serde_json::json!({ "ok": true, "leg": "design", "probe": probe_json }),
-                    ));
+                    let _ = r.send(Ok(serde_json::json!({
+                        "ok": true,
+                        "leg": "design",
+                        "probe": probe_json,
+                        "epoch": self.changes.epoch(),
+                        "rev": rev,
+                    })));
                 }
             }
             Err(e) => {
                 let msg = format!("{e:#}");
                 log::error!("rejecting design update ({target_label}): {msg}");
                 self.gc_pipelines();
-                self.bus.emit_hot_reload(HotReloadEvent {
-                    target: target_label.into(),
-                    ok: false,
-                    elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
-                    message: Some(msg.clone()),
-                    probe: probe_report,
-                });
+                self.emit_hot(
+                    target_label,
+                    false,
+                    started.elapsed().as_secs_f32() * 1000.0,
+                    Some(msg.clone()),
+                    probe_report,
+                    actor,
+                );
                 if let Some(r) = reply {
                     let _ = r.send(Err(msg));
                 }
             }
         }
+    }
+
+    /// §5.10 — re-apply the design scene after an `effect.upsert` so the new
+    /// pipeline is probed and the RPC reply carries the verdict (parity with
+    /// `scene.load`). When the design scene doesn't reference the effect,
+    /// the apply is pipeline-neutral and the reply returns immediately —
+    /// bind the effect to get a probe + thumbnail.
+    pub fn after_effect_upsert(
+        &mut self,
+        name: &str,
+        actor: Actor,
+        reply: crossbeam_channel::Sender<Result<serde_json::Value, String>>,
+    ) {
+        let changed = self.registry.rescan_disk();
+        log::info!("effect {name:?} upserted via RPC ({} pipeline(s) new)", changed.len());
+        if self.two_leg {
+            let raw = self
+                .design
+                .as_ref()
+                .map(|d| d.raw.clone())
+                .or_else(|| self.scene_state.get());
+            match raw {
+                Some(raw) => {
+                    self.apply_design_scene(raw, &format!("effect:{name}"), actor, Some(reply))
+                }
+                None => {
+                    let _ = reply.send(Err("no design scene to re-apply".into()));
+                }
+            }
+        } else {
+            let res = self
+                .rebuild_plan()
+                .map(|_| {
+                    let rev = self.changes.record(
+                        &self.bus,
+                        actor.as_str(),
+                        "effects",
+                        format!("effect {name:?} upserted"),
+                    );
+                    serde_json::json!({ "ok": true, "name": name, "epoch": self.changes.epoch(), "rev": rev })
+                })
+                .map_err(|e| format!("{e:#}"));
+            let _ = reply.send(res);
+        }
+    }
+
+    /// §5.10 — post-`effect.remove` bookkeeping: rescan + change-ring entry.
+    /// The in-memory registry keeps the last-good definition until restart
+    /// (existing semantics), so scenes referencing it keep building.
+    pub fn after_effect_remove(
+        &mut self,
+        name: &str,
+        actor: Actor,
+        reply: crossbeam_channel::Sender<Result<serde_json::Value, String>>,
+    ) {
+        let _ = self.registry.rescan_disk();
+        let rev = self.changes.record(
+            &self.bus,
+            actor.as_str(),
+            "effects",
+            format!("effect {name:?} removed from disk"),
+        );
+        let _ = reply.send(Ok(serde_json::json!({
+            "ok": true,
+            "name": name,
+            "epoch": self.changes.epoch(),
+            "rev": rev,
+        })));
+    }
+
+    /// §5.13 `identity.setGroups` — merge the delta into the pack's identity
+    /// sidecar, persist it, refresh the served `pack.info`, and re-resolve
+    /// scene selectors against the new group membership.
+    pub fn cmd_identity_set(
+        &mut self,
+        groups: Option<std::collections::BTreeMap<String, Option<Vec<String>>>>,
+        labels: Option<std::collections::BTreeMap<String, Option<String>>>,
+        actor: Actor,
+    ) -> Result<serde_json::Value, String> {
+        let summary = self
+            .pack
+            .apply_identity_delta(groups, labels)
+            .map_err(|e| format!("{e:#}"))?;
+        if let Err(e) = self.pack.save_identity() {
+            log::warn!("identity sidecar write failed: {e:#}");
+        }
+        // Refresh the pack.info snapshot every client reads (§5.13:
+        // "writes the sidecar and re-emits pack.info").
+        let info = PackInfo::from_pack(&self.pack);
+        self.rpc_ctx.pack.set(info.clone());
+        let rev = self
+            .changes
+            .record(&self.bus, actor.as_str(), "layers", summary.clone());
+        log::info!("identity updated ({summary})");
+
+        // Group membership resolves at plan build — re-apply so bindings
+        // targeting a changed group track it. Pipeline-neutral (cache-hit),
+        // so this is buffers/bind-groups only, no probe.
+        if self.two_leg {
+            if let Some(raw) = self.design.as_ref().map(|d| d.raw.clone()) {
+                self.apply_design_scene(raw, "identity", actor, None);
+            }
+        } else {
+            let _ = self.rebuild_plan();
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "epoch": self.changes.epoch(),
+            "rev": rev,
+            "pack": serde_json::to_value(&info).expect("pack info"),
+        }))
     }
 
     /// §5.6 cross-leg pipeline GC: retain only pipelines referenced by
@@ -1189,7 +1426,7 @@ impl Core {
     /// `pull` — hard-copy live's scene back into design (the explicit
     /// reverse). Cancels a pending promote and any in-flight probe apply
     /// (pull is the newest operator intent).
-    pub fn cmd_pull(&mut self) -> Result<serde_json::Value, String> {
+    pub fn cmd_pull(&mut self, actor: Actor) -> Result<serde_json::Value, String> {
         if !self.two_leg {
             return Err("pull requires two-deck mode".into());
         }
@@ -1235,11 +1472,18 @@ impl Core {
         self.bus.emit_masters(MastersState {
             live: self.masters.snapshot(),
             design: self.design_masters.snapshot(),
+            crossfade: self.crossfade.seconds(),
         });
         self.gc_pipelines();
+        let rev = self.changes.record(
+            &self.bus,
+            actor.as_str(),
+            "bindings",
+            "pull: design reset to the live scene",
+        );
         log::info!("pull: design leg reset to the live scene (content + controls)");
         self.emit_deck();
-        Ok(serde_json::json!({ "ok": true }))
+        Ok(serde_json::json!({ "ok": true, "epoch": self.changes.epoch(), "rev": rev }))
     }
 
     /// `preview.setSource` — flip which composite the native preview blits.
@@ -1323,6 +1567,7 @@ impl Core {
         self.bus.emit_masters(MastersState {
             live: self.masters.snapshot(),
             design: self.design_masters.snapshot(),
+            crossfade: self.crossfade.seconds(),
         });
         // Both composites hold identical content at this instant (the fade
         // just finished at mix=1), so snapping mix back to 0 is invisible.
@@ -1908,6 +2153,7 @@ impl Core {
             version: crate::session::SESSION_VERSION,
             projector_calibration: self.session_calibration,
             masters: Some(self.masters.snapshot()),
+            crossfade: Some(self.crossfade.seconds()),
             probe_thresholds: Some(self.probe_thresholds.snapshot()),
             ..Default::default()
         };
@@ -1994,4 +2240,25 @@ fn design_autosave_path(scene_path: &std::path::Path) -> PathBuf {
         .unwrap_or_else(|| std::path::Path::new("."))
         .join(".wzrd")
         .join("design.scene.json")
+}
+
+/// §5.10 agent mirror: the durable "latest agent-authored scene" artifact.
+/// Distinct from the design autosave (crash-recovery snapshot, any actor) —
+/// this one is written only on agent-actor applies, so subsequent UI
+/// fiddling on the design leg never clobbers it, and a no-UI session still
+/// leaves something canonical on disk. Written immediately (not debounced):
+/// agent applies are seconds apart, not slider-drag rates.
+fn write_agent_mirror(scene_path: &std::path::Path, raw: &str) -> Result<()> {
+    let path = scene_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".wzrd")
+        .join("scene_agent_latest.json");
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, raw.as_bytes())?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }

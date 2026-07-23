@@ -166,15 +166,15 @@ not "fix" it to alpha blending.
 | `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → homography). Step 3: keeps `instance`/`adapter` so `PreviewTarget` (second swapchain; §5.6 source toggle — one bind group per leg, LIVE renders with real masters, DESIGN neutral) can attach at runtime; `render_preview()` self-heals `Lost`/`Outdated`. |
 | `probe.rs` | §5.6 shader pre-flight probe: `ProbeThresholds` (A/B atomics, sidecar-persisted), `ProbeSession` (half-res interleaved probe frames, overhead-calibrated full-res p95 prediction, pessimistic driver values), three-band verdict + JPEG thumbnail. |
 | `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick(&mut)` (driver eval → uniforms, §5.2 pick re-rolls via `active` flags); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). Owns the stable hashes (`fnv1a`/`seed01`/`pick_choice`) behind layer_seed + pick determinism. |
-| `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
+| `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `Crossfade` (§5.4 engine-wide crossfade-time master — default promote fade in seconds, 0–30 s); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
 | `session.rs` | §5.3 session sidecar: `SessionFile` load/save (atomic temp+rename), `session_path` (`session.json` next to the scene), the shared dirty stamp the debounced write keys off. |
 | `effects.rs` | Effect registry: built-ins (`tint`, `hueCycle`, `flash`, `wobble`), project-local + inline WGSL, mtime-based rescan. |
 | `scene.rs` | `scene.json` parser + selector resolution. |
-| `pack.rs` | Layer-pack loader; per-slice uv geometry (`LayerGeom`) from the manifest or the mask bytes (§5.2). |
+| `pack.rs` | Layer-pack loader; per-slice uv geometry (`LayerGeom`) from the manifest or the mask bytes (§5.2); §2.2 identity sidecar (`IdentityFile` lenient load/merge, strict `apply_identity_delta`, atomic `save_identity`). |
 | `osc.rs` | UDP OSC sink for `/audio/lmh` + `/audio/onset/*` → lock-free `AudioFeatures` atomics. |
-| `rpc.rs` | JSON-RPC dispatch: inline read-only + live-tuning methods (`param.set` both forms, `master.set`) + queued `EngineCommand`s for mutations (`scene.load`, `effect.*`, `session.save`); `wgsl.validate` with user-source line remapping. |
+| `rpc.rs` | JSON-RPC dispatch: inline read-only + live-tuning methods (`param.set` both forms, `master.set`, `hello`, `changes.list`) + queued `EngineCommand`s for mutations (`scene.load` incl. `base_rev` CAS, `effect.*`, `identity.setGroups`, `session.save`); `wgsl.validate` with user-source line remapping; §2.7 `Actor` (per-connection identity) + `PackInfoCell` (swappable `pack.info` snapshot). |
 | `ws.rs` | tungstenite server, thread-per-connection, telemetry fan-out. |
-| `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay + `subscriber_count`), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (non-blocking composite readback → JPEG @ ~15 fps — **demand-gated since Step 3**: capture only runs with ≥1 `preview` subscriber), payload types. |
+| `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay + `subscriber_count`), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (non-blocking composite readback → JPEG @ ~15 fps — **demand-gated since Step 3**: capture only runs with ≥1 `preview` subscriber), §2.7 `ChangeLog` (design rev + boot epoch + change ring), payload types. |
 | `watch.rs` | notify-based watcher over the scene file + effects dir. |
 
 **`wzrd-app/`** — `src-tauri/src/{lib,engine,rpc}.rs` (in-process TauriHost —
@@ -186,7 +186,11 @@ underlay), `NativePreview` (Step-3 native hero on Perform), `MonacoPanel`,
 `BindingInspector`, `DriverRack`, `MastersRow`, `AudioStrip`, `StatusStrip`,
 three routes). Numeric const rows in the driver rack tune through the §5.5
 override path (amber = overridden, ↺ clears back to the scene value);
-colours still go through the debounced scene commit.
+colours still go through the debounced scene commit. §2.7 reverse-sync:
+`App.tsx` handles the `changes` channel (non-`ui` actor → re-pull the
+affected facet into the store only), and the TopBar's **ADOPT AGENT SCENE**
+button (`sceneCommit.adoptAgentScene`) is the one path that persists
+agent-authored scenes to `scene.json`.
 
 ---
 
@@ -266,20 +270,37 @@ invalidates every scene that targets the pack. Optional sidecar
 `identity.json` can hold the map; the runtime contract stays "pack ids are
 stable, period."
 
+**Identity sidecar — engine slice landed (§5.13, 2026-07-22).**
+`<pack_dir>/identity.json` (engine-written, gitignored) holds human-authored
+`groups` (group id → member layer ids; same id as a pack group *replaces*
+its membership) and `labels` (layer id → human label, overrides the
+manifest's). `pack.rs` merges it over the manifest at load — leniently
+(stale ids after a re-shoot warn and drop, never refuse boot) — and
+`pack.info` + selector resolution serve the merged view. Writes go through
+the queued `identity.setGroups` RPC (strict: unknown layer ids are
+prescriptive errors), which persists atomically, refreshes the served
+`pack.info` snapshot, and re-applies the design scene so group-targeting
+bindings re-resolve. This is what lets surface-language commands ("the
+*trunk*") resolve for the §2.7 authoring MCP. The UI multi-select half of
+§5.13 still trails.
+
 ### 2.3 JSON-RPC surface (WS `--ws-addr`, mirrored 1:1 as Tauri commands)
 
 | Method | Kind | Notes |
 |---|---|---|
-| `pack.info` | inline | Static pack snapshot (layers, tags, groups, bbox, centroid, z). |
-| `scene.getState {leg?}` | inline | Last-good scene JSON. §5.6: `leg: "design"` (default — reads follow design) \| `"live"`. |
-| `scene.load {json}` | queued | Parse + plan rebuild **on the design leg** (§2.6); new pipelines are probe-gated, so the reply can carry a `probe` report. On error the previous design plan keeps rendering; live is never touched. Headless single-leg: applies to live as before. |
+| `pack.info` | inline | Pack snapshot (layers, tags, groups, bbox, centroid, z) with the §2.2 identity sidecar merged in. Refreshed by `identity.setGroups` (served through a swappable `PackInfoCell`). |
+| `hello {actor}` | inline | §2.7 — declare this connection's actor (`ui` \| `agent` \| `system`), once per session, never per call. WS connections default `agent`; Tauri direct dispatch is `ui`. Returns `{epoch, rev}`. |
+| `changes.list {since_rev?, epoch?}` | inline | §2.7 — change-ring backfill (`{epoch, rev, entries}`). Epoch mismatch or ring wrap → full ring + explicit `note`, never a silently-partial diff. |
+| `identity.setGroups {groups?, labels?}` | queued | §2.2/§5.13 — per-key delta into the identity sidecar (`null` removes); strict unknown-id errors listing valid ids. Persists, refreshes `pack.info`, re-resolves design selectors. Reply carries the new `pack` + `{epoch, rev}`. |
+| `scene.getState {leg?}` | inline | Last-good scene JSON. §5.6: `leg: "design"` (default — reads follow design) \| `"live"`. Reply carries `{epoch, rev}` so read-modify-write callers can CAS. |
+| `scene.load {json, base_rev?}` | queued | Parse + plan rebuild **on the design leg** (§2.6); new pipelines are probe-gated, so the reply can carry a `probe` report. `base_rev` (§2.7): rejected with "design moved to rev N … re-read and retry" when the design rev moved since the caller's read. On error the previous design plan keeps rendering; live is never touched. Headless single-leg: applies to live as before. |
 | `scene.reload` | queued | Re-read from disk (same design-leg routing). |
-| `promote {fade_ms?, quantize?}` | queued | §2.6 — crossfade projector live→design over `fade_ms` (default 500), then live adopts design's plan (pointer swap). `quantize: "bar"` (default) starts the fade on the next bar boundary; `"now"` immediately. Pending promote replaced by a newer one; **rejected while a fade is ramping**. |
+| `promote {fade_ms?, quantize?}` | queued | §2.6 — crossfade projector live→design over `fade_ms` (default: the §5.4 crossfade-time master, ms), then live adopts design's plan (pointer swap). `quantize: "bar"` (default) starts the fade on the next bar boundary; `"now"` immediately. Pending promote replaced by a newer one; **rejected while a fade is ramping**. |
 | `pull` | queued | §2.6 — hard-copy live's scene back into design. Rejected mid-ramp; cancels a pending promote + any in-flight probe apply. |
 | `preview.setSource {source}` | queued | §2.6 — `"live"` \| `"design"`: which composite the native preview blits. |
 | `probe.setThresholds {a_ms, b_ms}` | inline | §2.6 probe bands, A < B, ms of predicted full-res p95. Sidecar-persisted (venue state). |
 | `probe.getThresholds` | inline | Current `{a_ms, b_ms}`. |
-| `effect.upsert {name, wgsl, descriptor?}` | queued | Writes `effects/<name>/`, registry + watcher pick it up (the watcher path routes into the design leg + probe gate). |
+| `effect.upsert {name, wgsl, descriptor?}` | queued | §2.7 verdict-in-reply: naga-validates **before** touching disk (bad WGSL → line-mapped diagnostics in the reply, nothing written), then writes `effects/<name>/`, rescans the registry (so the watcher echo of the self-write dedupes to nothing), and re-applies the design scene — the reply defers through the §2.6 probe and carries verdict + thumbnail + `{epoch, rev}` when the scene binds the effect. |
 | `effect.remove {name}` | queued | |
 | `effect.describe {name?}` | queued | §5.5 — input descriptors (type, default, `min`/`max`/`step`/`unit`/`widget`) for one effect, or the whole catalog (built-ins included) when `name` is omitted. |
 | `wgsl.validate {source}` | inline | naga diagnostics remapped to user-source lines (drives Monaco squiggles). |
@@ -287,7 +308,7 @@ stable, period."
 | `param.set {name, value, leg?}` | **inline** | Writes the target leg's `SliderBank` (§2.6 — `leg` default `"design"`; the UI passes the deck toggle's leg); bound `ui.slider` params update next frame. **No rebuild, no disk write — this is the live knob path.** |
 | `param.set {binding, param, value, leg?}` | **inline** | §5.5 override form — pins any *scalar* param on a binding (const or driver output alike) in the target leg's override table; `value: null` clears. Same zero-rebuild property; survives plan rebuilds as long as a scalar param with that name exists (the carry-forward rule). |
 | `param.list {leg?}` | inline | `{ sliders, overrides, leg }` — the target leg's knob values + override table (design default). |
-| `master.set {name, value, leg?}` | **inline** | §5.4 — `brightness` \| `speed` \| `saturation` \| `audioListen`, per leg since §2.6 (design default). Clamped, applied next frame, echoed on the sticky `masters` channel. Not reachable from scene.json by design. |
+| `master.set {name, value, leg?}` | **inline** | §5.4 — `brightness` \| `speed` \| `saturation` \| `audioListen`, per leg since §2.6 (design default); plus `crossfade` (engine-wide crossfade-time master in seconds, 0–30 — `leg` ignored). Clamped, applied next frame, echoed on the sticky `masters` channel. Not reachable from scene.json by design. |
 | `master.list` | inline | Both legs' masters: `{ live: {...}, design: {...} }`. |
 | `session.save` | queued | §5.3 — write the session sidecar now (also happens debounced after master/knob changes and on SIGTERM/SIGINT/window close). |
 | `telemetry.subscribe {channels}` / `.unsubscribe` | per-conn | |
@@ -303,9 +324,10 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 | `audio` | 30 Hz | L/M/H bands + onset envelopes. |
 | `audio_freshness` | 1 Hz + edges | fresh/stale/down (sticky). |
 | `connectivity` | 1 Hz | osc / file_watcher / ws status cells (sticky). |
-| `hot_reload` | on event | target, ok, elapsed, message, **`probe`** (§2.6 — `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts[]}` when a pre-flight probe ran; sticky). |
+| `hot_reload` | on event | target, ok, elapsed, message, **`probe`** (§2.6 — `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts[]}` when a pre-flight probe ran; sticky), plus the §2.7 correlation stamp `{epoch, rev, actor}` (for push consumers — author verdicts arrive in the RPC reply, never via sticky replay). |
+| `changes` | on design mutation | §2.7 — one `ChangeEntry` `{epoch, rev, ts_ms, actor, facet, summary}` per design mutation (sticky; ring depth 32, backfill via `changes.list`). Facet map is static in the emit sites: scene applies → `bindings`, effect upserts/removes → `effects`, `identity.setGroups` → `layers`. The webview re-pulls the affected facet on any entry with `actor != "ui"`. |
 | `log` | on event | Info+ engine log lines (via the tee logger). |
-| `masters` | on `master.set`, promote/pull control copies + startup | §5.4/§2.6 — both legs: `{live: {brightness, speed, saturation, audioListen}, design: {...}}` (sticky). |
+| `masters` | on `master.set`, promote/pull control copies + startup | §5.4/§2.6 — both legs plus the engine-wide crossfade master: `{live: {brightness, speed, saturation, audioListen}, design: {...}, crossfade}` (sticky). |
 | `deck` | on promote/pull/preview transitions + ~10 Hz while ramping | §2.6 snapshot `{promote: idle\|pending\|ramping, mix, fade_ms, quantize, preview_source, two_leg}` (sticky). |
 
 ### 2.4 Effect WGSL contract
@@ -345,6 +367,7 @@ and every scene played from that directory shares the physical setup):
   "version": 1,
   "projectorCalibration": null,      // 3×3 row-major or null — moved out of scene.json
   "masters": { "brightness": 1.0, "speed": 1.0, "saturation": 1.0, "audioListen": 1.0 },
+  "crossfade": 0.5,                  // §5.4 crossfade-time master (seconds) — engine-wide default promote fade
   "params": { "flash_base": 0.35 },  // SliderBank snapshot, by slider name
   "overrides": { "wobble_demo": { "amp": 0.05 } },  // §5.5 per-binding scalar overrides
   "probeThresholds": { "a_ms": 8.0, "b_ms": 14.0 }  // §2.6 probe bands — venue state
@@ -371,6 +394,14 @@ and every scene played from that directory shares the physical setup):
   are clamped: brightness/saturation 0–2, speed 0–8, audioListen 0–1. The
   sidecar persists the **live** leg's masters/knobs/overrides; both legs
   restore from it at boot.
+- **Crossfade-time master (§5.4, engine-wide — *not* per leg):** a single
+  operator global holding the **default `promote` fade** in seconds. A
+  promote is one engine-wide action, so unlike brightness/speed/etc. it is
+  neither duplicated per leg nor copied on promote/pull. Clamped 0–30 s
+  (0 = CUT); a `promote` with no explicit `fade_ms` falls back to it. Set
+  via `master.set {name:"crossfade"}` (the `leg` arg is ignored), persisted
+  in the sidecar, carried on the `masters` channel's top-level `crossfade`.
+  The DeckBar's FADE fader (logarithmic, CUT at the bottom) drives it.
 - The eventual "show file" (playlist + scenes + session) composes these;
   don't build the umbrella before the §5.6 auto-pilot playlist exists.
 
@@ -462,6 +493,70 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   while design speed/tempo differ — promote quantizes on the **live** bar
   boundary (the crowd's musical time), and the clock adoption at swap keeps
   the promoted content continuous with its preview.
+
+### 2.7 Authoring MCP: the AI scene/shader co-author (§5.10, landed 2026-07-22)
+
+`wzrd_mcp/engine_tools.py` exposes **only the authoring slice** of the WS
+surface to a local Claude Code session (persistent JSON-RPC client to
+`ws://127.0.0.1:9123`, override `WZRD_ENGINE_WS`; optional dep extra
+`.[engine]` → `websockets`, tools default-off in `server.py`, enabled in the
+local `tools_config.json`, structurally absent from the Modal image). Setup
+recipe: repo `README.md` § "Engine authoring tools".
+
+**Two seats (the core boundary).** The agent authors *structure & shaders*
+and operates **only the design leg** — no tool takes a `leg` param. The
+human owns live feel (masters, knob overrides), the deck
+(**promote/pull**), preview source, and probe thresholds — deliberately NOT
+tools, and **no agent `promote`, ever**: the operator flipping to the UI is
+the human gate to the projector.
+
+**Facet taxonomy** — one vocabulary for read scope, write verbs, and change
+tags: `layers` (backed by `pack.info`), `bindings` (`scene.getState` +
+splice + `scene.load`), `effects` (`effect.describe`/`effect.upsert`),
+`drivers` (one-shot `drivers`/`audio` telemetry frames). Tool surface: one
+read (`get_scene_context {scope?, depth, ids?, since_rev?}` — unscoped
+digest is the orient call; `full` requires a scope; single-effect full depth
+includes WGSL via `effect.describe {name}`), five facet-bound writes
+(`upsert_binding`/`remove_binding` as read-splice-CAS, `upsert_effect`/
+`remove_effect`, `set_groups`/`set_labels`, plus the `set_scene` escape
+hatch), two utilities (`validate_wgsl`, `get_preview` — strictly one-shot
+subscribe/frame/unsubscribe so the §2.6 demand gate holds). Every read is
+**self-contained** (status header incl. "engine unreachable since \<ts\>" +
+recent changes ride along); author replies carry the probe verdict **as an
+image content block** — write → see → fix without touching the projector.
+
+**The engine cluster behind it** (all in `rpc.rs`/`telemetry.rs`/`core.rs`):
+
+- **Rev + epoch + change ring** (`telemetry::ChangeLog`): monotonic design
+  rev bumped by every design mutation, boot epoch so a crash-relaunch can't
+  make `since_rev` lie, ring depth 32 broadcast on the sticky `changes`
+  channel with `changes.list` backfill — one shape, two transports.
+- **Actor identity is per-connection** (`rpc::Actor`): `hello {actor}` once
+  per session; WS defaults `agent`, Tauri dispatch passes `ui`, engine-
+  internal paths (watcher, autosave restore) record `system`. No per-call
+  actor params anywhere.
+- **`base_rev` CAS on `scene.load`**, checked on the render thread — a
+  splice race is a prescriptive one-turn retry, never a silent clobber.
+- **Verdict-in-reply everywhere**: `effect.upsert` naga-validates first,
+  then defers its reply through the probe like `scene.load` (see §2.3). No
+  author path ever correlates via sticky `hot_reload` replay.
+- **Webview reverse-sync**: the webview subscribes to `changes` and, on any
+  `actor != ui` entry, re-pulls the affected facet into the Zustand store
+  **only** (`App.tsx`) — never into `sceneCommit`'s disk debounce.
+- **Persistence — the agent never decides when to save**: every successful
+  agent-actor design apply mirrors atomically to
+  `<scene_dir>/.wzrd/scene_agent_latest.json` (distinct from the any-actor
+  crash autosave); writing agent work into `scene.json` is the operator's
+  explicit **ADOPT AGENT SCENE** button in the TopBar (flushes the
+  re-synced store through the accept-gated disk path; the watcher echo is
+  absorbed by the §3.5 content-equality dedupe).
+
+**Rejected shapes** (don't re-propose): generic `write({scope, payload})`
+patch tool; RFC-6902 JSON Patch; overlapping read tools
+(`engine_status`/`get_pack`/`get_scene`/`describe_effects` all fold into
+scoped `get_scene_context`); whole-scene `set_scene` as the primary write;
+embedded-Claude `scene.edit({instruction})`; agent-decided persistence;
+per-call actor tagging; author-verdict correlation over sticky telemetry.
 
 ---
 

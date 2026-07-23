@@ -1,0 +1,28 @@
+{
+  "inputs": [
+    {
+      "default": 1,
+      "max": 4,
+      "min": 0,
+      "name": "rate",
+      "type": "float"
+    },
+    {
+      "default": 1.2,
+      "max": 3,
+      "min": 0,
+      "name": "glow",
+      "type": "float"
+    },
+    {
+      "default": "#ffd48a",
+      "name": "core",
+      "type": "color"
+    },
+    {
+      "default": "#cc66e5",
+      "name": "edge",
+      "type": "color"
+    }
+  ]
+}

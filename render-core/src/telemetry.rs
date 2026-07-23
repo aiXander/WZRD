@@ -37,6 +37,7 @@ pub const ALL_CHANNELS: &[&str] = &[
     "connectivity",
     "masters",
     "deck",
+    "changes",
 ];
 
 /// What an emitter pushes onto the bus and what a subscriber sees on the
@@ -137,7 +138,7 @@ impl Bus {
     pub fn emit(&self, channel: &str, payload: Value) {
         let sticky = matches!(
             channel,
-            "hot_reload" | "audio_freshness" | "connectivity" | "masters" | "deck"
+            "hot_reload" | "audio_freshness" | "connectivity" | "masters" | "deck" | "changes"
         );
         if sticky {
             if let Ok(mut s) = self.inner.sticky.lock() {
@@ -222,6 +223,9 @@ impl Bus {
                 "elapsed_ms": event.elapsed_ms,
                 "message": event.message,
                 "probe": probe,
+                "epoch": event.epoch,
+                "rev": event.rev,
+                "actor": event.actor,
             }),
         );
     }
@@ -296,6 +300,129 @@ pub struct HotReloadEvent {
     /// `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts}` so the
     /// authoring agent self-corrects on performance, not just compiles.
     pub probe: Option<ProbeReport>,
+    /// §5.10 correlation stamp: boot epoch + design rev after this event +
+    /// the actor whose write caused it. Serves push consumers (webview
+    /// re-sync) — author-verdict correlation uses the RPC reply itself,
+    /// never sticky replay.
+    pub epoch: u64,
+    pub rev: u64,
+    pub actor: String,
+}
+
+// ---------- §5.10 change ring: rev counter + boot epoch ----------
+
+/// One design mutation, as carried on the sticky `changes` channel and the
+/// `changes.list` backfill RPC — one shape, two transports.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangeEntry {
+    /// Boot epoch (engine start, epoch ms). A crash-relaunch resets the rev
+    /// counter; the epoch keeps a stale `since_rev` from silently lying.
+    pub epoch: u64,
+    /// Monotonic design revision — bumped by every design mutation.
+    pub rev: u64,
+    pub ts_ms: u64,
+    /// "ui" | "agent" | "system" (per-connection identity, §5.10).
+    pub actor: String,
+    /// Facet taxonomy tag: "bindings" | "effects" | "layers".
+    pub facet: String,
+    pub summary: String,
+}
+
+const CHANGE_RING_DEPTH: usize = 32;
+
+/// §5.10 — the design leg's revision counter, boot epoch, and a bounded ring
+/// of recent [`ChangeEntry`]s. Lives engine-side because the operator's UI
+/// edits must land in it too; the render thread records, every read surface
+/// (RPC, MCP digest header) reads.
+pub struct ChangeLog {
+    epoch: u64,
+    rev: AtomicU64,
+    ring: Mutex<std::collections::VecDeque<ChangeEntry>>,
+}
+
+impl ChangeLog {
+    pub fn new() -> Self {
+        Self {
+            epoch: now_ms(),
+            rev: AtomicU64::new(0),
+            ring: Mutex::new(std::collections::VecDeque::with_capacity(
+                CHANGE_RING_DEPTH,
+            )),
+        }
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn rev(&self) -> u64 {
+        self.rev.load(Ordering::Acquire)
+    }
+
+    /// Bump the rev, push the entry onto the ring, broadcast it on the
+    /// sticky `changes` channel. Returns the new rev.
+    pub fn record(&self, bus: &Bus, actor: &str, facet: &str, summary: impl Into<String>) -> u64 {
+        let rev = self.rev.fetch_add(1, Ordering::AcqRel) + 1;
+        let entry = ChangeEntry {
+            epoch: self.epoch,
+            rev,
+            ts_ms: now_ms(),
+            actor: actor.to_string(),
+            facet: facet.to_string(),
+            summary: summary.into(),
+        };
+        {
+            let mut ring = self.ring.lock().expect("change ring lock");
+            if ring.len() >= CHANGE_RING_DEPTH {
+                ring.pop_front();
+            }
+            ring.push_back(entry.clone());
+        }
+        bus.emit("changes", serde_json::to_value(&entry).expect("change entry"));
+        rev
+    }
+
+    /// The most recent `n` entries, newest last.
+    pub fn recent(&self, n: usize) -> Vec<ChangeEntry> {
+        let ring = self.ring.lock().expect("change ring lock");
+        ring.iter().rev().take(n).rev().cloned().collect()
+    }
+
+    /// `changes.list {since_rev?, epoch?}` payload. An epoch mismatch or a
+    /// `since_rev` older than the ring's tail returns everything the ring
+    /// holds plus an explicit `note` — never a silently-partial diff.
+    pub fn list_json(&self, since_rev: Option<u64>, epoch: Option<u64>) -> Value {
+        let current = self.rev();
+        let ring = self.ring.lock().expect("change ring lock");
+        let mut note: Option<String> = None;
+        let entries: Vec<&ChangeEntry> = match (since_rev, epoch) {
+            (Some(_), Some(e)) if e != self.epoch => {
+                note = Some(format!(
+                    "engine restarted (epoch {} != yours {}); full ring returned — treat your cached state as stale",
+                    self.epoch, e
+                ));
+                ring.iter().collect()
+            }
+            (Some(s), _) => {
+                let tail_rev = ring.front().map(|e| e.rev).unwrap_or(current + 1);
+                if s + 1 < tail_rev && s < current {
+                    note = Some(format!(
+                        "ring wrapped (oldest retained rev {tail_rev}, you asked since {s}); full ring returned — re-read the facets you care about"
+                    ));
+                    ring.iter().collect()
+                } else {
+                    ring.iter().filter(|e| e.rev > s).collect()
+                }
+            }
+            (None, _) => ring.iter().collect(),
+        };
+        json!({
+            "epoch": self.epoch,
+            "rev": current,
+            "entries": entries,
+            "note": note,
+        })
+    }
 }
 
 /// The probe payload that rides `hot_reload` (§5.6). `predicted_p95_ms` /
@@ -316,6 +443,10 @@ pub struct ProbeReport {
 pub struct MastersState {
     pub live: crate::drivers::MastersSnapshot,
     pub design: crate::drivers::MastersSnapshot,
+    /// §5.4 crossfade-time master (seconds) — engine-wide, not per leg: the
+    /// default promote fade. Carried here so every client converges on one
+    /// value without a second telemetry channel.
+    pub crossfade: f32,
 }
 
 /// §5.6 deck snapshot — the two-leg state the UI's promote controls render.
@@ -739,6 +870,50 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod change_log_tests {
+    use super::*;
+
+    #[test]
+    fn record_bumps_rev_and_broadcasts_sticky() {
+        let bus = Bus::new();
+        let log = ChangeLog::new();
+        assert_eq!(log.rev(), 0);
+        let r1 = log.record(&bus, "agent", "bindings", "one");
+        let r2 = log.record(&bus, "ui", "effects", "two");
+        assert_eq!((r1, r2), (1, 2));
+        // Sticky replay: a late subscriber sees the last entry.
+        let (_, rx) = bus.subscribe(["changes".to_string()].into_iter().collect());
+        let frame = rx.try_recv().expect("sticky changes replay");
+        assert_eq!(frame.payload["rev"], 2);
+        assert_eq!(frame.payload["actor"], "ui");
+    }
+
+    #[test]
+    fn list_since_filters_and_flags_wrap_and_epoch() {
+        let bus = Bus::new();
+        let log = ChangeLog::new();
+        for i in 0..40 {
+            log.record(&bus, "agent", "bindings", format!("e{i}"));
+        }
+        // Ring depth 32: revs 9..=40 retained.
+        let v = log.list_json(Some(38), None);
+        assert_eq!(v["entries"].as_array().unwrap().len(), 2);
+        assert!(v["note"].is_null());
+        // since_rev older than the tail → full ring + explicit note.
+        let v = log.list_json(Some(3), None);
+        assert_eq!(v["entries"].as_array().unwrap().len(), 32);
+        assert!(v["note"].as_str().unwrap().contains("ring wrapped"));
+        // Epoch mismatch → full ring + restart note.
+        let v = log.list_json(Some(38), Some(log.epoch() + 1));
+        assert!(v["note"].as_str().unwrap().contains("restarted"));
+        // Caught-up cursor → empty, no note.
+        let v = log.list_json(Some(40), None);
+        assert_eq!(v["entries"].as_array().unwrap().len(), 0);
+        assert!(v["note"].is_null());
+    }
 }
 
 // ---------- global bus hook (log → telemetry tee) ----------

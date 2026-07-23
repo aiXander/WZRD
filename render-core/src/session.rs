@@ -33,6 +33,11 @@ pub struct SessionFile {
     /// 3×3 homography, row-major; `None` = identity / not yet calibrated.
     pub projector_calibration: Option<[[f32; 3]; 3]>,
     pub masters: Option<MastersSnapshot>,
+    /// §5.4 crossfade-time master (seconds) — engine-wide default promote
+    /// fade. `None` = never set, boot at the [`Crossfade`] default.
+    ///
+    /// [`Crossfade`]: crate::drivers::Crossfade
+    pub crossfade: Option<f32>,
     /// `ui.slider` values by slider name (the SliderBank snapshot).
     pub params: BTreeMap<String, f32>,
     /// §5.5 per-binding scalar overrides: binding id → param name → value.
@@ -48,6 +53,7 @@ impl Default for SessionFile {
             version: SESSION_VERSION,
             projector_calibration: None,
             masters: None,
+            crossfade: None,
             params: BTreeMap::new(),
             overrides: BTreeMap::new(),
             probe_thresholds: None,
@@ -129,6 +135,7 @@ mod tests {
             saturation: 1.0,
             audio_listen: 0.5,
         });
+        file.crossfade = Some(8.0);
         file.params.insert("flash_base".into(), 0.35);
         file.overrides
             .entry("wobble_demo".into())
@@ -145,6 +152,7 @@ mod tests {
             Some(&0.02)
         );
         assert!((loaded.masters.unwrap().audio_listen - 0.5).abs() < 1e-6);
+        assert_eq!(loaded.crossfade, Some(8.0));
 
         std::fs::remove_dir_all(&dir).ok();
     }

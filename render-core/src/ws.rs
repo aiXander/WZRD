@@ -118,6 +118,9 @@ fn conn_loop(
 ) {
     // Subscription identity for this connection — starts unsubscribed.
     let mut subscription: Option<(u64, crossbeam_channel::Receiver<TelemetryFrame>)> = None;
+    // §5.10 per-connection actor identity: WS connections default to
+    // `agent` (a remote operator UI re-declares via `hello {actor: "ui"}`).
+    let mut actor = rpc::Actor::Agent;
 
     if let Err(e) = ws.get_mut().set_nonblocking(true) {
         log::warn!("WS: nonblocking toggle failed: {e}");
@@ -127,7 +130,7 @@ fn conn_loop(
         // Drain inbound requests.
         match ws.read() {
             Ok(Message::Text(text)) => {
-                let response = handle_text(&text, &ctx, &cmd_tx, &mut subscription);
+                let response = handle_text(&text, &ctx, &cmd_tx, &mut subscription, &mut actor);
                 if let Some(resp) = response {
                     if let Err(e) = ws.send(Message::Text(resp)) {
                         log::trace!("WS send failed (closing): {e}");
@@ -190,6 +193,7 @@ fn handle_text(
     ctx: &RpcContext,
     cmd_tx: &Sender<EngineCommand>,
     subscription: &mut Option<(u64, crossbeam_channel::Receiver<TelemetryFrame>)>,
+    actor: &mut rpc::Actor,
 ) -> Option<String> {
     let req: JsonRpcRequest = match serde_json::from_str(raw) {
         Ok(r) => r,
@@ -232,7 +236,7 @@ fn handle_text(
         );
     }
 
-    let result = rpc::dispatch(ctx, cmd_tx, &req);
+    let result = rpc::dispatch(ctx, cmd_tx, &req, actor);
     let envelope = match result {
         Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
         Err(err) => RpcError::to_json(&err, &id),

@@ -74,11 +74,26 @@ export type DeckPayload = {
 
 export type ProbeThresholds = { a_ms: number; b_ms: number };
 
+/**
+ * §5.10 — one design mutation on the sticky `changes` channel. The webview
+ * re-pulls the affected facet when `actor !== 'ui'` (agent/watcher edits),
+ * closing the reverse-sync loop so both seats always agree.
+ */
+export type ChangeEntry = {
+  epoch: number;
+  rev: number;
+  ts_ms: number;
+  actor: 'ui' | 'agent' | 'system';
+  facet: 'bindings' | 'effects' | 'layers';
+  summary: string;
+};
+
 // ---------- commands ----------
 
 export const engineStatus = () => invoke<EngineStatus>('engine_status');
 export const packInfo = () => invoke<PackInfo>('pack_info');
-export const sceneGetState = () => invoke<{ json: string }>('scene_get_state');
+export const sceneGetState = () =>
+  invoke<{ json: string; leg: string; epoch: number; rev: number }>('scene_get_state');
 /**
  * §5.6 promote — crossfade the projector to the design composite, then adopt
  * design's plan into the live slot. quantize 'bar' (default) starts the fade

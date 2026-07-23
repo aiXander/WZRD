@@ -5,6 +5,7 @@
 // regardless of which route is active.
 
 import { useStore } from '../state/store';
+import { adoptAgentScene } from '../state/sceneCommit';
 
 const ROUTES = [
   { id: 'prepare', label: 'Prepare', hotkey: '⌘1' },
@@ -16,6 +17,7 @@ export function TopBar() {
   const route = useStore((s) => s.route);
   const setRoute = useStore((s) => s.setRoute);
   const pack = useStore((s) => s.pack);
+  const agentEdit = useStore((s) => s.agentEdit);
 
   return (
     <header className="flex items-center gap-4 px-4 py-2 bg-ink-800 border-b border-ink-600">
@@ -39,6 +41,20 @@ export function TopBar() {
         ))}
       </nav>
       <div className="flex-1" />
+      {agentEdit && (
+        // §5.10 — an agent authored the design scene (rev shown); the store
+        // is re-synced but scene.json is not. Adoption is the deliberate
+        // human act that persists it.
+        <button
+          onClick={() => {
+            adoptAgentScene().catch((e) => console.error('adopt agent scene:', e));
+          }}
+          className="px-2 py-1 text-[11px] rounded bg-amber-900/60 text-amber-200 border border-amber-700 hover:bg-amber-800/60"
+          title={`Agent edit r${agentEdit.rev}: ${agentEdit.summary}\nSave the agent-authored scene to scene.json`}
+        >
+          ADOPT AGENT SCENE · r{agentEdit.rev}
+        </button>
+      )}
       {pack && (
         <div className="text-xs text-zinc-400 truncate max-w-[40rem]">
           <span className="text-zinc-500">pack:</span>{' '}

@@ -8,9 +8,10 @@
 //! `Core::poll_inbound`. Same method names, same params, same error shapes —
 //! Phase 7's MCP wrapper proxies the same surface unchanged.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
@@ -21,35 +22,107 @@ use crate::core::Core;
 use crate::drivers::{Masters, ParamOverrides, SliderBank};
 use crate::pack::LoadedPack;
 use crate::session;
-use crate::telemetry::Bus;
+use crate::telemetry::{Bus, ChangeLog};
+
+/// §5.10 — who a design mutation came from. Declared **per connection**
+/// (never per call — per-call tagging is forgettable and accident-spoofable):
+/// Tauri direct dispatch passes `Ui`, WS connections default to `Agent` and
+/// may re-declare via `hello {actor}`. Engine-internal mutations (file
+/// watcher, autosave restore) are `System`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Actor {
+    Ui,
+    Agent,
+    System,
+}
+
+impl Actor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Actor::Ui => "ui",
+            Actor::Agent => "agent",
+            Actor::System => "system",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, RpcError> {
+        match s {
+            "ui" => Ok(Actor::Ui),
+            "agent" => Ok(Actor::Agent),
+            "system" => Ok(Actor::System),
+            other => Err(RpcError::message(format!(
+                "unknown actor {other:?} (\"ui\" | \"agent\" | \"system\")"
+            ))),
+        }
+    }
+}
+
+/// Swappable current `pack.info` snapshot. Static for the engine's lifetime
+/// *except* §5.13 `identity.setGroups`, which refreshes it so every client
+/// (and the §5.10 MCP digest) reads the merged groups/labels immediately.
+pub struct PackInfoCell {
+    inner: RwLock<Arc<PackInfo>>,
+}
+
+impl PackInfoCell {
+    pub fn new(info: PackInfo) -> Self {
+        Self {
+            inner: RwLock::new(Arc::new(info)),
+        }
+    }
+
+    pub fn get(&self) -> Arc<PackInfo> {
+        Arc::clone(&self.inner.read().expect("pack info lock"))
+    }
+
+    pub fn set(&self, info: PackInfo) {
+        *self.inner.write().expect("pack info lock") = Arc::new(info);
+    }
+}
 
 /// A command that mutates engine state. Issued from the WS server thread;
 /// processed on the render thread.
 pub enum EngineCommand {
     /// Replace the current scene with the given JSON. Doesn't touch disk.
+    /// §5.10: `base_rev` is a compare-and-swap guard — the engine rejects
+    /// the apply when the design rev moved since the caller's read.
     SceneLoad {
         json: String,
+        base_rev: Option<u64>,
+        actor: Actor,
         reply: Sender<Result<Value, String>>,
     },
     /// Reload the scene from `scene_path` (same path the engine was started
     /// with). Useful when the UI saved to disk and wants an explicit
     /// reload trigger without waiting on the file watcher debounce.
     SceneReload {
+        actor: Actor,
         reply: Sender<Result<Value, String>>,
     },
     /// Write `wgsl` to the user-effects directory under `name/shader.wgsl`,
-    /// optionally write a `descriptor.json`, then re-scan the registry. The
-    /// file watcher is *also* watching that path so this is mostly a
-    /// convenience for IPC consumers that don't have file access.
+    /// optionally write a `descriptor.json`, then re-scan the registry and
+    /// re-apply the design scene so the new pipeline is probed — §5.10
+    /// verdict-in-reply: the reply defers through the probe session and
+    /// carries the verdict + thumbnail, exactly like `scene.load`.
     EffectUpsert {
         name: String,
         wgsl: String,
         descriptor: Option<Value>,
+        actor: Actor,
         reply: Sender<Result<Value, String>>,
     },
     /// Remove a project-local effect directory and invalidate its pipeline.
     EffectRemove {
         name: String,
+        actor: Actor,
+        reply: Sender<Result<Value, String>>,
+    },
+    /// §5.13 — merge a delta into the pack's identity sidecar (groups +
+    /// labels), write it, refresh `pack.info`, re-resolve selectors.
+    IdentitySet {
+        groups: Option<BTreeMap<String, Option<Vec<String>>>>,
+        labels: Option<BTreeMap<String, Option<String>>>,
+        actor: Actor,
         reply: Sender<Result<Value, String>>,
     },
     /// §5.5 — describe one effect's inputs (or the whole catalog). Queued
@@ -76,6 +149,7 @@ pub enum EngineCommand {
     /// §5.6 — hard-copy live's scene back into design (the explicit
     /// reverse of promote).
     Pull {
+        actor: Actor,
         reply: Sender<Result<Value, String>>,
     },
     /// §5.6 — select which leg's composite the native preview samples.
@@ -89,9 +163,12 @@ pub enum EngineCommand {
 /// requests. Held by the WS server alongside the command channel.
 #[derive(Clone)]
 pub struct RpcContext {
-    /// Static pack info captured at engine start. The current model has no
-    /// in-flight pack swap (Phase 6+), so a snapshot is enough.
-    pub pack: Arc<PackInfo>,
+    /// Current pack info snapshot. Static except §5.13 `identity.setGroups`,
+    /// which swaps in a refreshed merge (see [`PackInfoCell`]).
+    pub pack: Arc<PackInfoCell>,
+    /// §5.10 — design rev counter + boot epoch + change ring, shared with
+    /// the render thread (which records) and every read surface.
+    pub changes: Arc<ChangeLog>,
     /// Most recent **design-leg** scene JSON (§5.6 blanket leg rule: reads
     /// follow design). Headless single-leg, this is the one live scene.
     pub scene_state: Arc<parking_lot_lite::SwapValue>,
@@ -119,6 +196,9 @@ pub struct RpcContext {
     pub design_sliders: Arc<SliderBank>,
     pub design_masters: Arc<Masters>,
     pub design_overrides: Arc<ParamOverrides>,
+    /// §5.4 crossfade-time master — the engine-wide default promote fade
+    /// (seconds). Not per leg: `master.set {name:"crossfade"}` ignores `leg`.
+    pub crossfade: Arc<crate::drivers::Crossfade>,
     /// §5.3 dirty stamp (epoch ms of last operator-state change; 0 = clean).
     /// The render thread debounces session sidecar writes on it.
     pub session_dirty: Arc<AtomicU64>,
@@ -166,7 +246,8 @@ impl PackInfo {
                 id: l.id.clone(),
                 slice: i as u32,
                 mask_path: l.mask.clone(),
-                label: l.label.clone(),
+                // §5.13 — identity-sidecar label override wins.
+                label: pack.merged_label(i),
                 tags: l.tags.clone(),
                 bbox: l.bbox,
                 centroid: l.centroid,
@@ -174,8 +255,7 @@ impl PackInfo {
             })
             .collect();
         let groups = pack
-            .manifest
-            .groups
+            .merged_groups
             .iter()
             .map(|g| GroupInfo {
                 id: g.id.clone(),
@@ -227,6 +307,7 @@ pub fn masters_state(ctx: &RpcContext) -> crate::telemetry::MastersState {
     crate::telemetry::MastersState {
         live: ctx.masters.snapshot(),
         design: ctx.design_masters.snapshot(),
+        crossfade: ctx.crossfade.seconds(),
     }
 }
 
@@ -244,13 +325,91 @@ pub struct JsonRpcRequest {
 /// compute) return the result immediately; for mutation methods queue an
 /// `EngineCommand` and block on its reply (the caller's WS thread blocks,
 /// the render thread never blocks).
+///
+/// `actor` is the per-connection identity (§5.10): the WS server holds one
+/// per connection (default `Agent`, re-declared by `hello`); the Tauri host
+/// passes `Ui`. Queued design mutations carry it into the change ring.
 pub fn dispatch(
     ctx: &RpcContext,
     cmd_tx: &Sender<EngineCommand>,
     req: &JsonRpcRequest,
+    actor: &mut Actor,
 ) -> Result<Value, RpcError> {
     match req.method.as_str() {
-        "pack.info" => Ok(serde_json::to_value(ctx.pack.as_ref()).expect("pack info")),
+        "pack.info" => {
+            Ok(serde_json::to_value(ctx.pack.get().as_ref()).expect("pack info"))
+        }
+
+        // §5.10 — declare this connection's actor identity, once per
+        // session. Returns the boot epoch + current design rev so a client
+        // can seed its `since_rev` cursor in the same round-trip.
+        "hello" => {
+            #[derive(Deserialize)]
+            struct Params {
+                actor: String,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            *actor = Actor::parse(&p.actor)?;
+            Ok(json!({
+                "ok": true,
+                "actor": actor.as_str(),
+                "epoch": ctx.changes.epoch(),
+                "rev": ctx.changes.rev(),
+            }))
+        }
+
+        // §5.10 — change-ring backfill (sticky `changes` replay only carries
+        // the last entry). `since_rev` from another epoch or older than the
+        // ring's tail returns everything the ring holds with an explicit
+        // note — never a silently-partial diff.
+        "changes.list" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct Params {
+                since_rev: Option<u64>,
+                epoch: Option<u64>,
+            }
+            let p: Params = if req.params.is_null() {
+                Params::default()
+            } else {
+                serde_json::from_value(req.params.clone())
+                    .map_err(|e| RpcError::message(format!("params: {e}")))?
+            };
+            Ok(ctx.changes.list_json(p.since_rev, p.epoch))
+        }
+
+        // §5.13 — identity sidecar delta: groups + labels. Queued (mutates
+        // the pack + selector maps owned by the render thread).
+        "identity.setGroups" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct Params {
+                groups: Option<BTreeMap<String, Option<Vec<String>>>>,
+                labels: Option<BTreeMap<String, Option<String>>>,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            if p.groups.is_none() && p.labels.is_none() {
+                return Err(RpcError::message(
+                    "identity.setGroups takes { groups?: { id: [layerIds] | null }, \
+                     labels?: { layerId: label | null } } — provide at least one",
+                ));
+            }
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::IdentitySet {
+                    groups: p.groups,
+                    labels: p.labels,
+                    actor: *actor,
+                    reply: reply_tx,
+                })
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
 
         "scene.getState" => {
             // §5.6 blanket leg rule: reads follow design by default; the
@@ -278,7 +437,14 @@ pub fn dispatch(
             let raw = state
                 .get()
                 .ok_or_else(|| RpcError::message("no scene loaded"))?;
-            Ok(json!({ "json": raw, "leg": p.leg.unwrap_or_else(|| "design".into()) }))
+            // §5.10 — the read carries the design rev so a read-modify-write
+            // caller can pass it back as `scene.load`'s `base_rev` CAS guard.
+            Ok(json!({
+                "json": raw,
+                "leg": p.leg.unwrap_or_else(|| "design".into()),
+                "epoch": ctx.changes.epoch(),
+                "rev": ctx.changes.rev(),
+            }))
         }
 
         // §5.6 probe thresholds — inline like the masters (venue state,
@@ -318,7 +484,10 @@ pub fn dispatch(
                 serde_json::from_value(req.params.clone())
                     .map_err(|e| RpcError::message(format!("params: {e}")))?
             };
-            let fade_ms = p.fade_ms.unwrap_or(500.0);
+            // Default to the §5.4 crossfade-time master when the caller omits
+            // an explicit fade (headless/MCP promotes, and the UI once it
+            // hands the slider off to the master).
+            let fade_ms = p.fade_ms.unwrap_or_else(|| ctx.crossfade.ms());
             if !fade_ms.is_finite() || fade_ms < 0.0 {
                 return Err(RpcError::message("fade_ms must be finite and >= 0"));
             }
@@ -348,7 +517,10 @@ pub fn dispatch(
         "pull" => {
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::Pull { reply: reply_tx })
+                .send(EngineCommand::Pull {
+                    actor: *actor,
+                    reply: reply_tx,
+                })
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -521,6 +693,14 @@ pub fn dispatch(
             if !p.value.is_finite() {
                 return Err(RpcError::message("value must be finite"));
             }
+            // §5.4 crossfade-time master is engine-wide, not per leg — a
+            // promote is one global action. `leg` is ignored for it.
+            if p.name == "crossfade" {
+                let stored = ctx.crossfade.set(p.value);
+                session::touch(&ctx.session_dirty);
+                ctx.bus.emit_masters(masters_state(ctx));
+                return Ok(json!({ "ok": true, "name": p.name, "value": stored }));
+            }
             let leg = parse_leg(p.leg.as_deref())?;
             let masters = match leg {
                 LegSel::Live => &ctx.masters,
@@ -542,6 +722,8 @@ pub fn dispatch(
             #[derive(Deserialize)]
             struct Params {
                 json: String,
+                #[serde(default)]
+                base_rev: Option<u64>,
             }
             let p: Params = serde_json::from_value(req.params.clone())
                 .map_err(|e| RpcError::message(format!("params: {e}")))?;
@@ -549,6 +731,8 @@ pub fn dispatch(
             cmd_tx
                 .send(EngineCommand::SceneLoad {
                     json: p.json,
+                    base_rev: p.base_rev,
+                    actor: *actor,
                     reply: reply_tx,
                 })
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
@@ -561,7 +745,10 @@ pub fn dispatch(
         "scene.reload" => {
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::SceneReload { reply: reply_tx })
+                .send(EngineCommand::SceneReload {
+                    actor: *actor,
+                    reply: reply_tx,
+                })
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -585,6 +772,7 @@ pub fn dispatch(
                     name: p.name,
                     wgsl: p.wgsl,
                     descriptor: p.descriptor,
+                    actor: *actor,
                     reply: reply_tx,
                 })
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
@@ -641,6 +829,7 @@ pub fn dispatch(
             cmd_tx
                 .send(EngineCommand::EffectRemove {
                     name: p.name,
+                    actor: *actor,
                     reply: reply_tx,
                 })
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
@@ -662,15 +851,20 @@ pub fn dispatch(
 /// the embedded channel so the WS worker can unblock.
 pub fn handle(core: &mut Core, cmd: EngineCommand) {
     match cmd {
-        EngineCommand::SceneLoad { json, reply } => {
+        EngineCommand::SceneLoad {
+            json,
+            base_rev,
+            actor,
+            reply,
+        } => {
             // §5.6 — authoring targets the design leg; the reply may be
             // deferred through a probe session (new pipelines are probed
-            // before they may enter design).
-            core.scene_load_rpc(json, reply);
+            // before they may enter design). §5.10: base_rev CAS first.
+            core.scene_load_rpc(json, base_rev, actor, reply);
         }
-        EngineCommand::SceneReload { reply } => {
+        EngineCommand::SceneReload { actor, reply } => {
             match std::fs::read_to_string(core.scene_path()) {
-                Ok(raw) => core.scene_load_rpc(raw, reply),
+                Ok(raw) => core.scene_load_rpc(raw, None, actor, reply),
                 Err(e) => {
                     let _ = reply.send(Err(format!("read scene file: {e}")));
                 }
@@ -680,23 +874,57 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
             name,
             wgsl,
             descriptor,
+            actor,
             reply,
-        } => match write_effect(core, &name, &wgsl, descriptor.as_ref()) {
-            Ok(()) => {
-                let _ = reply.send(Ok(json!({ "ok": true, "name": name })));
+        } => {
+            // §5.10 verdict-in-reply: naga-validate before anything touches
+            // disk — a broken shader comes back as prescriptive diagnostics
+            // in this reply, never as a watcher-side log line.
+            let diags = validate_wgsl(&wgsl);
+            if !diags.ok {
+                let lines: Vec<String> = diags
+                    .diagnostics
+                    .iter()
+                    .map(|d| format!("line {}:{}: {}", d.line, d.column, d.message))
+                    .collect();
+                let _ = reply.send(Err(format!(
+                    "WGSL rejected for effect {name:?} — {}",
+                    lines.join("; ")
+                )));
+                return;
             }
-            Err(e) => {
-                let _ = reply.send(Err(format!("{e:#}")));
+            match write_effect(core, &name, &wgsl, descriptor.as_ref()) {
+                Ok(()) => {
+                    // Registry rescan here records the new mtimes, so the
+                    // watcher's echo of our own write rescans to an empty
+                    // change set (§3.5-style self-write dedupe). The design
+                    // re-apply routes the new pipeline through the §2.6
+                    // probe and defers `reply` until the verdict is in.
+                    core.after_effect_upsert(&name, actor, reply);
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(format!("{e:#}")));
+                }
             }
-        },
-        EngineCommand::EffectRemove { name, reply } => match remove_effect(core, &name) {
-            Ok(()) => {
-                let _ = reply.send(Ok(json!({ "ok": true, "name": name })));
+        }
+        EngineCommand::EffectRemove { name, actor, reply } => {
+            match remove_effect(core, &name) {
+                Ok(()) => {
+                    core.after_effect_remove(&name, actor, reply);
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(format!("{e:#}")));
+                }
             }
-            Err(e) => {
-                let _ = reply.send(Err(format!("{e:#}")));
-            }
-        },
+        }
+        EngineCommand::IdentitySet {
+            groups,
+            labels,
+            actor,
+            reply,
+        } => {
+            let _ = reply.send(core.cmd_identity_set(groups, labels, actor));
+        }
         EngineCommand::EffectDescribe { name, reply } => {
             let res = core
                 .describe_effects(name.as_deref())
@@ -717,8 +945,8 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
         } => {
             let _ = reply.send(core.cmd_promote(fade_ms, quantize));
         }
-        EngineCommand::Pull { reply } => {
-            let _ = reply.send(core.cmd_pull());
+        EngineCommand::Pull { actor, reply } => {
+            let _ = reply.send(core.cmd_pull(actor));
         }
         EngineCommand::PreviewSource { source, reply } => {
             let _ = reply.send(core.cmd_preview_source(source));

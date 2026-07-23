@@ -2,94 +2,60 @@
   "version": 1,
   "pack": "../../test_results/layerpack/pack",
   "transport": {
-    "bpm": 120
+    "bpm": 90
   },
   "bindings": [
     {
-      "id": "bg",
-      "select": {
-        "id": "background"
-      },
-      "effect": "tint",
-      "params": {
-        "color": "#0a0610"
-      }
-    },
-    {
-      "id": "primary_palette",
       "select": {
         "id": "primary"
       },
-      "effect": "hueCycle",
+      "effect": "flow_noise",
       "params": {
-        "phase": {
-          "driver": "clock.bars",
-          "n": 8
-        },
-        "color0": "#669c35",
-        "color1": "#f5ec00",
-        "color2": "#38571a",
-        "color3": "#38571a"
-      }
+        "scale": 4,
+        "speed": 1,
+        "bright": 1.3,
+        "tint": "#ffffff"
+      },
+      "id": "primary_noise"
     },
     {
-      "id": "primary_flash",
       "select": {
-        "id": "primary"
+        "id": "region_mask_002_color_07fb04"
       },
-      "effect": "flash",
+      "effect": "vbars",
       "params": {
-        "envelope": 0,
-        "base": 0,
-        "color": "#cc66e5"
-      }
+        "speed": 1,
+        "count": 36,
+        "duty": 0.5,
+        "color": "#ffffff"
+      },
+      "id": "mask02_vbars"
     },
     {
-      "id": "inline_ripple",
       "select": {
-        "id": "primary"
+        "id": "region_mask_003_color_fefd00"
       },
-      "effect": {
-        "inline": true,
-        "name": "ripple",
-        "wgsl": "fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32> { let r = length(uv - vec2<f32>(0.5, 0.5)); let w = 0.5 + 0.5 * sin(r * 30.0 - state.time * 3.0); let a = w * mask; return vec4<f32>(0.2 * a, 0.7 * w * a, 0.9 * a, a); }",
-        "inputs": []
+      "effect": "vbars",
+      "params": {
+        "speed": -1.5,
+        "count": 30,
+        "duty": 0.4,
+        "color": "#ff4dd2"
       },
-      "params": {}
+      "id": "mask03_vbars"
     },
     {
-      "id": "pick_bloom",
-      "select": {
-        "all": true,
-        "pick": {
-          "mode": "random_each",
-          "rate": {
-            "driver": "clock.bars",
-            "n": 2
-          }
-        }
-      },
-      "effect": {
-        "inline": true,
-        "name": "seedBloom",
-        "wgsl": "fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32> { let d = distance(uv, layer_centroid()); let ring = smoothstep(0.35, 0.0, d); let pulse = 0.5 + 0.5 * sin(state.time * 3.0 + layer_seed() * 6.28318); let a = ring * pulse * mask * 0.6; return vec4<f32>(1.0 * a, 0.9 * a, 0.75 * a, a); }",
-        "inputs": []
-      },
-      "params": {}
-    },
-    {
-      "id": "audio_drift",
       "select": {
         "id": "region_mask_004_color_fd0800"
       },
-      "effect": "drift",
+      "effect": "vbars",
       "params": {
-        "amount": {
-          "driver": "audio.band",
-          "band": "low"
-        },
-        "color": "#38571a"
-      }
+        "speed": 3,
+        "count": 18,
+        "duty": 0.6,
+        "color": "#ffd400"
+      },
+      "id": "mask04_vbars"
     }
   ],
   "post": []

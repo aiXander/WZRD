@@ -13,5 +13,15 @@
   "kling_v3_image_to_video": {"enabled": false, "timeout": 420},
   "nano_banana_pro": {"enabled": true, "timeout": 180},
   "simulate_view": {"enabled": true, "timeout": 300},
-  "capture_camera_snapshot": {"enabled": false, "timeout": 30}
+  "capture_camera_snapshot": {"enabled": false, "timeout": 30},
+  "get_scene_context": {"enabled": true, "timeout": 60},
+  "upsert_binding": {"enabled": true, "timeout": 30},
+  "remove_binding": {"enabled": true, "timeout": 30},
+  "upsert_effect": {"enabled": true, "timeout": 30},
+  "remove_effect": {"enabled": true, "timeout": 30},
+  "set_groups": {"enabled": true, "timeout": 30},
+  "set_labels": {"enabled": true, "timeout": 30},
+  "set_scene": {"enabled": true, "timeout": 30},
+  "validate_wgsl": {"enabled": true, "timeout": 30},
+  "get_preview": {"enabled": true, "timeout": 30}
 }

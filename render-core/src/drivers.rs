@@ -168,6 +168,52 @@ impl Masters {
     }
 }
 
+/// §5.4 crossfade-time master — the default promote fade, in **seconds**.
+/// Unlike the per-leg [`Masters`] (brightness/speed/…), a promote is a single
+/// engine-wide operator action, so there is exactly one crossfade value for
+/// the whole engine: it is *not* duplicated per leg and is never copied on
+/// promote/pull. The UI drives it on a logarithmic 0..30 s slider (hand-set
+/// fade times over the old CUT/0.5s/2s/8s presets); stored linear here as f32
+/// bits in an atomic, same lock-free discipline as `Masters`. Persisted in
+/// the §5.3 session sidecar and surfaced on the `masters` telemetry channel.
+pub struct Crossfade {
+    seconds: AtomicU32,
+}
+
+impl Crossfade {
+    /// Default matches the historical hard-coded promote fade (500 ms), so an
+    /// untouched master reproduces the pre-master behaviour exactly.
+    pub const DEFAULT_SECONDS: f32 = 0.5;
+    pub const MAX_SECONDS: f32 = 30.0;
+
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            seconds: AtomicU32::new(Self::DEFAULT_SECONDS.to_bits()),
+        })
+    }
+
+    /// Set from seconds; clamps into `0..=30` s (a non-finite value falls back
+    /// to the default) and returns the value actually stored.
+    pub fn set(&self, seconds: f32) -> f32 {
+        let v = if seconds.is_finite() {
+            seconds.clamp(0.0, Self::MAX_SECONDS)
+        } else {
+            Self::DEFAULT_SECONDS
+        };
+        self.seconds.store(v.to_bits(), Ordering::Relaxed);
+        v
+    }
+
+    pub fn seconds(&self) -> f32 {
+        f32::from_bits(self.seconds.load(Ordering::Relaxed))
+    }
+
+    /// The promote path speaks milliseconds.
+    pub fn ms(&self) -> f32 {
+        self.seconds() * 1000.0
+    }
+}
+
 /// §5.5 per-binding param override table. `param.set {binding, param, value}`
 /// pins any *scalar* param — const or driver-bound — to a live value without
 /// a plan rebuild; the compositor consults this table each tick before
@@ -657,6 +703,18 @@ mod tests {
         assert!(m.set("volume", 1.0).is_err());
         assert_eq!(m.brightness(), 2.0);
         assert_eq!(m.audio_listen(), 0.5);
+    }
+
+    #[test]
+    fn crossfade_clamps_and_converts() {
+        let c = Crossfade::new();
+        assert_eq!(c.seconds(), Crossfade::DEFAULT_SECONDS);
+        assert_eq!(c.ms(), 500.0);
+        assert_eq!(c.set(-3.0), 0.0); // below range → CUT
+        assert_eq!(c.set(100.0), Crossfade::MAX_SECONDS); // above range → 30 s
+        assert_eq!(c.set(f32::NAN), Crossfade::DEFAULT_SECONDS); // non-finite → default
+        assert_eq!(c.set(8.0), 8.0);
+        assert_eq!(c.ms(), 8000.0);
     }
 
     #[test]

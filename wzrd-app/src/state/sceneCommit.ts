@@ -72,6 +72,23 @@ function schedulePersist(text: string) {
   }, PERSIST_AFTER_ACCEPT_MS);
 }
 
+/**
+ * §5.10 operator adoption: flush the re-synced store scene (agent-authored,
+ * already engine-accepted by construction — it was applied before the
+ * reverse-sync pulled it) to scene.json. The one deliberate human act in the
+ * persistence story; the engine's watcher echo is absorbed by the §3.5
+ * content-equality dedupe.
+ */
+export function adoptAgentScene(): Promise<void> {
+  const st = useStore.getState();
+  const text = st.sceneJson;
+  return writeSceneFile(text).then(() => {
+    const now = useStore.getState();
+    if (now.sceneJson === text) now.setSceneDirty(false);
+    now.setAgentEdit(null);
+  });
+}
+
 /** Parse → clone → mutate → commit. No-op when scene.json doesn't parse. */
 export function commitSceneMutation(mutator: (scene: any) => any) {
   const raw = useStore.getState().sceneJson;

@@ -9,7 +9,7 @@
 // history.
 
 import { create } from 'zustand';
-import type { DeckPayload, PackInfo, ProbeReport } from '../api/ipc';
+import type { ChangeEntry, DeckPayload, PackInfo, ProbeReport } from '../api/ipc';
 
 export type FpsPayload = {
   fps: number;
@@ -28,6 +28,10 @@ export type HotReload = {
   message: string | null;
   /** §5.6 — pre-flight probe verdict, when one ran for this reload. */
   probe?: ProbeReport | null;
+  /** §5.10 correlation stamp: boot epoch, design rev, causing actor. */
+  epoch?: number;
+  rev?: number;
+  actor?: string;
 };
 export type AudioPayload = {
   band_low: number;
@@ -67,6 +71,8 @@ export type Masters = {
 export type MastersState = {
   live: Masters;
   design: Masters;
+  /** §5.4 crossfade-time master (seconds) — engine-wide, not per leg. */
+  crossfade: number;
 };
 export type LogLine = {
   level: string;
@@ -157,6 +163,12 @@ interface Store {
   // selector may resolve to several layers.
   selectedLayerId: string | null;
   setSelectedLayerId: (id: string | null) => void;
+
+  // §5.10 reverse-sync: the last agent-authored change re-pulled into this
+  // store. Non-null means the store scene came from the agent and is not
+  // yet adopted into scene.json (the "Adopt" button in the top bar).
+  agentEdit: ChangeEntry | null;
+  setAgentEdit: (e: ChangeEntry | null) => void;
 }
 
 const LOG_CAP = 2000;
@@ -234,4 +246,7 @@ export const useStore = create<Store>((set) => ({
 
   selectedLayerId: null,
   setSelectedLayerId: (id) => set({ selectedLayerId: id }),
+
+  agentEdit: null,
+  setAgentEdit: (e) => set({ agentEdit: e }),
 }));

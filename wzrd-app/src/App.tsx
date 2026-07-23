@@ -16,6 +16,8 @@ import {
   onTelemetry,
   packInfo,
   readSceneFile,
+  sceneGetState,
+  type ChangeEntry,
   type DeckPayload,
 } from './api/ipc';
 import { StatusStrip } from './components/StatusStrip';
@@ -111,6 +113,31 @@ export default function App() {
           case 'log':
             st.appendLog(frame.payload);
             break;
+          case 'changes': {
+            // §5.10 reverse-sync: the store assumes it's the only writer, so
+            // any non-UI design mutation (agent over WS, watcher file edit)
+            // re-pulls the affected facet from the engine. Store only —
+            // never into sceneCommit's disk debounce; persisting an
+            // agent-authored scene is the operator's explicit "Adopt".
+            const entry = frame.payload as ChangeEntry;
+            if (entry.actor === 'ui') break;
+            if (entry.facet === 'layers') {
+              packInfo()
+                .then((p) => useStore.getState().setPack(p))
+                .catch((e) => console.warn('changes re-sync pack_info:', e));
+            } else {
+              sceneGetState()
+                .then((r) => useStore.getState().setSceneJson(r.json))
+                .catch((e) => console.warn('changes re-sync scene:', e));
+              if (entry.facet === 'effects') {
+                listEffects()
+                  .then((eff) => useStore.getState().setEffects(eff))
+                  .catch((e) => console.warn('changes re-sync effects:', e));
+              }
+            }
+            if (entry.actor === 'agent') st.setAgentEdit(entry);
+            break;
+          }
           default:
             // Unknown channels are silently dropped — agent-driven additions
             // shouldn't need a UI patch to coexist.

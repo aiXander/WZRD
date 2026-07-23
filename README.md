@@ -110,9 +110,15 @@ See `[render-core/README.md](render-core/README.md)` for the effect/driver catal
 ## Installation
 
 ```bash
-pip install -e .
+# uv (preferred) — resolves against uv.lock into .venv
+uv sync                               # base package
+uv sync --extra islands               # + island extraction (scikit-learn / KMeans)
+uv sync --extra mcp --extra engine    # + MCP server & engine authoring tools
+# or pip-style into the venv without touching the lockfile:
+uv pip install -e ".[islands]"
 
-# With island extraction support (requires scikit-learn for KMeans)
+# plain pip
+pip install -e .
 pip install -e ".[islands]"
 
 # From GitHub
@@ -225,9 +231,15 @@ WZRD includes an MCP (Model Context Protocol) server that exposes all tools to A
 ### Running the server
 
 ```bash
+# uv (preferred)
+uv pip install -e ".[mcp]"           # or: uv sync --extra mcp
+uv run python -m wzrd_mcp                    # default: 0.0.0.0:8787
+uv run python -m wzrd_mcp --no-debug         # quieter (no per-tool logging)
+uv run python -m wzrd_mcp --port 8000        # custom port
+
+# plain pip equivalent
 pip install -e ".[mcp]"
-python -m wzrd_mcp                    # default: 0.0.0.0:8787
-python -m wzrd_mcp --port 8000        # custom port
+python -m wzrd_mcp
 ```
 
 The server uses Streamable HTTP transport at `http://localhost:8787/mcp`. It won't respond to regular browser requests (you'll get a 406 — that's normal).
@@ -262,6 +274,29 @@ Add to your MCP config (e.g. `.claude/settings.json`):
   }
 }
 ```
+
+or one-shot: `claude mcp add --transport http wzrd http://localhost:8787/mcp`.
+
+### Engine authoring tools (§5.10 — local only)
+
+A **locally-run** `wzrd_mcp` can also expose the realtime engine's authoring
+surface (`get_scene_context`, `upsert_binding`, `upsert_effect`, `set_groups`
+/ `set_labels`, `validate_wgsl`, `get_preview`, …) so Claude Code can design
+scenes and write WGSL against a running engine — full contract in
+[docs/reference/render-engine.md §2.7](docs/reference/render-engine.md).
+
+```bash
+uv pip install -e ".[mcp,engine]"   # adds the websockets client (or: uv sync --extra mcp --extra engine)
+# engine up with a control surface (the Tauri shell always binds :9123):
+cd wzrd-app && WZRD_SCENE=... pnpm tauri dev
+# then run wzrd_mcp locally (uv run python -m wzrd_mcp) and register it in Claude Code as above.
+```
+
+The tools connect to `ws://127.0.0.1:9123` (override: `WZRD_ENGINE_WS`).
+They default **off** in `server.py` and are switched on in the local
+`tools_config.json`; the Modal image never installs `websockets`, so the
+cloud deployment can't carry them. The agent only ever authors the
+**design** leg — going live stays a human act (`promote` in the UI).
 
 ## Dependencies
 

@@ -9,119 +9,120 @@
 > Ordered by leverage toward `../reference/user_design_spec.md`. Each item is
 > scoped so an agent can pick it up standalone. **General rule: engine first,
 > headless-verifiable, UI second.** §5.1–§5.6 are resolved (landed or
-> dropped). The single-process collapse (Steps 2–3) and the §5.6 two-deck
-> architecture (incl. the shader pre-flight probe — the hard pre-live-show
-> prerequisite) **LANDED 2026-07-12**; current contracts in
-> [../reference/render-engine.md](../reference/render-engine.md) §1/§1b/§2.6.
-> **Next up by leverage: the §5.6 auto-pilot playlist follow-up (thin
-> scheduler over existing verbs), §5.7 (layer object), or §5.11 hardening
-> (probation window + headless status file).**
+> dropped); the single-process collapse + §5.6 two-deck **LANDED
+> 2026-07-12**; **§5.10 authoring MCP + the §5.13 engine slice LANDED
+> 2026-07-22** — contracts in
+> [../reference/render-engine.md](../reference/render-engine.md)
+> §1/§1b/§2.2/§2.6/§2.7.
+> **Next up, in order: §5.11's post-swap probation window** (elevated — MCP
+> authoring multiplies shader churn and yellow-verdict shaders can still be
+> promoted), the §5.5 **`#import` preprocessor** (same reason — an
+> authoring agent re-implements helpers in every effect), then the §5.6
+> auto-pilot playlist follow-up (thin scheduler over existing verbs) or
+> §5.7 (layer object).
 
-### 5.1 ~~Live transport: music-locked BPM~~ — DROPPED (2026-07-11)
+### 5.1 Live transport: music-locked BPM — DROPPED (2026-07-11)
 
-Live BPM tracking is out of scope for now. BPM is a slowly-changing smoothed
-float with little value in this engine — the live musical energy that matters
-arrives as discrete events (kicks/onsets via `audio.onset`), which the engine
-already consumes. `transport.bpm` stays what it is today: a static scene
-value driving `clock.*` phase. The audio server's `/audio/bpm` stream stays
-deliberately ignored by `osc.rs`. Section number retained so §5.x
-cross-references stay valid; revisit only if a real scene proves onsets +
-static clock insufficient.
+Out of scope. Live musical energy arrives as discrete `audio.onset` events
+(already consumed); `transport.bpm` stays a static scene value driving
+`clock.*` phase, and the audio server's `/audio/bpm` stream stays ignored by
+`osc.rs`. Revisit only if a real scene proves onsets + static clock
+insufficient.
 
 ### 5.2 Per-layer variation + `pick` selectors — LANDED (2026-07-11)
 
-Implemented — see [../reference/render-engine.md](../reference/render-engine.md)
-§2.1 (`pick` grammar + strictness) and §2.4 (per-layer identity accessors:
-`layer_seed()`, `layer_index()`/`layer_count()`, `layer_centroid()`,
-`layer_bbox()`). Residue worth knowing: picks are stateless — a pure hash
-of (binding id, transport cycle) via `compositor::pick_choice`, rate
-restricted to `clock.*` (`drivers::PickRate`) — so no RNG state exists to
-carry across the §5.6 legs; all member passes stay in the plan and a
-re-pick just flips `active` flags. `phase3_smoke.scene.json`'s `pick_bloom`
-binding demos both features (inline WGSL using `layer_centroid()` +
-`layer_seed()`, re-picked every 2 bars).
+See reference §2.1 (`pick` grammar) + §2.4 (per-layer identity accessors).
+Picks are stateless — a pure hash of (binding id, transport cycle) via
+`compositor::pick_choice` — so no RNG state crosses the §5.6 legs.
+`phase3_smoke.scene.json`'s `pick_bloom` binding demos both.
 
 ### 5.3 Operator-owned state: the session sidecar — LANDED (2026-07-11)
 
-Implemented — see [../reference/render-engine.md](../reference/render-engine.md)
-§2.5 for the full contract (sidecar shape, scope rule, write policy, read
-precedence). Residue worth knowing: `session.rs` owns load/save (atomic
-temp+rename; `session.json` is gitignored); the sidecar is per *directory*
-(venue), not per scene; the debounce rides a shared epoch-ms `AtomicU64`
-touched by the WS thread and drained in `Core::poll_inbound` (~1.5 s);
-SIGTERM/SIGINT land via a `signal-hook` flag → snapshot + graceful host
-exit, which is §5.11's power-blink item done early. Reference §4 weakness 5
-(knob persistence) is resolved. `projectorCalibration` in scene.json is a
-deprecated read-only fallback. The "show file" umbrella (playlist + scenes
-+ session) still waits for §5.6's auto-pilot playlist.
+See reference §2.5 (full contract). `session.rs` owns load/save (atomic
+temp+rename; gitignored; per *directory*/venue, not per scene); debounce
+drained in `Core::poll_inbound`; SIGTERM/SIGINT → snapshot + graceful exit.
+`projectorCalibration` in scene.json is a deprecated read-only fallback. The
+"show file" umbrella (playlist + scenes + session) still waits for §5.6's
+auto-pilot playlist.
 
-### 5.4 Masters row — LANDED (2026-07-11)
+### 5.4 Masters row + crossfade-time master — LANDED (2026-07-11 / 2026-07-22)
 
-Implemented per the original sketch — see reference §2.5. `Masters` atomics
-in `drivers.rs`; brightness/saturation in the final homography pass (the
-preview deliberately shows the un-mastered composite); speed as per-frame
-`Transport` time integration (bends time, never jumps); audioListen scales
-every `audio.*` read including the `state.audio_*` uniform. RPC
-`master.set`/`master.list` + sticky `masters` telemetry; persisted in the
-sidecar; always-visible row in Perform (double-click a label to reset).
-**Crossfade-time master still pending** — promote exists now (§5.6, landed);
-tracked in the §5.6 leftovers alongside the auto-pilot playlist.
+See reference §2.5. `Masters` atomics in `drivers.rs` — brightness/saturation
+in the final homography pass, speed as `Transport` time integration (bends
+time, never jumps), audioListen scales every `audio.*` read; RPC
+`master.set`/`master.list`, persisted in the sidecar, always-visible Perform
+row. The `promote` crossfade fade is an engine-wide master
+(`drivers::Crossfade`, seconds, 0–30, `0`=CUT) — *not* per-leg, never copied
+on promote/pull; a `promote` with no explicit `fade_ms` falls back to it.
+DeckBar exposes it as a logarithmic FADE fader (CUT at bottom of travel).
 
 ### 5.5 Params first-class: descriptor knobs + overrides — LANDED (2026-07-11)
 
-Implemented — see reference §2.3. Descriptors (user *and* built-in) carry
-`min`/`max`/`step`/`unit`/`widget` per input, served by `effect.describe`;
-`param.set {binding, param, value}` pins any scalar param via the
-engine-side `ParamOverrides` table consulted in `tick()` (zero rebuild,
-`value: null` clears, `drivers` telemetry flags `overridden`). Carry-forward
-on regenerate is inherent: the table is keyed (binding id, param name) and
-lives outside the plan, so overrides survive every rebuild where the name
-still resolves to a scalar. The driver rack's numeric rows now tune through
-this path; scene.json is never written implicitly. Audio conditioning stays
-server-side (settled) — effect strength is just a scalar input on the
-effect, now live-tweakable via the override path.
+See reference §2.3. Descriptors carry `min`/`max`/`step`/`unit`/`widget` per
+input (`effect.describe`); `param.set {binding, param, value}` pins any scalar
+via the `ParamOverrides` table consulted in `tick()` (keyed (binding id, param
+name), outside the plan → survives rebuilds; `null` clears). scene.json is
+never written implicitly. Audio conditioning stays server-side.
 
-**Still open (forward concern, v1 §8.11): shared WGSL utilities.** Effects
-past v1 will want shared noise/SDF/colour-space/palette helpers instead of
-every file re-implementing `permute()`/`hsv2rgb()`. WGSL has no native
-`#include`; the fix is a small `#import`-style text preprocessor run before
-`naga`. The compile entry point is still the single `gpu::compose_shader` /
-`build_effect_pipeline` pair, so wedging it in stays a one-layer change.
+**Still open — shared WGSL utilities via `#import` (specced 2026-07-22;
+fast-follow immediately after §5.10, which multiplies the duplication — an
+authoring agent re-implements `permute()`/`hsv2rgb()` in every effect it
+writes).** WGSL has no native include; the fix is a small text preprocessor
+in the single compile entry point (`gpu::compose_shader` /
+`build_effect_pipeline` — still a one-layer change):
+
+- **Syntax:** a line `#import <module>` (e.g. `#import noise`), processed
+  before `naga` ever sees the source. Recursive (lib modules may import
+  each other), cycle-rejected, deduped — each module inlined at most once
+  per composed shader.
+- **Resolution order:** project-local `<effects_dir>/_lib/<module>.wgsl`
+  first, then engine-shipped built-ins
+  (`render-core/shaders/lib/<module>.wgsl`, embedded via `include_str!`) —
+  projects can shadow built-ins. Unknown module = prescriptive compile
+  error listing the available modules.
+- **Line remapping must survive:** the composer already remaps naga
+  diagnostics past the prelude; extend the flat offset to a real source
+  map so an error reports `_lib/noise.wgsl:12`, and `wgsl.validate` (and
+  the §5.10 `validate_wgsl` tool) inherit it.
+- **Cache + probe correctness fall out for free:** the §2.6
+  content-hashed pipeline keys hash the **post-preprocess** source —
+  editing a lib module changes every dependent effect's key, so dependents
+  re-enter the cache as new pipelines (and get probed) while live keeps
+  drawing the old ones. The watcher adds `_lib/` to its watch set; a lib
+  change marks all user effects dirty (the mtime rescan in `effects.rs`
+  already exists).
+- **MCP exposure (§5.10 landed — wire in when this ships):** lib modules
+  live in the `effects` facet, ids namespaced `_lib/<module>`;
+  `upsert_effect({name: "_lib/noise", wgsl})` writes a module (no
+  descriptor, no probe of its own — dependents re-probe via the key
+  change).
 
 ### 5.6 Design/Live legs + Promote/Pull (the two-deck architecture) — LANDED (2026-07-12)
 
-Implemented in full (execution steps 1–6, engine + UI) — the complete
-contract now lives in
-[../reference/render-engine.md](../reference/render-engine.md) **§2.6**
-(legs + blanket leg rule, promote/pull semantics + re-entrancy,
-demand-gated design rendering, content-hashed pipeline keys + cross-leg GC,
-pre-flight probe with calibration + pessimistic drivers, design autosave,
-single-window preview source toggle) and §2.3 (new RPC verbs + `deck`
-channel + `hot_reload.probe`). Verified over WS with a 31-check smoke
-(edit-isolation, promote/pull, re-entrancy, probe green/red gating,
-autosave restore). Residue worth knowing:
+Full contract in reference **§2.6** (legs + blanket leg rule, promote/pull +
+re-entrancy, demand-gated design rendering, content-hashed pipeline keys +
+cross-leg GC, pre-flight probe, design autosave, preview source toggle) and
+§2.3 (RPC verbs + `deck` channel + `hot_reload.probe`). Residue worth knowing:
 
-- Live-freeze is implemented via **content-derived pipeline keys** + a
-  retain-set GC, not by guarding eviction of path-keyed pipelines — an
-  edited shader simply gets a new cache slot while live keeps the old one.
-- **Decision reversed same-day (2026-07-12):** the original "knobs shared
-  across legs, no copy needed" call died on first contact — design speed
-  4× also sped the show. The deck toggle is now a **full control switch**:
-  per-leg transport/masters/knobs/overrides, copied design→live on promote
-  and live→design on pull (reference §2.6 has the full rationale).
-- Probe frames interleave with live frames (~3.5 ms/loop-iteration budget);
-  overhead is calibrated once per boot against a trivial shader.
-- Headless (no `--ws-addr`) collapses to a single live leg — no design
-  composite, no probe — byte-identical to the pre-two-deck engine.
+- Live-freeze is via **content-derived pipeline keys** + a retain-set GC (an
+  edited shader gets a new cache slot; live keeps the old one) — not eviction
+  guards.
+- The deck toggle is a **full control switch**: per-leg
+  transport/masters/knobs/overrides, copied design→live on promote and
+  live→design on pull. (The "shared knobs, no copy" idea died same-day — design
+  speed 4× also sped the show.)
+- Probe frames interleave with live (~3.5 ms/loop-iteration budget, calibrated
+  per boot). Headless (no `--ws-addr`) = single live leg, byte-identical to the
+  pre-two-deck engine.
 
 **Still open (deferred out of §5.6 scope by design, 2026-07-12): the
 auto-pilot playlist** (spec §13) — a thin scheduler composing existing
 verbs, no new engine code: `scene.load` → design, wait for build/probe OK
 (the `scene.load` reply already carries the probe verdict), `promote
 {quantize:"bar"}`, dwell, repeat, skip entries that fail. Ship it once
-promote has been proven solid at a real show. The §5.4 **crossfade-time
-master** ("promote fade default" as an operator master) also still waits —
-add it alongside the playlist if hand-set fade times get old.
+promote has been proven solid at a real show. (The §5.4 **crossfade-time
+master** — "promote fade default" as an operator master — landed separately
+on 2026-07-22; see §5.4.)
 
 ### 5.7 Layer object + intensity (carried over from v1 review #2/#9)
 
@@ -163,13 +164,23 @@ declares an `image` input bound to a `VideoSource`. Watch the HMR/cleanup
 failure mode (reference §4 safety/scaling risks): staging slots from a
 closed stream must drop.
 
-### 5.10 MCP wrapper (v1 Phase 7)
+### 5.10 Authoring MCP — the AI scene/shader co-author — LANDED (2026-07-22)
 
-A thin MCP server proxying the WS method table (§2.3) plus a
-`scene.edit({instruction})` tool that round-trips natural language into
-scene.json + effects/*.wgsl via Claude. The engine surface is already
-agent-shaped; the wrapper adds no new engine code. With §5.6 landed, the
-agent gets `design`-leg-only access for free.
+Done — full contract in [../reference/render-engine.md](../reference/render-engine.md)
+**§2.7** (tool surface, facet taxonomy, the six-piece engine cluster:
+rev/epoch change ring + sticky `changes` channel, per-connection actor via
+`hello`, probe-deferred `effect.upsert`, `base_rev` CAS, webview
+reverse-sync + ADOPT button, agent mirror file) and §2.2/§2.3 (identity
+sidecar, RPC additions). Python side: `wzrd_mcp/engine_tools.py`
+(`.[engine]` extra, default-off in `server.py`, on in the local
+`tools_config.json`); setup recipe in the repo `README.md`. Decisions that
+constrain future work: Claude Code is the author (no embedded-LLM tool); no
+live operator controls as tools and **no agent `promote`, ever**; no
+agent-decided persistence; rejected shapes listed in §2.7.
+
+Still open (small): `get_scene_context`'s `layers` digest could fold in the
+§5.5 `_lib` modules once the `#import` preprocessor lands (`_lib/<module>`
+ids in the `effects` facet — see §5.5).
 
 ### 5.11 Reliability hardening (spec §9: "trust it to stay up")
 
@@ -200,7 +211,11 @@ single-process relaunch-with-restore meets it. Defense in depth, in order:
 - Headless autostart recipe (launchd/systemd) documented for installations.
 - ~~Slider/master state snapshot on SIGTERM~~ — **done** (landed with §5.3,
   2026-07-11: `signal-hook` flag → sidecar snapshot → graceful exit).
-- **Post-swap probation window.** `naga` proves a shader *compiles*; a
+- **Post-swap probation window — elevated 2026-07-22: schedule immediately
+  after §5.10.** The MCP multiplies AI shader churn by an order of
+  magnitude, and yellow-verdict shaders can still be promoted to live —
+  the probe gates *entry to design*, the probation window is the only
+  live-side net. `naga` proves a shader *compiles*; a
   valid-but-pathological one can still blow the frame budget (reference §4
   risk list). Extend swap-on-success: after any pipeline/plan swap, watch
   frame time for ~30 frames; if p95 blows the budget and the swap is the
@@ -227,27 +242,20 @@ layer deck panel in Perform (per §5.7); virtualized log list; driver-rack
 grouping/filter chips; scene save-as + scene chooser grid; region renaming +
 `identity.json` editing in Prepare (→ §5.13); AI co-author chat panel (with §5.10).
 
-### 5.13 Identity sidecar: group authoring + region renaming (small sprint)
+### 5.13 Identity sidecar: group authoring + region renaming — ENGINE SLICE LANDED (2026-07-22)
 
-Bindings already resolve `select: { group }` (D7), and the Binding Inspector
-already offers a group dropdown — but nothing in the UI can *create* a group
-or assign layers, so the dropdown is empty unless `wzrd.layerpack` authored
-groups offline. The fix is the first slice of the `identity.json` sidecar
-(§2.2): human-authored, pack-adjacent metadata overlaid at load time, keeping
-`pack.json` machine-authored and "pack ids stable, period." Groups are a
-property of the *surface*, not a performance, so they belong here — **not** in
-scene.json (per-scene) and **not** by rewriting the pack.
+**Engine slice done** (as step 0 of §5.10) — see reference **§2.2**:
+`identity.json` load/merge in `pack.rs` (lenient at load, strict on write,
+labels included from day one) + the queued `identity.setGroups
+{groups?, labels?}` RPC (per-key delta, `null` removes; persists, refreshes
+`pack.info`, re-resolves design selectors). Agent-side authoring works today
+via the §5.10 `set_groups`/`set_labels` MCP tools.
 
-Scope (deliberately thin):
-- **Engine:** load `<pack_dir>/identity.json` if present; merge its `groups`
-  over `pack.groups` before serving `pack.info`. One new queued RPC
-  `identity.setGroups {groups}` writes the sidecar and re-emits `pack.info`.
-  Same slot later carries region renames (the §5.12 backlog item — build the
-  reader/writer once, add a `labels` map when renaming lands).
-- **UI:** multi-select on the Surface canvas (⌘/⇧-click accumulates a
-  selection; already have pixel-accurate picking) → "New group from selection"
-  → commits via `identity.setGroups`. Editing membership = re-select + save.
-  Distinct from `sceneCommit.ts` — this writes the sidecar, not the scene.
+**Still open — the UI half:** multi-select on the Surface canvas (⌘/⇧-click
+accumulates a selection; pixel-accurate picking already exists) → "New group
+from selection" → commits via `identity.setGroups`; region renaming in
+Prepare writes `labels` the same way. Distinct from `sceneCommit.ts` — this
+writes the sidecar, not the scene.
 
 Non-goals: no group nesting, no per-group colour/metadata beyond membership,
 no offline `wzrd.layerpack` group-reconciliation (that rides the broader

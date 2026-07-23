@@ -426,10 +426,19 @@ impl EffectRegistry {
     }
 
     /// §5.5 `effect.describe` payload — one named effect, or the full
-    /// catalog sorted by name when `name` is `None`.
+    /// catalog sorted by name when `name` is `None`. The single-effect form
+    /// includes the WGSL source for user effects (§5.10 — the MCP `effects`
+    /// full-depth read serves it to the authoring agent); the catalog form
+    /// stays names + inputs only to keep it cheap.
     pub fn describe(&self, name: Option<&str>) -> Result<Value> {
         match name {
-            Some(n) => self.resolve_named(n).map(|d| describe_def(&d)),
+            Some(n) => self.resolve_named(n).map(|d| {
+                let mut v = describe_def(&d);
+                if let EffectKind::User { wgsl, .. } = &d.kind {
+                    v["wgsl"] = serde_json::json!(wgsl);
+                }
+                v
+            }),
             None => {
                 let mut defs: Vec<&EffectDef> = self.effects.values().collect();
                 defs.sort_by(|a, b| a.name.cmp(&b.name));

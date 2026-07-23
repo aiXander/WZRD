@@ -3380,6 +3380,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+engine = [
+    { name = "websockets" },
+]
 islands = [
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -3417,8 +3420,9 @@ requires-dist = [
     { name = "python-dotenv", marker = "extra == 'mcp'", specifier = ">=1.0" },
     { name = "scikit-learn", marker = "extra == 'islands'", specifier = ">=1.3.0" },
     { name = "uvicorn", marker = "extra == 'mcp'", specifier = ">=0.30" },
+    { name = "websockets", marker = "extra == 'engine'", specifier = ">=12" },
 ]
-provides-extras = ["islands", "mcp", "modal"]
+provides-extras = ["islands", "mcp", "modal", "engine"]
 
 [[package]]
 name = "yarl"
