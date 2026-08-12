@@ -206,6 +206,10 @@ pub struct RpcContext {
     /// `probe.setThresholds`, read by the render thread at probe verdicts,
     /// persisted in the session sidecar.
     pub probe_thresholds: Arc<crate::probe::ProbeThresholds>,
+    /// §5.14 alignment layer. Written inline (a drag must not queue behind
+    /// the render thread) and engine-wide: never per leg, never touched by
+    /// `scene.load`, promote/pull or any authoring verb.
+    pub alignment: Arc<crate::alignment::AlignmentState>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -555,6 +559,59 @@ pub fn dispatch(
                 .recv()
                 .map_err(|_| RpcError::message("engine reply channel closed"))?
                 .map_err(RpcError::message)
+        }
+
+        // §5.14 alignment layer — all inline: a corner drag must not queue
+        // behind the render thread, and none of these rebuild a plan. No
+        // `base_rev` CAS either: unlike the scene this has one human editor at
+        // a time and last-write-wins is the right semantics for a drag.
+        "alignment.get" => Ok(ctx.alignment.to_json()),
+
+        "alignment.set" => {
+            let patch: crate::alignment::AlignmentPatch = if req.params.is_null() {
+                Default::default()
+            } else {
+                serde_json::from_value(req.params.clone())
+                    .map_err(|e| RpcError::message(format!("params: {e}")))?
+            };
+            // Rejections are prescriptive and the previous alignment keeps
+            // rendering — swap-on-success, like every other mutation here.
+            let _ = ctx.alignment.apply_patch(patch).map_err(RpcError::message)?;
+            let payload = ctx.alignment.to_json();
+            ctx.bus.emit_alignment(payload.clone());
+            Ok(payload)
+        }
+
+        "alignment.reset" => {
+            ctx.alignment.reset();
+            let payload = ctx.alignment.to_json();
+            ctx.bus.emit_alignment(payload.clone());
+            Ok(payload)
+        }
+
+        // §3.6 — swap the composite for a generated pattern *in source space*,
+        // so it warps with the content and reveals misalignment against
+        // physical edges. Runtime-only: never persisted, so a restart can't
+        // leave a grid on the wall.
+        "alignment.setTestPattern" => {
+            #[derive(Deserialize)]
+            struct Params {
+                pattern: String,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            let pattern = crate::alignment::TestPattern::parse(&p.pattern).ok_or_else(|| {
+                RpcError::message(format!(
+                    "unknown test pattern {:?} (\"none\" | \"grid\" | \"border\" | \"corners\")",
+                    p.pattern
+                ))
+            })?;
+            ctx.alignment.set_test_pattern(pattern);
+            // The pattern lives in the final-pass uniform, which is rewritten
+            // every presented frame — no rebake needed.
+            let payload = ctx.alignment.to_json();
+            ctx.bus.emit_alignment(payload.clone());
+            Ok(payload)
         }
 
         "wgsl.validate" => {

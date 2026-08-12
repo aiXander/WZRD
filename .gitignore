@@ -56,5 +56,11 @@ node_modules/
 # WZRD engine-written session sidecars (operator state, per-venue — not source)
 session.json
 
+# §5.14 engine-written alignment layer (where the projector points — per-venue)
+alignment.json
+
 # §5.6 engine-written design-leg autosave (crash-recovery draft — not source)
 .wzrd/
+
+# Local project folders (per-job assets: surfaces, generated content, packs)
+projects/

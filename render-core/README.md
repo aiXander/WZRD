@@ -2,12 +2,17 @@
 
 WZRD's realtime additive projection-mapping engine.
 
-Phase 3 deliverable: a playable, audio-reactive engine that runs without
-any UI process. Authors and agents express creativity by writing **WGSL**
-(inline in `scene.json` or as project-local files) — the engine
-hot-reloads on save (D15). Drivers wire clock + audio (OSC ingest from the
-external Realtime Audio Feature Server) straight into effect params.
-**Still no Tauri, no webview, no TypeScript on the critical path.**
+A playable, audio-reactive engine that runs with or without a UI process.
+Authors and agents express creativity by writing **WGSL** (inline in
+`scene.json` or as project-local files) — the engine hot-reloads on save
+(D15). Drivers wire clock + audio (OSC ingest from the external Realtime
+Audio Feature Server) straight into effect params.
+
+Two ways to run it: the **standalone binary** from this crate (headless —
+one projector window, file-watcher hot-reload; everything below), or the
+**Tauri shell** at `../wzrd-app/`, which links this crate as a library and
+hosts it in-process. The shell needs no build from here — see
+`../README.md`.
 
 See `../docs/reference/render-engine.md` for the full design (roadmap in
 `../docs/TODO/render-engine-roadmap.md`).
@@ -17,35 +22,62 @@ See `../docs/reference/render-engine.md` for the full design (roadmap in
 Requires Rust 1.85+ (uses the wgpu 22 / winit 0.30 ecosystem).
 
 ```bash
+cd render-core
 cargo build --release
 ```
 
+> **There is no** `render-core` **on your PATH.** `cargo build` only writes the
+> binary into `render-core/target/{debug,release}/`. Launch it as
+> `cargo run --` or `./target/release/render-core` — bare `render-core`
+> gives you `command not found`, and that is expected.
+
+
+
 ## Run
 
+One-time, from the **repo root** — the example scenes point at the pack
+this builds (`test_results/layerpack/pack/`), and without it the engine
+exits on a missing pack:
+
 ```bash
-# Borderless fullscreen on the primary monitor:
-render-core --scene path/to/scene.json
+uv run python test.py layerpack
+```
+
+Then, from `**render-core/**` (all paths below are relative to this
+directory):
+
+```bash
+# Main test launch — windowed, no audio server needed:
+cargo run -- --scene examples/phase3_smoke.scene.json --windowed --no-osc
+
+# Same via the built binary (after `cargo build --release`):
+./target/release/render-core --scene examples/phase3_smoke.scene.json --windowed --no-osc
+
+# Borderless fullscreen on the primary monitor (drop --windowed):
+cargo run -- --scene examples/phase3_smoke.scene.json
 
 # Pick a specific display:
-render-core --scene path/to/scene.json --display 1
+cargo run -- --scene examples/phase3_smoke.scene.json --display 1
 
-# Iterating locally on a laptop — windowed mode:
-render-core --scene path/to/scene.json --windowed
+# Release build for an actual show — debug builds drop frames:
+cargo run --release -- --scene examples/phase3_smoke.scene.json --display 1
 
-# Disable OSC ingest (clocks tick, audio.* drivers return 0):
-render-core --scene scene.json --windowed --no-osc
+# Bind OSC on all interfaces (audio server on another machine):
+cargo run -- --scene examples/phase3_smoke.scene.json --windowed --osc-addr 0.0.0.0:9000
 
-# Bind on all interfaces (audio server on another machine):
-render-core --scene scene.json --windowed --osc-addr 0.0.0.0:9000
-
-# Expose the JSON-RPC WebSocket so external §3.11 clients (remote operator,
-# future MCP wrapper) can drive scene / effect / telemetry. Omit for headless.
-# (The Tauri shell no longer uses this — it embeds the engine in-process.)
+# Expose the JSON-RPC WebSocket so external §3.11 clients (the MCP authoring
+# tools, a remote operator) can drive scene / effect / telemetry.
+# (The Tauri shell does NOT need this — it embeds the engine in-process.)
 # NOTE: --ws-addr also switches the engine into §5.6 two-deck mode — all
 # authoring lands on the design leg and goes live via `promote`. Headless
 # (no --ws-addr) stays single-leg: the watcher hot-reloads live directly.
-render-core --scene scene.json --windowed --ws-addr 127.0.0.1:9123
+cargo run -- --scene examples/phase3_smoke.scene.json --windowed --ws-addr 127.0.0.1:9123
 ```
+
+`--scene` is the only required flag. `cargo run -- --help` prints the full
+list; the rest are `--pack`, `--effects`, `--display`, `--windowed`,
+`--no-osc`, `--osc-addr`, `--ws-addr`, `--frame-cap-hz` (default 240, `0`
+disables the cap).
 
 The layer-pack path is read from `scene.json`'s `pack` field (resolved
 relative to the scene file). Override with `--pack`.
@@ -58,12 +90,14 @@ Project-local effects (D15) are picked up automatically from
 Built-ins shipped as reference implementations — **not the boundary** of
 what's expressible:
 
-| name        | inputs                                  | notes                                              |
-|-------------|------------------------------------------|----------------------------------------------------|
-| `tint`      | `color`                                  | color × mask (debug / baseline)                    |
-| `hueCycle`  | `phase`, `color0..color3`                | 4-stop palette cycled by `phase` (often `clock.bars`) |
-| `flash`     | `envelope`, `base`, `color`              | additive pulse, typically `envelope = audio.onset` |
-| `wobble`    | `amp`, `freq`, `time`, `color`           | UV displacement — edge undulates                   |
+
+| name       | inputs                         | notes                                                 |
+| ---------- | ------------------------------ | ----------------------------------------------------- |
+| `tint`     | `color`                        | color × mask (debug / baseline)                       |
+| `hueCycle` | `phase`, `color0..color3`      | 4-stop palette cycled by `phase` (often `clock.bars`) |
+| `flash`    | `envelope`, `base`, `color`    | additive pulse, typically `envelope = audio.onset`    |
+| `wobble`   | `amp`, `freq`, `time`, `color` | UV displacement — edge undulates                      |
+
 
 User effects live in `effects/<name>/{shader.wgsl, descriptor.json}` or
 inline in `scene.json`. Every user effect implements one function:
@@ -88,6 +122,8 @@ The prelude exposes:
 - `state.onset_low/mid/high` (decaying envelopes off OSC triggers)
 - `state.resolution`
 - `sample_mask(uv)` — re-sample the layer's mask at any UV (spatial effects)
+
+
 
 ## Drivers
 
@@ -117,10 +153,10 @@ snapshot updated by a dedicated UDP recv thread.
 Quick start:
 
 ```bash
-# Terminal 1
-audio-server
+# Terminal 1 — the audio server (separate repo)
+cd ~/Documents/GitHub/Realtime_PyAudio_FFT && uv run audio-server --open
 
-# Terminal 2
+# Terminal 2 — the engine, from render-core/
 cargo run -- --scene examples/phase3_smoke.scene.json --windowed
 ```
 
@@ -149,46 +185,87 @@ In:
 
 - Layer pack loader → single `Texture2DArray<R8>` (256-slice hard cap, D4).
 - Strict `scene.json` parser with stable binding ids for hot-reload (§4.2).
-- Driver bus: clock, audio (OSC ingest from external feature server), ui-slider stub.
+- Driver bus: clock, audio (OSC ingest from external feature server),
+`ui.slider` (live values written by `param.set`, persisted in `session.json`).
 - Effect catalog: `tint`, `hueCycle`, `flash`, `wobble`.
 - Inline WGSL effects in `scene.json` (D15).
 - Project-local WGSL effects under `effects/<name>/{shader.wgsl, descriptor.json}` (D15).
 - `naga`-validated pipeline compile with swap-on-success — a bad save keeps
-  the previous good pipeline rendering (§3.6).
+the previous good pipeline rendering (§3.6).
 - File watcher covers scene.json **and** effects directory.
-- Per-layer composite + final homography pass (identity by default).
+- Per-layer composite + final pass: §2.8 alignment warp (n-point, baked to
+an offset LUT; identity until `alignment.json` says otherwise) + output
+masters + the §5.6 promote crossfade.
+- JSON-RPC WebSocket control surface (`--ws-addr`), which also enables the
+§5.6 design/live two-deck. Consumed by the Tauri shell (in-process, no
+socket) and the `wzrd_mcp` authoring tools.
 
-Out (Phase 4+):
+Still out:
 
-- Slow-path FBO routing for `layerRef` consumers (D5).
-- Tauri shell + webview UI (Phase 4).
-- Video paths: HAP, hardware-decoded H.264/HEVC (Phase 5).
-- JSON-RPC WebSocket / MCP wrapper (Phase 7).
+- Slow-path FBO routing for `layerRef` consumers (D5) — parsed, not executed.
+- `post` bindings — parsed, not executed.
+- Video paths: HAP, hardware-decoded H.264/HEVC (roadmap §5.9).
+
+
 
 ## Example
 
-`examples/phase3_smoke.scene.json` targets the layer pack produced by
-`python test.py layerpack` (`test_results/layerpack/pack/`). It exercises
-every built-in effect, an inline WGSL effect, drivers (clock + audio), and
-the project-local `effects/drift/` effect.
+Two scenes ship here, both targeting the layer pack built by
+`uv run python test.py layerpack` (`test_results/layerpack/pack/`). Its
+five regions are named after the test photo (a Moroccan kasbah) —
+`background`, `main_facade`, `left_tower`, `right_wing`, `base_wall`, with
+a `towers` group and `facade` / `tower` / `wall` tags — because those ids
+are what a scene selects on and what the operator reads in the inspector.
+The names are authored in `test.py::test_layerpack`'s tags file; without a
+tags entry a region falls back to its islands mask stem
+(`region_mask_003_color_fefd00`), which is unusable in a binding list:
+
+- `examples/phase3_smoke.scene.json` — the full exercise: built-in effects,
+an inline WGSL effect, clock + audio drivers, and the project-local
+effects under `examples/effects/` (`bloom`, `drift`, `flow_noise`,
+`vbars`).
+- `examples/tint_smoke.scene.json` — minimal `tint`-only scene; the
+fastest way to confirm the pack loads and the compositor is alive.
 
 ```bash
-# Build the pack first:
-python test.py layerpack
+# 1. Build the pack first (from the repo root, one-time):
+uv run python test.py layerpack
 
-# Start the audio feature server (separate repo) so OSC features flow:
-audio-server
+# 2. Optional — audio features over OSC (separate repo):
+cd ~/Documents/GitHub/Realtime_PyAudio_FFT && uv run audio-server --open
 
-# Then run:
-cd render-core
+# 3. Run, from render-core/:
 cargo run -- --scene examples/phase3_smoke.scene.json --windowed
-# (or --no-osc to skip OSC ingest entirely)
+# drop step 2 and add --no-osc to skip OSC ingest entirely
 ```
 
-Edit any of:
+Edit any of these and the projector window updates within one frame budget
+on save:
 
 - `examples/phase3_smoke.scene.json` — tweak params, change bindings, swap effects.
-- `examples/effects/drift/shader.wgsl` — edit the user shader.
-- `examples/effects/drift/descriptor.json` — change the input slot layout.
+- `examples/effects/<name>/shader.wgsl` — edit the user shader.
+- `examples/effects/<name>/descriptor.json` — change the input slot layout.
 
-The projector window updates within one frame budget on save.
+## Aligning the output without a UI (§2.8)
+
+`alignment.json` next to the scene is engine-written and applied whether or
+not anything is attached, so a saved alignment survives a headless run. To
+drive it live you need a control surface (`--ws-addr`, which the Tauri shell
+also binds):
+
+```bash
+cargo run -- --scene examples/phase3_smoke.scene.json --windowed --no-osc \
+    --ws-addr 127.0.0.1:9123
+
+# in another shell — corner sweep, live handle demo, test patterns:
+uv run --with websockets tools/align_drag.py --demo sweep
+uv run --with websockets tools/align_drag.py --pattern grid
+uv run --with websockets tools/align_drag.py --get
+```
+
+`tools/align_drag.py` is deliberately kept rather than thrown away: it is the
+proof that the alignment surface is UI-independent, and the skeleton the
+camera-driven auto-align (capture → detect → solve → `alignment.set`) grows
+from. `--verify-isolation <alignment.json>` asserts a `scene.load` + `pull`
+leaves the file byte-identical.
+

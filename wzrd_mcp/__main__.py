@@ -1,9 +1,10 @@
 """Entry point for running the WZRD MCP server locally.
 
 Usage:
-    python -m wzrd_mcp
+    python -m wzrd_mcp                    # HTTP (Claude Code, Modal, inspector)
     python -m wzrd_mcp --port 8787
     python -m wzrd_mcp --host 0.0.0.0 --port 9000
+    python -m wzrd_mcp --stdio            # stdio (Claude Desktop spawns this)
 
 Set WZRD_API_KEY in .env or environment to require Bearer auth.
 """
@@ -36,12 +37,24 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8787, help="Bind port (default: 8787)")
     parser.add_argument("--debug", default=True, action=argparse.BooleanOptionalAction,
                         help="Enable debug logging (default: True)")
+    parser.add_argument("--stdio", action="store_true",
+                        help="Serve over stdio instead of HTTP (Claude Desktop "
+                             "spawns the server itself; --host/--port ignored)")
     args = parser.parse_args()
 
     from . import _log
     _log.DEBUG = args.debug
 
     from .server import mcp
+
+    if args.stdio:
+        # Desktop owns the process and speaks JSON-RPC over our stdout, so
+        # nothing may print there — _log writes to stderr, and the FastMCP
+        # startup banner is suppressed. TimingMiddleware is ASGI-only and has
+        # no meaning here.
+        mcp.run(transport="stdio", show_banner=False)
+        return
+
     from ._log import TimingMiddleware
 
     asgi_app = mcp.http_app(transport="streamable-http")

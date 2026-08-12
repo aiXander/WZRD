@@ -28,10 +28,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use crate::alignment::{self, AlignmentDoc, AlignmentState};
 use crate::compositor::{resolve_effect_def, PassPlan};
 use crate::drivers::{Crossfade, Masters, ParamOverrides, SliderBank, Transport};
 use crate::effects::{EffectKind, EffectRegistry, InputSlot};
-use crate::gpu::{GpuContext, Leg, LayerIdentity, LayerParamsGpu};
+use crate::gpu::{FinalPassUniforms, GpuContext, Leg, LayerIdentity, LayerParamsGpu};
 use crate::osc::{try_spawn, AudioFeatures, OscListener};
 use crate::pack::LoadedPack;
 use crate::probe::{
@@ -226,6 +227,13 @@ pub struct Core {
     session_calibration: Option<[[f32; 3]; 3]>,
     scene_calib_warned: bool,
 
+    /// §5.14 alignment layer — engine-wide (not per leg), shared with the WS
+    /// surface so a headless camera script drives the same state the Align
+    /// tab does. Deliberately *not* scene content: `scene.load`, promote/pull
+    /// and agent authoring never touch it.
+    alignment: Arc<AlignmentState>,
+    alignment_path: PathBuf,
+
     /// Epoch-ms stamp of the last operator-state change (0 = clean). Written
     /// by the WS thread on master/knob changes; `poll_inbound` debounces the
     /// sidecar write on it.
@@ -409,6 +417,17 @@ impl Core {
             crossfade: crossfade.seconds(),
         });
 
+        // §5.14 — the alignment document. Its own file, not `session.json`:
+        // distinct writer (a camera script owns this content in a way it
+        // never owns knob state), distinct size class (a dense field lands
+        // here later), distinct lifecycle (rewritten on every drag).
+        let alignment_path = alignment::alignment_path(&scene_path);
+        let alignment = Arc::new(load_alignment(
+            &alignment_path,
+            session_calibration.or(scene.projector_calibration),
+        ));
+        bus.emit_alignment(alignment.to_json());
+
         // §5.11 — a termination signal snapshots the session before exit, so
         // a power-blink/systemd-stop comes back close to where it was.
         let term_flag = Arc::new(AtomicBool::new(false));
@@ -443,6 +462,7 @@ impl Core {
             design_overrides: Arc::clone(&design_overrides),
             session_dirty: Arc::clone(&session_dirty),
             probe_thresholds: Arc::clone(&probe_thresholds),
+            alignment: Arc::clone(&alignment),
         };
         let ws_handle = match cli.ws_addr {
             Some(addr) => Some(
@@ -515,6 +535,8 @@ impl Core {
             session_path,
             session_calibration,
             scene_calib_warned: false,
+            alignment,
+            alignment_path,
             session_dirty,
             term_flag,
             exit_requested: false,
@@ -551,6 +573,11 @@ impl Core {
             self.two_leg,
         ))
         .context("initialising wgpu")?;
+        // §5.14 — publish the output size the alignment document is expressed
+        // against before any client can read it.
+        let (lut_w, lut_h) = gpu.warp_size();
+        self.alignment.set_output(lut_w, lut_h);
+        self.bus.emit_alignment(self.alignment.to_json());
         self.gpu = Some(gpu);
         // The atlas now lives on the GPU; drop the CPU-side copy.
         self.pack.mask_atlas = Vec::new();
@@ -661,16 +688,16 @@ impl Core {
                     Actor::System,
                 );
                 self.transport.set_bpm(self.scene.transport.bpm);
-                // §5.3 — calibration now lives in session.json; the scene
-                // field is a deprecated read-only fallback, never written.
-                if self.scene.projector_calibration.is_some()
-                    && self.session_calibration.is_none()
-                    && !self.scene_calib_warned
-                {
+                // §5.14 — calibration is now the alignment layer, in
+                // `alignment.json`. Both legacy matrix fields
+                // (scene.json's and session.json's) are boot-time migration
+                // sources only: read once, never written, ignored thereafter.
+                if self.scene.projector_calibration.is_some() && !self.scene_calib_warned {
                     log::warn!(
-                        "scene.json projectorCalibration is deprecated — calibration \
-                         belongs in session.json (engine-written); the scene value is \
-                         honoured as a fallback but will never be written back"
+                        "scene.json projectorCalibration is deprecated — alignment now \
+                         lives in the engine-written alignment.json (§5.14); the scene \
+                         value was only ever a boot-time migration source and is \
+                         ignored from here"
                     );
                     self.scene_calib_warned = true;
                 }
@@ -1691,6 +1718,15 @@ impl Core {
     pub fn resize(&mut self, width: u32, height: u32) {
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.resize(width, height);
+            // §5.14 — the warp LUT is one texel per output pixel, so the
+            // Align tab's handle→pixel readout and the LUT both follow the
+            // swapchain. `gpu.resize` already flagged the reallocated LUT for
+            // a rebake; this just republishes the size.
+            let (w, h) = gpu.warp_size();
+            if self.alignment.output() != (w, h) {
+                self.alignment.set_output(w, h);
+                self.bus.emit_alignment(self.alignment.to_json());
+            }
         }
     }
 
@@ -1786,7 +1822,7 @@ impl Core {
             .stats_plan()
             .map(|p| {
                 let n = p.layer_passes.len() as u32;
-                (n, n + 1) // +1 for the homography pass
+                (n, n + 1) // +1 for the final pass
             })
             .unwrap_or((0, 0));
         FrameCounts {
@@ -1800,11 +1836,30 @@ impl Core {
         }
     }
 
-    /// Effective projector calibration: session sidecar first (§5.3), the
-    /// deprecated scene.json field as a read-only fallback.
-    fn effective_calibration(&self) -> Option<[[f32; 3]; 3]> {
-        self.session_calibration
-            .or(self.scene.projector_calibration)
+    /// §5.14 — the alignment state, shared with the control surface. Handed
+    /// to hosts that want to read it without an RPC round trip.
+    pub fn alignment(&self) -> &Arc<AlignmentState> {
+        &self.alignment
+    }
+
+    /// Assemble the final-pass uniform for this frame: §5.4 masters, the
+    /// §5.6 promote mix, and the §5.14 warp enable + background + test
+    /// pattern. Cheap enough to rebuild per presented frame (48 bytes).
+    fn final_pass_uniforms(&self) -> FinalPassUniforms {
+        let (warp_enabled, background) = self.alignment.final_pass_inputs();
+        let pattern = self.alignment.test_pattern();
+        // Line thickness in *source* uv. The pattern is generated in source
+        // space (so it warps with the content), but it has to read as a thin
+        // line on the wall, so scale it off the output's short axis.
+        let (_, out_h) = self.alignment.output();
+        let thickness = 1.5 / out_h.max(240) as f32;
+        FinalPassUniforms::new(
+            self.masters.brightness(),
+            self.masters.saturation(),
+            self.mix,
+        )
+        .with_warp(warp_enabled, background)
+        .with_pattern(pattern.mode(), thickness, 8.0)
     }
 
     /// Tick both legs, each against **its own** control state (§5.6
@@ -1857,7 +1912,6 @@ impl Core {
             self.design_transport.step(self.design_masters.speed());
         }
         self.update_promote();
-        let calibration = self.effective_calibration();
         if self.gpu.is_none() || self.plan.is_none() {
             return Ok(());
         }
@@ -1875,6 +1929,14 @@ impl Core {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
+        // 0) §5.14 warp bake — edit-triggered, not per frame, and encoded
+        //    into this same encoder so it costs no extra submit. The dirty
+        //    flags are consumed *after* the swapchain frame is in hand, so a
+        //    `SurfaceError` bail-out can't swallow a pending rebake.
+        if self.alignment.take_render_dirty() || gpu.warp_needs_bake() {
+            gpu.write_warp_uniforms(&self.alignment.bake_uniforms());
+            gpu.encode_warp_bake(&mut encoder);
+        }
         // 1) Live leg → live composite.
         plan.encode_composite(gpu, &mut encoder, &gpu.composite_view);
         // 2) Design leg → design composite, only when something consumes it.
@@ -1886,14 +1948,9 @@ impl Core {
             }
         }
         // 3) Final pass: live × design lerped by the promote mix → masters
-        //    → homography → swapchain. Brightness/saturation refresh per
+        //    → alignment warp → swapchain. Brightness/saturation refresh per
         //    presented frame so a master move lands next frame.
-        gpu.write_homography(
-            calibration,
-            self.masters.brightness(),
-            self.masters.saturation(),
-            self.mix,
-        );
+        gpu.write_final_pass(&self.final_pass_uniforms());
         gpu.encode_final(&mut encoder, &swap_view);
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
@@ -2094,12 +2151,25 @@ impl Core {
             }
         }
 
+        // §5.14 — same policy, its own file and its own (shorter) debounce:
+        // a drag is a continuous stream of edits, and the operator expects
+        // the alignment to have survived the moment they let go.
+        let align_dirty = self.alignment.persist_dirty_ms();
+        if align_dirty != 0 && session::now_ms().saturating_sub(align_dirty) >= 1_000 {
+            if let Err(err) = self.save_alignment() {
+                log::warn!("alignment write failed: {err:#}");
+            }
+        }
+
         // §5.11 — SIGTERM/SIGINT: snapshot the session, then ask the host to
         // exit. The host polls `exit_requested()` after this call.
         if self.term_flag.swap(false, Ordering::Relaxed) {
             log::info!("termination signal — snapshotting session and exiting");
             if let Err(err) = self.save_session() {
                 log::warn!("session snapshot on shutdown failed: {err:#}");
+            }
+            if let Err(err) = self.save_alignment() {
+                log::warn!("alignment snapshot on shutdown failed: {err:#}");
             }
             self.exit_requested = true;
         }
@@ -2117,6 +2187,23 @@ impl Core {
         if let Err(err) = self.save_session() {
             log::warn!("session snapshot on exit failed: {err:#}");
         }
+        if let Err(err) = self.save_alignment() {
+            log::warn!("alignment snapshot on exit failed: {err:#}");
+        }
+    }
+
+    /// §5.14 — write `alignment.json` now. Clears the dirty stamp first so an
+    /// edit racing the write just re-dirties and gets the next debounce. A
+    /// clean document is a no-op, so shutdown hooks can call this blindly.
+    pub fn save_alignment(&mut self) -> Result<Option<PathBuf>> {
+        if self.alignment.persist_dirty_ms() == 0 {
+            return Ok(None);
+        }
+        self.alignment.clear_persist_dirty();
+        let doc = self.alignment.doc();
+        alignment::save(&self.alignment_path, &doc)?;
+        log::info!("alignment written: {}", self.alignment_path.display());
+        Ok(Some(self.alignment_path.clone()))
     }
 
     /// §5.6 design-leg autosave — debounced write to
@@ -2231,6 +2318,71 @@ impl Core {
             self.last_redraw_request = Some(Instant::now());
         }
     }
+}
+
+/// §5.14 boot path for the alignment document.
+///
+/// Precedence: `alignment.json` if present, otherwise a one-time migration
+/// from the legacy calibration matrix (`session.projectorCalibration`, or the
+/// deprecated `scene.projectorCalibration`), otherwise identity. A file that
+/// fails to parse or solve degrades to identity with a warning rather than
+/// failing the boot — a projector that starts unaligned is recoverable in
+/// thirty seconds; one that refuses to start is not.
+fn load_alignment(path: &std::path::Path, legacy: Option<[[f32; 3]; 3]>) -> AlignmentState {
+    let from_disk = match alignment::load(path) {
+        Ok(doc) => doc,
+        Err(err) => {
+            log::warn!("ignoring {}: {err:#}", path.display());
+            None
+        }
+    };
+
+    if let Some(doc) = from_disk {
+        let points = doc.points.len();
+        match AlignmentState::new(doc) {
+            Ok(state) => {
+                log::info!(
+                    "restored alignment {} ({} extra handle{})",
+                    path.display(),
+                    points,
+                    if points == 1 { "" } else { "s" }
+                );
+                return state;
+            }
+            Err(err) => log::warn!("ignoring {} (does not solve): {err}", path.display()),
+        }
+    } else if let Some(m) = legacy {
+        // The stored matrix is the old shader's **dest→source** map, while
+        // corners are *dest positions of source corners* — so this applies
+        // its inverse to the unit square (§3.5).
+        match alignment::corners_from_dest_to_source(&m) {
+            Some(corners) => {
+                let doc = AlignmentDoc {
+                    corners,
+                    ..AlignmentDoc::default()
+                };
+                match AlignmentState::new(doc.clone()) {
+                    Ok(state) => {
+                        if let Err(err) = alignment::save(path, &doc) {
+                            log::warn!("migrated alignment could not be written: {err:#}");
+                        }
+                        log::info!(
+                            "migrated projectorCalibration into {} — the session/scene \
+                             matrix is now ignored",
+                            path.display()
+                        );
+                        return state;
+                    }
+                    Err(err) => log::warn!("calibration migration does not solve: {err}"),
+                }
+            }
+            None => log::warn!(
+                "projectorCalibration is not invertible — starting from identity alignment"
+            ),
+        }
+    }
+
+    AlignmentState::identity()
 }
 
 /// §5.6 design-leg autosave location: `<scene_dir>/.wzrd/design.scene.json`.

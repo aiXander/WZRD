@@ -9,7 +9,13 @@
 // history.
 
 import { create } from 'zustand';
-import type { ChangeEntry, DeckPayload, PackInfo, ProbeReport } from '../api/ipc';
+import type {
+  AlignmentDoc,
+  ChangeEntry,
+  DeckPayload,
+  PackInfo,
+  ProbeReport,
+} from '../api/ipc';
 
 export type FpsPayload = {
   fps: number;
@@ -109,8 +115,9 @@ interface Store {
   effects: string[];
   setEffects: (e: string[]) => void;
 
-  // route
-  route: 'prepare' | 'perform' | 'debug';
+  // route. Align sits between Prepare and Perform because that's the order
+  // of a load-in: build the look, land it on the wall, then play.
+  route: 'prepare' | 'align' | 'perform' | 'debug';
   setRoute: (r: Store['route']) => void;
 
   // telemetry — sticky/best-effort latest
@@ -145,6 +152,18 @@ interface Store {
   deck: DeckPayload | null;
   setDeck: (v: DeckPayload) => void;
 
+  // §5.14 alignment document — sticky `alignment` channel. The engine is the
+  // only writer of alignment.json; this is a mirror plus the optimistic local
+  // edits an in-flight drag has already applied (see state/alignment.ts).
+  alignment: AlignmentDoc | null;
+  setAlignment: (v: AlignmentDoc | null) => void;
+  /** Last rejected `alignment.set`, shown inline on the Align tab. */
+  alignmentError: string | null;
+  setAlignmentError: (e: string | null) => void;
+  /** Which handle the canvas has selected — `null` | 'c0'..'c3' | a point id. */
+  selectedHandle: string | null;
+  setSelectedHandle: (h: string | null) => void;
+
   preview: { width: number; height: number; data_b64: string } | null;
   setPreview: (v: Store['preview']) => void;
 
@@ -157,6 +176,13 @@ interface Store {
   // selected binding (Phase 4.2 inspector)
   selectedBindingId: string | null;
   setSelectedBindingId: (id: string | null) => void;
+
+  // binding the pointer is currently over in the inspector. Transient, and
+  // the mirror of the canvas's own hover: the surface highlights whichever
+  // regions this binding's selector resolves to, so "which region am I
+  // editing?" is answered by looking, not by reading an id.
+  hoveredBindingId: string | null;
+  setHoveredBindingId: (id: string | null) => void;
 
   // selected *layer* (surface canvas region) — distinct from bindings: a
   // layer is a mask region in the pack; a binding is a scene entry whose
@@ -222,6 +248,13 @@ export const useStore = create<Store>((set) => ({
   deck: null,
   setDeck: (v) => set({ deck: v }),
 
+  alignment: null,
+  setAlignment: (v) => set({ alignment: v }),
+  alignmentError: null,
+  setAlignmentError: (e) => set({ alignmentError: e }),
+  selectedHandle: null,
+  setSelectedHandle: (h) => set({ selectedHandle: h }),
+
   preview: null,
   setPreview: (v) => set({ preview: v }),
 
@@ -243,6 +276,9 @@ export const useStore = create<Store>((set) => ({
 
   selectedBindingId: null,
   setSelectedBindingId: (id) => set({ selectedBindingId: id }),
+
+  hoveredBindingId: null,
+  setHoveredBindingId: (id) => set({ hoveredBindingId: id }),
 
   selectedLayerId: null,
   setSelectedLayerId: (id) => set({ selectedLayerId: id }),

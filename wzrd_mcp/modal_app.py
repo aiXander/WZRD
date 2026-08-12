@@ -1,5 +1,11 @@
 """Modal deployment entrypoint for the WZRD MCP server.
 
+PARKED — the server is local-first now. Tools write into a project folder on
+the host machine (`project.py`), which in a Modal container is ephemeral
+scratch that nothing can read afterwards. Deploying this again means giving the
+cloud path its own durable output sink (a Modal Volume, or reviving
+`file_io.upload` against a self-owned bucket). See docs/TODO/eden-decoupling.md.
+
 Deploy with:
     modal deploy wzrd_mcp/modal_app.py
 
@@ -7,7 +13,8 @@ Deploy without auth:
     WZRD_NO_AUTH=1 modal deploy wzrd_mcp/modal_app.py
 
 Authentication:
-    Set WZRD_API_KEY in your Modal secret (eve-secrets-PROD).
+    Set WZRD_API_KEY in the Modal secret named by WZRD_MODAL_SECRET
+    (default: "wzrd-secrets", in your own workspace).
     Clients must send: Authorization: Bearer <key>
 """
 
@@ -18,6 +25,8 @@ import os
 import modal
 
 _NO_AUTH_AT_DEPLOY = os.environ.get("WZRD_NO_AUTH", "0") == "1"
+# Was Eden's "eve-secrets-PROD"; name your own secret instead.
+_SECRET_NAME = os.environ.get("WZRD_MODAL_SECRET", "wzrd-secrets")
 
 app = modal.App("wzrd-mcp")
 
@@ -27,7 +36,6 @@ image = (
     .pip_install(
         "fastmcp>=3.0",
         "httpx>=0.27",
-        "boto3>=1.34",
         "scikit-learn>=1.3.0",
         "pillow>=10.0.0",
         "numpy>=2.2.0",
@@ -44,7 +52,6 @@ with image.imports():
     import cv2  # noqa: F401
     import sklearn  # noqa: F401
     import PIL  # noqa: F401
-    import boto3  # noqa: F401
     import httpx  # noqa: F401
     from starlette.middleware import Middleware
     from starlette.requests import Request
@@ -87,7 +94,7 @@ class ApiKeyMiddleware:
 @app.cls(
     image=image,
     timeout=600,
-    secrets=[modal.Secret.from_name("eve-secrets-PROD")],
+    secrets=[modal.Secret.from_name(_SECRET_NAME)],
     enable_memory_snapshot=True,
     scaledown_window=120,
 )

@@ -17,12 +17,15 @@ import {
   packInfo,
   readSceneFile,
   sceneGetState,
+  type AlignmentDoc,
   type ChangeEntry,
   type DeckPayload,
 } from './api/ipc';
+import { ingestAlignment } from './state/alignment';
 import { StatusStrip } from './components/StatusStrip';
 import { TopBar } from './components/TopBar';
 import { Prepare } from './routes/Prepare';
+import { Align } from './routes/Align';
 import { Perform } from './routes/Perform';
 import { DebugRoute } from './routes/Debug';
 
@@ -75,6 +78,14 @@ export default function App() {
       } catch (e) {
         console.warn('last_payload(deck):', e);
       }
+      try {
+        // §5.14 alignment is sticky too (emitted at boot, before the webview
+        // exists) — so the Align tab hydrates without an extra round trip.
+        const a = await lastPayload<AlignmentDoc>('alignment');
+        if (a) tStore.setAlignment(a);
+      } catch (e) {
+        console.warn('last_payload(alignment):', e);
+      }
 
       unlistenT = await onTelemetry((frame) => {
         const st = useStore.getState();
@@ -106,6 +117,13 @@ export default function App() {
             break;
           case 'deck':
             st.setDeck(frame.payload);
+            break;
+          case 'alignment':
+            // §5.14 — the engine is the authority (a headless camera script is
+            // as legitimate a writer as this UI). `ingestAlignment` takes it
+            // wholesale except for facets with an unacknowledged local drag,
+            // where the echo is the older view.
+            ingestAlignment(frame.payload);
             break;
           case 'preview':
             st.setPreview(frame.payload);
@@ -155,21 +173,20 @@ export default function App() {
     };
   }, []);
 
-  // ⌘1 / ⌘2 / ⌘3 (and Ctrl on non-mac) switch routes.
+  // ⌘1..⌘4 (and Ctrl on non-mac) switch routes, in load-in order.
   useEffect(() => {
+    const KEYS: Record<string, ReturnType<typeof useStore.getState>['route']> = {
+      '1': 'prepare',
+      '2': 'align',
+      '3': 'perform',
+      '4': 'debug',
+    };
     function onKey(e: KeyboardEvent) {
-      const meta = e.metaKey || e.ctrlKey;
-      if (!meta) return;
-      if (e.key === '1') {
-        e.preventDefault();
-        setRoute('prepare');
-      } else if (e.key === '2') {
-        e.preventDefault();
-        setRoute('perform');
-      } else if (e.key === '3') {
-        e.preventDefault();
-        setRoute('debug');
-      }
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const target = KEYS[e.key];
+      if (!target) return;
+      e.preventDefault();
+      setRoute(target);
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -181,6 +198,7 @@ export default function App() {
       <StatusStrip />
       <main className="flex-1 min-h-0 overflow-hidden">
         {route === 'prepare' && <Prepare />}
+        {route === 'align' && <Align />}
         {route === 'perform' && <Perform />}
         {route === 'debug' && <DebugRoute />}
       </main>

@@ -190,6 +190,68 @@ pub fn probe_set_thresholds(state: State<AppState>, a_ms: f64, b_ms: f64) -> Res
         .map_err(|e| format!("{e:#}"))
 }
 
+/// §5.14 — the full alignment document plus `{output, points_max}`.
+#[tauri::command]
+pub fn alignment_get(state: State<AppState>) -> Result<Value, String> {
+    state
+        .engine
+        .request("alignment.get", json!({}), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §5.14 — partial merge. Sending `corners` alone carries the extra handles
+/// with the content (the engine recomputes their dest positions); sending
+/// `points` replaces the handle list outright. A point with no `anchor` is
+/// anchored at the current field, making an add a no-op on the rendered
+/// image. Rejections are prescriptive and the previous alignment keeps
+/// rendering.
+#[tauri::command]
+pub fn alignment_set(
+    state: State<AppState>,
+    enabled: Option<bool>,
+    background: Option<String>,
+    corners: Option<Value>,
+    points: Option<Value>,
+) -> Result<Value, String> {
+    state
+        .engine
+        .request(
+            "alignment.set",
+            json!({
+                "enabled": enabled,
+                "background": background,
+                "corners": corners,
+                "points": points,
+            }),
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §5.14 — identity corners, no handles, black background. Leaves the
+/// enabled flag alone.
+#[tauri::command]
+pub fn alignment_reset(state: State<AppState>) -> Result<Value, String> {
+    state
+        .engine
+        .request("alignment.reset", json!({}), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// §3.6 — "none" | "grid" | "border" | "corners". Generated in source space,
+/// so it warps with the content; runtime-only, never persisted.
+#[tauri::command]
+pub fn alignment_set_test_pattern(state: State<AppState>, pattern: String) -> Result<Value, String> {
+    state
+        .engine
+        .request(
+            "alignment.setTestPattern",
+            json!({ "pattern": pattern }),
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 pub fn wgsl_validate(state: State<AppState>, source: String) -> Result<Value, String> {
     state

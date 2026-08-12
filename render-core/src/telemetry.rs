@@ -38,7 +38,32 @@ pub const ALL_CHANNELS: &[&str] = &[
     "masters",
     "deck",
     "changes",
+    "alignment",
 ];
+
+/// Channels whose most recent payload is retained and replayed to new
+/// subscribers — the "current state" channels, as opposed to the streaming
+/// ones where only the next frame matters.
+///
+/// **One definition, deliberately.** The Tauri host used to keep its own copy
+/// of this list for its `last_payload` snapshots, and the two silently drifted
+/// the moment a channel was added: `alignment` emits only at boot, so a
+/// missing entry there meant the Align tab sat on "waiting for the engine's
+/// alignment document…" forever. Any host that snapshots sticky state must
+/// call this, never re-type the list.
+pub fn is_sticky(channel: &str) -> bool {
+    matches!(
+        channel,
+        "hot_reload"
+            | "audio_freshness"
+            | "connectivity"
+            | "fps"
+            | "masters"
+            | "deck"
+            | "changes"
+            | "alignment"
+    )
+}
 
 /// What an emitter pushes onto the bus and what a subscriber sees on the
 /// wire. Channel + payload — payload is a JSON value the WS server can
@@ -136,11 +161,7 @@ impl Bus {
     /// `audio_freshness`, `connectivity`), the payload is also retained as
     /// the current value so late-arriving subscribers see it.
     pub fn emit(&self, channel: &str, payload: Value) {
-        let sticky = matches!(
-            channel,
-            "hot_reload" | "audio_freshness" | "connectivity" | "masters" | "deck" | "changes"
-        );
-        if sticky {
+        if is_sticky(channel) {
             if let Ok(mut s) = self.inner.sticky.lock() {
                 s.insert(channel.to_string(), payload.clone());
             }
@@ -234,6 +255,14 @@ impl Bus {
     /// transition (plus a ~10 Hz trickle while a fade ramps).
     pub fn emit_deck(&self, snapshot: DeckSnapshot) {
         self.emit("deck", serde_json::to_value(snapshot).expect("deck snapshot"));
+    }
+
+    /// §5.14 alignment document — sticky, emitted at boot, on every accepted
+    /// mutation, and when the output size changes. Sticky so the Align tab
+    /// hydrates from `lastPayload('alignment')` exactly like `masters`/`deck`,
+    /// and so an external camera script sees the UI's edits.
+    pub fn emit_alignment(&self, payload: Value) {
+        self.emit("alignment", payload);
     }
 
     pub fn emit_preview_jpeg(&self, jpeg_bytes: &[u8], width: u32, height: u32) {
@@ -870,6 +899,56 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod sticky_tests {
+    use super::*;
+
+    /// A sticky channel that isn't in `ALL_CHANNELS` can never be subscribed
+    /// to, so its replay is dead code — and a typo here is invisible at
+    /// runtime. Cheap guard against both.
+    #[test]
+    fn every_sticky_channel_is_subscribable() {
+        for c in ALL_CHANNELS {
+            let _ = is_sticky(c);
+        }
+        for c in [
+            "hot_reload",
+            "audio_freshness",
+            "connectivity",
+            "fps",
+            "masters",
+            "deck",
+            "changes",
+            "alignment",
+        ] {
+            assert!(is_sticky(c), "{c} should be sticky");
+            assert!(ALL_CHANNELS.contains(&c), "{c} missing from ALL_CHANNELS");
+        }
+    }
+
+    /// The state channels a late-mounting UI hydrates from. `alignment` in
+    /// particular emits only at boot and on edits, so without stickiness the
+    /// Align tab has no way to learn the current document.
+    #[test]
+    fn boot_only_channels_replay_to_late_subscribers() {
+        let bus = Bus::new();
+        bus.emit_alignment(json!({ "corners": [[0, 0]] }));
+        let channels: HashSet<String> = ["alignment".to_string()].into_iter().collect();
+        let (_id, rx) = bus.subscribe(channels);
+        let frame = rx.try_recv().expect("sticky alignment replayed on subscribe");
+        assert_eq!(frame.channel, "alignment");
+    }
+
+    /// Streaming channels must NOT be retained — a replayed stale preview
+    /// frame would show the operator a composite from minutes ago.
+    #[test]
+    fn streaming_channels_are_not_retained() {
+        for c in ["preview", "drivers", "audio", "frame_stats", "log"] {
+            assert!(!is_sticky(c), "{c} should not be sticky");
+        }
+    }
 }
 
 #[cfg(test)]

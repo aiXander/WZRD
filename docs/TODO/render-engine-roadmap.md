@@ -11,9 +11,9 @@
 > headless-verifiable, UI second.** §5.1–§5.6 are resolved (landed or
 > dropped); the single-process collapse + §5.6 two-deck **LANDED
 > 2026-07-12**; **§5.10 authoring MCP + the §5.13 engine slice LANDED
-> 2026-07-22** — contracts in
+> 2026-07-22**; **§5.14 alignment layer LANDED 2026-08-12** — contracts in
 > [../reference/render-engine.md](../reference/render-engine.md)
-> §1/§1b/§2.2/§2.6/§2.7.
+> §1/§1b/§2.2/§2.6/§2.7/§2.8.
 > **Next up, in order: §5.11's post-swap probation window** (elevated — MCP
 > authoring multiplies shader churn and yellow-verdict shaders can still be
 > promoted), the §5.5 **`#import` preprocessor** (same reason — an
@@ -41,14 +41,15 @@ Picks are stateless — a pure hash of (binding id, transport cycle) via
 See reference §2.5 (full contract). `session.rs` owns load/save (atomic
 temp+rename; gitignored; per *directory*/venue, not per scene); debounce
 drained in `Core::poll_inbound`; SIGTERM/SIGINT → snapshot + graceful exit.
-`projectorCalibration` in scene.json is a deprecated read-only fallback. The
+Calibration has since moved out of the sidecar entirely — see §5.14 /
+reference §2.8. The
 "show file" umbrella (playlist + scenes + session) still waits for §5.6's
 auto-pilot playlist.
 
 ### 5.4 Masters row + crossfade-time master — LANDED (2026-07-11 / 2026-07-22)
 
 See reference §2.5. `Masters` atomics in `drivers.rs` — brightness/saturation
-in the final homography pass, speed as `Transport` time integration (bends
+in the final pass, speed as `Transport` time integration (bends
 time, never jumps), audioListen scales every `audio.*` read; RPC
 `master.set`/`master.list`, persisted in the sidecar, always-visible Perform
 row. The `promote` crossfade fade is an engine-wide master
@@ -233,12 +234,15 @@ single-process relaunch-with-restore meets it. Defense in depth, in order:
 
 ### 5.12 UI polish backlog (post-structural)
 
-Calibration UI (4-corner drag → homography written to the session sidecar
-§5.3, <1 min recovery — spec §8; plus the **re-shoot recovery path** from
-v1 §3.9: when the projector/surface is bumped, run the offline `align` step
-on a new capture against the original reference photo to get a single
-homography update — no re-segmentation);
-layer deck panel in Perform (per §5.7); virtualized log list; driver-rack
+Calibration UI — **superseded and shipped** as the §5.14 alignment layer
+(n-point warp + the Align route); see reference
+[§2.8](../reference/render-engine.md#28-alignment-layer-the-n-point-output-warp-514-landed-2026-08-12).
+Still open from the old line: the **re-shoot recovery path** (v1 §3.9) —
+when the projector/surface is bumped, run the offline `align` step on a new
+capture against the original reference photo and push the resulting corners
+through `alignment.set`, no re-segmentation. That is now an external script
+against the existing WS surface, not engine work.
+Layer deck panel in Perform (per §5.7); virtualized log list; driver-rack
 grouping/filter chips; scene save-as + scene chooser grid; region renaming +
 `identity.json` editing in Prepare (→ §5.13); AI co-author chat panel (with §5.10).
 
@@ -260,3 +264,27 @@ writes the sidecar, not the scene.
 Non-goals: no group nesting, no per-group colour/metadata beyond membership,
 no offline `wzrd.layerpack` group-reconciliation (that rides the broader
 identity-table re-import work in §2.2).
+
+### 5.14 Alignment layer: the n-point output warp — LANDED (2026-08-12)
+
+Full contract in reference **§2.8** (model, `alignment.json`, the
+engine-wide/not-per-leg rule, the LUT invariant, the Y-flip trap, UI
+behaviour) and §2.3 (three RPC verbs + the sticky `alignment` channel).
+Supersedes the §5.12 calibration-UI line and generalises **D9**. Residue
+worth knowing here:
+
+- The base stays **projective** (4-corner homography); extra handles are
+  compactly-supported Wendland corrections *on top of it*. Fitting an
+  interpolator through the corners instead was considered and rejected —
+  straight edges bow under keystone.
+- Runtime representation is a baked **offset LUT**, so per-frame cost is one
+  texel read regardless of handle count. That is also the seam a dense
+  camera-solved field uploads into later.
+- Not scene content, not per leg, no MCP verb.
+
+**Still open (deliberately deferred):** camera-driven auto-alignment
+(`alignment.setField` dense upload + the external capture→detect→solve loop,
+skeleton in `render-core/tools/align_drag.py`); a warped native preview
+toggle if the unwarped one proves confusing on the Align tab;
+multi-projector / edge blending. The default handle radius (0.35) wants one
+real projector session to tune — see the corner-drift caveat in §2.8.

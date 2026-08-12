@@ -61,18 +61,32 @@ def test_layerpack():
     # First produce some masks via the islands pipeline.
     regions_dir = os.path.join(out_dir, "regions")
     regions, _ = islands.extract_color_regions(TEST_SEGMAP, regions_dir)
-    assert regions, "islands produced no regions"
-    # Hand-author a tiny tags file mapping a couple of masks to semantic ids.
+    # The named[] mapping below is positional, so a change in how the test
+    # segmap segments must fail loudly rather than silently misname regions.
+    assert len(regions) == 4, f"expected 4 regions from the test segmap, got {len(regions)}"
+    # Hand-author the tags file that names every region. These ids are what
+    # the example scenes in `render-core/examples/` select on and what the
+    # Tauri inspector shows an operator, so they are named after what the
+    # region actually *is* in the test photo (a Moroccan kasbah) rather than
+    # left to fall back to the islands mask stem
+    # (`region_mask_003_color_fefd00` — unreadable in a binding list).
+    #
+    # `extract_color_regions` returns regions largest-area-first, and the
+    # test segmap is fixed, so this positional mapping is stable:
+    #   0 blue centre block · 1 green left tower · 2 yellow right wing
+    #   3 red foreground base wall
+    named = [
+        ("main_facade", "Main facade", ["facade"], 2),
+        ("left_tower", "Left tower", ["tower"], 3),
+        ("right_wing", "Right wing", ["tower"], 4),
+        ("base_wall", "Base wall", ["wall"], 5),
+    ]
     tags = {
         "layers": {
-            regions[0]["region_mask"]: {
-                "id": "primary",
-                "label": "primary region",
-                "tags": ["test", "alpha"],
-                "z": 2,
-            },
+            regions[i]["region_mask"]: {"id": lid, "label": label, "tags": tg, "z": z}
+            for i, (lid, label, tg, z) in enumerate(named[: len(regions)])
         },
-        "groups": [{"id": "test_group", "members": ["primary"]}],
+        "groups": [{"id": "towers", "members": ["left_tower", "right_wing"]}],
         "background": True,
     }
     tags_path = os.path.join(out_dir, "tags.json")
@@ -91,15 +105,15 @@ def test_layerpack():
     assert scene["surface"] == "surface.png"
     assert os.path.isfile(os.path.join(pack_dir, "pack.json"))
     assert os.path.isfile(os.path.join(pack_dir, "surface.png"))
-    assert any(layer["id"] == "primary" for layer in scene["layers"]), \
+    assert any(layer["id"] == "main_facade" for layer in scene["layers"]), \
         "tags mapping did not apply"
     assert any(layer["id"] == "background" for layer in scene["layers"]), \
         "background slice missing"
     for layer in scene["layers"]:
         mask_path = os.path.join(pack_dir, layer["mask"])
         assert os.path.isfile(mask_path), f"mask missing: {mask_path}"
-    assert any(g["id"] == "test_group" for g in scene["groups"]), \
-        "test_group not emitted"
+    assert any(g["id"] == "towers" for g in scene["groups"]), \
+        "towers group not emitted"
 
 
 def test_reproject():

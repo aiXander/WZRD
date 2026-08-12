@@ -3,9 +3,9 @@
   "pack": "../../test_results/layerpack/pack",
   "transport": { "bpm": 120 },
   "bindings": [
-    { "id": "bg",      "select": { "id": "background" }, "effect": "tint", "params": { "color": "#1f1010" } },
-    { "id": "primary", "select": { "id": "primary"    }, "effect": "tint", "params": { "color": "#ee8000" } },
-    { "id": "rest",    "select": { "tag": "test"      }, "effect": "tint", "params": { "color": "#ee44cc" } }
+    { "id": "bg",     "select": { "id": "background"  }, "effect": "tint", "params": { "color": "#1f1010" } },
+    { "id": "facade", "select": { "id": "main_facade" }, "effect": "tint", "params": { "color": "#ee8000" } },
+    { "id": "towers", "select": { "tag": "tower"      }, "effect": "tint", "params": { "color": "#ee44cc" } }
   ],
   "post": [],
   "projectorCalibration": null

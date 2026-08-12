@@ -74,6 +74,47 @@ export type DeckPayload = {
 
 export type ProbeThresholds = { a_ms: number; b_ms: number };
 
+/** §5.14 — one extra (non-corner) warp handle. */
+export type WarpPoint = {
+  id: string;
+  /** Where the handle grabs the content, source uv. */
+  anchor: [number, number];
+  /** Where the operator dragged it, dest uv (may lie outside [0,1]). */
+  dest: [number, number];
+  /** Support radius in dest-normalized units. */
+  radius: number;
+};
+
+/** §5.14 — sticky `alignment` channel payload / `alignment.get` result. */
+export type AlignmentDoc = {
+  version: number;
+  enabled: boolean;
+  /** `#rrggbb`. Non-black floods the surface with light — warn while it is. */
+  background: string;
+  /** Dest positions of source corners (0,0) (1,0) (1,1) (0,1). Always 4. */
+  corners: [number, number][];
+  points: WarpPoint[];
+  /**
+   * Solved RBF coefficients, one per point, same order — read-only derived
+   * state so a client can draw the *actual* field instead of re-solving it.
+   * Never persisted, ignored on input.
+   */
+  weights?: [number, number][];
+  /** Projector swapchain size in px — what a one-pixel nudge means. */
+  output: [number, number];
+  points_max: number;
+  test_pattern: 'none' | 'grid' | 'border' | 'corners';
+  solve_ok: boolean;
+};
+
+/** A partial merge for `alignment.set`; anchor omitted ⇒ engine anchors it. */
+export type AlignmentPatch = {
+  enabled?: boolean;
+  background?: string;
+  corners?: [number, number][];
+  points?: { id?: string; anchor?: [number, number]; dest: [number, number]; radius?: number }[];
+};
+
 /**
  * §5.10 — one design mutation on the sticky `changes` channel. The webview
  * re-pulls the affected facet when `actor !== 'ui'` (agent/watcher edits),
@@ -111,6 +152,27 @@ export const probeGetThresholds = () =>
   invoke<ProbeThresholds>('probe_get_thresholds');
 export const probeSetThresholds = (aMs: number, bMs: number) =>
   invoke<ProbeThresholds>('probe_set_thresholds', { aMs, bMs });
+/** §5.14 alignment layer — engine-wide, never per leg, never scene content. */
+export const alignmentGet = () => invoke<AlignmentDoc>('alignment_get');
+/**
+ * Partial merge. Send `corners` alone during a corner drag and the engine
+ * carries the extra handles with the content; send `points` to replace the
+ * handle list. Throws with a prescriptive message on rejection — the previous
+ * alignment keeps rendering.
+ */
+export const alignmentSet = (patch: AlignmentPatch) =>
+  invoke<AlignmentDoc>('alignment_set', {
+    enabled: patch.enabled ?? null,
+    background: patch.background ?? null,
+    corners: patch.corners ?? null,
+    points: patch.points ?? null,
+  });
+export const alignmentReset = () => invoke<AlignmentDoc>('alignment_reset');
+/** §3.6 test pattern, generated in source space so it warps with the content. */
+export const alignmentSetTestPattern = (
+  pattern: 'none' | 'grid' | 'border' | 'corners'
+) => invoke<AlignmentDoc>('alignment_set_test_pattern', { pattern });
+
 export const sceneLoad = (jsonText: string) =>
   invoke<unknown>('scene_load', { jsonText });
 export const sceneReload = () => invoke<unknown>('scene_reload');

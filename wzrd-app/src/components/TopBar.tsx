@@ -7,10 +7,12 @@
 import { useStore } from '../state/store';
 import { adoptAgentScene } from '../state/sceneCommit';
 
+// Load-in order: build the look, land it on the wall, play, inspect.
 const ROUTES = [
   { id: 'prepare', label: 'Prepare', hotkey: '⌘1' },
-  { id: 'perform', label: 'Perform', hotkey: '⌘2' },
-  { id: 'debug', label: 'Debug', hotkey: '⌘3' },
+  { id: 'align', label: 'Align', hotkey: '⌘2' },
+  { id: 'perform', label: 'Perform', hotkey: '⌘3' },
+  { id: 'debug', label: 'Debug', hotkey: '⌘4' },
 ] as const;
 
 export function TopBar() {

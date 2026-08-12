@@ -658,11 +658,11 @@ fn telemetry_loop(inner: Arc<EngineInner>, app: AppHandle, bus: render_core::tel
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(frame) => {
-                if matches!(
-                    frame.channel.as_str(),
-                    "hot_reload" | "audio_freshness" | "connectivity" | "fps" | "masters"
-                        | "deck" | "changes"
-                ) {
+                // Sticky set comes from the engine, never a local copy — a
+                // second list here is how `alignment` went missing from the
+                // Align tab (it only emits at boot, so the snapshot *is* the
+                // hydration path).
+                if render_core::telemetry::is_sticky(&frame.channel) {
                     inner
                         .last_payloads
                         .lock()

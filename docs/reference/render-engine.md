@@ -97,7 +97,8 @@ agents.
   slot and pushes CSS-px bounds through the `preview_set_bounds` command;
   the backend converts to physical screen coords and moves the child
   window; the render thread blits a composite onto it via
-  `gpu::PreviewTarget` — the homography pipeline with identity matrix.
+  `gpu::PreviewTarget` — the final-pass pipeline with the §2.8 warp off
+  (1×1 zero dummy LUT, `adjust.w = 0`).
   Since §2.6 the preview has a LIVE⇄DESIGN source toggle: DESIGN (the
   authoring default) shows the design composite un-mastered (§5.4
   convention); LIVE shows the live composite with the real
@@ -143,7 +144,7 @@ Still committed, condensed (historical rationale in the retired v1 plan):
 | D1 | Native Rust + wgpu render core; the browser never renders the projector output. |
 | D3/D4 | Layer pack is the offline↔runtime contract; masks live in one `Texture2DArray<R8>` (256-slice cap). |
 | D7 | Selectors (`id`/`tag`/`group`/`all`) over hard-coded indices; layer ids are semantic and survive re-segmentation. |
-| D9 | Calibration = in-engine 3×3 homography as the final pass. Stored in the session sidecar since §5.3 (2026-07-11); a scene-level `projectorCalibration` is a deprecated read-only fallback. |
+| D9 | Calibration = an in-engine **n-point warp** as the final pass, whose base is the 4-corner homography (§2.8, 2026-08-12). Lives in `alignment.json`; both legacy matrix fields (`session.projectorCalibration`, `scene.projectorCalibration`) are boot-time migration sources only — read once, never written. |
 | D13 | `scene.json` is canonical on disk and on the wire. No TS DSL on any critical path. |
 | D14 | Python stays Python (offline segmentation, content generation via `wzrd_mcp`). |
 | D15 | Effects are user-authored WGSL (inline or `effects/<name>/`), naga-validated, swap-on-success hot-reload. Built-ins are reference implementations, not a ceiling. |
@@ -163,7 +164,8 @@ not "fix" it to alpha blending.
 | `main.rs` | CLI parse + **tee logger** (stderr + `log` telemetry channel via `telemetry::global_bus`). |
 | `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, session persistence (§5.3 restore-at-boot, debounced write, SIGTERM/SIGINT snapshot → `exit_requested()`), plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. Step-2/3 additions: `control_channel()` (hands an embedding host the WS server's `RpcContext` + command sender — one dispatch path for every consumer), `attach_preview_surface`/`resize_preview_surface`/`set_preview_visible` (native preview; host owns §3.1 for it), `spike_force_device_loss()` (crash-spike test hook). The command channel + `RpcContext` now always exist (headless just never sends). |
 | `app.rs` | Thin `WinitHost` — window creation/fullscreen/display selection, winit event delegation into `Core`, exit decisions. The only winit-aware file besides `lib.rs`. |
-| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → homography). Step 3: keeps `instance`/`adapter` so `PreviewTarget` (second swapchain; §5.6 source toggle — one bind group per leg, LIVE renders with real masters, DESIGN neutral) can attach at runtime; `render_preview()` self-heals `Lost`/`Outdated`. |
+| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → §2.8 warp) and `WarpTarget` (the alignment LUT + its bake pipeline). Step 3: keeps `instance`/`adapter` so `PreviewTarget` (second swapchain; §5.6 source toggle — one bind group per leg, LIVE renders with real masters, DESIGN neutral) can attach at runtime; `render_preview()` self-heals `Lost`/`Outdated`. Its test module holds the two GPU-backed guards worth knowing about: `baked_lut_matches_the_cpu_model` and `final_pass_samples_through_the_warp` (both skip cleanly with no adapter), plus a naga parse+validate of the output shaders so a WGSL typo fails on the desk rather than at device creation. |
+| `alignment.rs` | §2.8 alignment layer: `AlignmentDoc` (the `alignment.json` schema), `homography_from_corners` (Heckbert) + analytic 3×3 inverse, the Wendland C² kernel and its LU solve, `AlignmentState` (solved doc + dirty stamps, shared with the render thread and the RPC surface), `TestPattern`, bake-uniform packing, and the boot migration from the legacy calibration matrix. Talks to no GPU. |
 | `probe.rs` | §5.6 shader pre-flight probe: `ProbeThresholds` (A/B atomics, sidecar-persisted), `ProbeSession` (half-res interleaved probe frames, overhead-calibrated full-res p95 prediction, pessimistic driver values), three-band verdict + JPEG thumbnail. |
 | `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick(&mut)` (driver eval → uniforms, §5.2 pick re-rolls via `active` flags); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). Owns the stable hashes (`fnv1a`/`seed01`/`pick_choice`) behind layer_seed + pick determinism. |
 | `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `Crossfade` (§5.4 engine-wide crossfade-time master — default promote fade in seconds, 0–30 s); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
@@ -184,7 +186,10 @@ window; `rpc.rs` command wrappers are unchanged from the subprocess era) and
 `SurfaceCanvas` (still consumes the JPEG `preview` channel as its canvas
 underlay), `NativePreview` (Step-3 native hero on Perform), `MonacoPanel`,
 `BindingInspector`, `DriverRack`, `MastersRow`, `AudioStrip`, `StatusStrip`,
-three routes). Numeric const rows in the driver rack tune through the §5.5
+`WarpCanvas` + `state/alignment.ts` (§2.8 — its own commit path, deliberately
+not `sceneCommit`) + `state/warpMath.ts` (the §2.8 model on the CPU, fed by the
+engine's solved coefficients, for drawing the field and snapping edge clicks),
+four routes). Numeric const rows in the driver rack tune through the §5.5
 override path (amber = overridden, ↺ clears back to the scene value);
 colours still go through the debounced scene commit. §2.7 reverse-sync:
 `App.tsx` handles the `changes` channel (non-`ui` actor → re-pull the
@@ -219,10 +224,9 @@ agent-authored scenes to `scene.json`.
 }
 ```
 
-`projectorCalibration` in scene.json is **deprecated** (§5.3 landed
-2026-07-11): calibration lives in the session sidecar now. A scene-level
-value is still honoured as a read-only fallback (warn on use) but is never
-written back.
+`projectorCalibration` in scene.json is **dead** (§2.8, 2026-08-12):
+alignment lives in `alignment.json`. A scene-level value is read once at
+boot as a migration source, warned about, and ignored thereafter.
 
 Drivers: `const(value)`, `clock.bars(n)`, `clock.beats(n)`, `clock.phase(rate)`,
 `clock.time`, `audio.band(low|mid|high)`, `audio.onset(band, decay)`,
@@ -311,6 +315,10 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `master.set {name, value, leg?}` | **inline** | §5.4 — `brightness` \| `speed` \| `saturation` \| `audioListen`, per leg since §2.6 (design default); plus `crossfade` (engine-wide crossfade-time master in seconds, 0–30 — `leg` ignored). Clamped, applied next frame, echoed on the sticky `masters` channel. Not reachable from scene.json by design. |
 | `master.list` | inline | Both legs' masters: `{ live: {...}, design: {...} }`. |
 | `session.save` | queued | §5.3 — write the session sidecar now (also happens debounced after master/knob changes and on SIGTERM/SIGINT/window close). |
+| `alignment.get` | inline | §2.8 — the full document plus `{output: [w,h], points_max, test_pattern}` and the solved `weights` (read-only derived state, so a client can draw the real field without re-solving; never persisted, ignored on input). |
+| `alignment.set {enabled?, background?, corners?, points?}` | **inline** | §2.8 partial merge, validated (exactly 4 corners; ≤64 points; finite coords; radius > 0). Rejects with a prescriptive message and the previous alignment keeps rendering. Two behaviours worth knowing: sending `corners` **alone** carries the extra handles with the content (the engine recomputes their dest positions), and a point with **no `anchor`** is anchored at the current field, so adding a handle doesn't move the image. No `base_rev` CAS — one human editor at a time, last-write-wins is right for a drag. |
+| `alignment.reset` | inline | §2.8 — identity corners, no handles, black background. Leaves `enabled` alone. |
+| `alignment.setTestPattern {pattern}` | inline | §2.8 — `none` \| `grid` \| `border` \| `corners`, generated in **source** space so it warps with the content. Runtime-only, never persisted. |
 | `telemetry.subscribe {channels}` / `.unsubscribe` | per-conn | |
 
 Telemetry channels (all emitted by the engine as of the 2026-07 pass):
@@ -329,6 +337,7 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 | `log` | on event | Info+ engine log lines (via the tee logger). |
 | `masters` | on `master.set`, promote/pull control copies + startup | §5.4/§2.6 — both legs plus the engine-wide crossfade master: `{live: {brightness, speed, saturation, audioListen}, design: {...}, crossfade}` (sticky). |
 | `deck` | on promote/pull/preview transitions + ~10 Hz while ramping | §2.6 snapshot `{promote: idle\|pending\|ramping, mix, fade_ms, quantize, preview_source, two_leg}` (sticky). |
+| `alignment` | at boot, on every accepted mutation, on output resize | §2.8 — the whole document plus `weights` and `{output, points_max, test_pattern, solve_ok}` (sticky, so the Align tab hydrates from `lastPayload` and an external camera script sees the UI's edits). |
 
 ### 2.4 Effect WGSL contract
 
@@ -374,18 +383,26 @@ and every scene played from that directory shares the physical setup):
 }
 ```
 
-- **Scope rule:** `scene.json` = what the surface *does* (AI + human
-  authored); `session.json` = how *this venue, this night* is set (operator
-  only). No authoring RPC and no scene reload path ever writes it.
+- **Scope rule (two sidecars now):** `scene.json` = what the surface *does*
+  (AI + human authored); `session.json` = how *this venue, this night* is set
+  (operator only); `alignment.json` (§2.8) = where the light physically
+  lands. Both sidecars are engine-written, per-directory venue state, and
+  gitignored; no authoring RPC and no scene reload path ever writes either.
+  They are separate files because they have different writers (a camera
+  script owns alignment content in a way it never owns knob state),
+  different size classes (a dense correspondence field lands in alignment
+  later) and different lifecycles (alignment is rewritten on every drag).
 - **Write policy (engine-owned):** explicit `session.save`, debounced
   ~1.5 s after any `master.set`/`param.set`, and on SIGTERM/SIGINT/window
   close (`signal-hook` flag → `Core::poll_inbound` snapshots and requests a
   host exit — the §5.11 power-blink snapshot). Writes are atomic
   (temp + rename). `session.json` is gitignored.
-- **Read precedence:** sidecar first; a scene-level `projectorCalibration`
-  is a deprecated read-only fallback (warn once, never written back).
+- **`projectorCalibration` is dead** as of §2.8: the field survives in
+  `SessionFile` purely as a boot-time migration source into
+  `alignment.json`, is never written by the engine, and can be deleted from
+  the struct once no project in the wild still carries one.
 - **Masters application (per leg since §2.6):** the *live* leg's
-  brightness/saturation ride the final homography pass uniform (composites
+  brightness/saturation ride the final pass uniform (composites
   stay un-mastered; the native preview applies the selected leg's values);
   each leg's speed multiplies **its own** transport's per-frame time
   integration (`time += dt·speed` — bends time, never jumps it, so picks
@@ -425,7 +442,7 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   identically). Design's **render passes are demand-gated**: they run only
   when the preview toggle sits on DESIGN, ≥1 WS `preview` subscriber exists,
   or a promote is pending/ramping. An idle design leg costs zero GPU.
-- **Promote = crossfade, then pointer swap.** The final homography pass
+- **Promote = crossfade, then pointer swap.** The final pass
   samples both composites and lerps by a `mix` uniform ramped over
   `fade_ms` (wall time). On completion live **adopts design's already-built
   plan** (zero rebuild on the projector leg) and design rebuilds from the
@@ -467,8 +484,8 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   the draft.
 - **Preview topology: one window, source toggle.** The single native
   `PreviewTarget` samples either composite with **that leg's own
-  brightness/saturation masters** and identity homography (the calibration
-  warp only reads right on the physical surface) — WYSIWYG for the leg
+  brightness/saturation masters** and no §2.8 warp (the alignment warp only
+  reads right on the physical surface) — WYSIWYG for the leg
   you're driving. `preview.setSource` flips it; the UI toggle lives in
   Perform's deck bar.
 - **The deck toggle is a full control switch (decision revised 2026-07-12,
@@ -501,7 +518,7 @@ surface to a local Claude Code session (persistent JSON-RPC client to
 `ws://127.0.0.1:9123`, override `WZRD_ENGINE_WS`; optional dep extra
 `.[engine]` → `websockets`, tools default-off in `server.py`, enabled in the
 local `tools_config.json`, structurally absent from the Modal image). Setup
-recipe: repo `README.md` § "Engine authoring tools".
+recipe: repo `README.md` § "AI scene authoring".
 
 **Two seats (the core boundary).** The agent authors *structure & shaders*
 and operates **only the design leg** — no tool takes a `leg` param. The
@@ -557,6 +574,157 @@ patch tool; RFC-6902 JSON Patch; overlapping read tools
 scoped `get_scene_context`); whole-scene `set_scene` as the primary write;
 embedded-Claude `scene.edit({instruction})`; agent-decided persistence;
 per-call actor tagging; author-verdict correlation over sticky telemetry.
+
+### 2.8 Alignment layer: the n-point output warp (§5.14, landed 2026-08-12)
+
+Generalises D9. The operator drags control points until rendered content
+lands on the physical surface; the result is persisted per project and
+applied by the engine whether or not any UI is running. Four corner handles
+by default, extra handles droppable anywhere for local correction.
+
+**Where it sits, and why that placement is not negotiable.** Alignment
+describes the *physical install*, like the §5.4 crossfade master — so it
+applies **after** the promote crossfade and **after** the masters, to the
+projector swapchain only. It is engine-wide, never per leg, never
+duplicated, never copied on promote/pull, and never touched by `scene.load`,
+agent authoring or an effect reload. It is also **not scene content**: no
+MCP tool has a verb for it (same scope rule as §2.5). The native preview
+stays **unwarped** (§2.6 convention — the calibration warp only reads right
+on the wall), which is why the preview blit binds a 1×1 zero dummy LUT and
+writes `adjust.w = 0`.
+
+**The model.** `W(x) = H⁻¹(x) + R(x)`, mapping dest uv → source uv:
+
+- **Base stays projective.** `H` is the exact unit-square→quad homography of
+  the four corners (Heckbert). This is the load-bearing decision: fitting any
+  scattered-data interpolator (TPS, MLS, mesh) through four dragged corners
+  gives an affine-plus-bending fit, not a perspective one — straight edges
+  bow and the image never sits flat on a keystoned wall. Every extra handle
+  is a *correction on top of* the projective base.
+- **Residual is compactly supported.** Wendland C² RBFs, per-handle radius,
+  solved by dense LU (N ≤ 64, microseconds). Locality is the point: a
+  mid-frame correction must not slide corners you already dialled in. Note
+  per-handle radii make the collocation matrix asymmetric, so Wendland's
+  positive-definiteness guarantee (uniform σ only) doesn't cover us —
+  invertibility here is empirical, which is why solve failure is a
+  first-class rejection path, not a defensive afterthought.
+- **Two properties the UI leans on.** A handle created with
+  `anchor := W_current(dest)` has coefficient exactly zero, so *adding a
+  handle is a no-op on the image* (and removing it is free). And each handle
+  stores its dest-space offset from `H(anchor)`, so *a corner drag carries
+  the extra handles with the content* — rough in corners first, refine later.
+
+**The LUT is the runtime representation, and the extensibility seam.** An
+`Rg32Float` texture sized exactly to the projector swapchain holds
+`W(x) − x` (the *offset* — zero means identity, which keeps the
+disabled/dummy case trivial). It is rebaked only when the alignment changes
+or the swapchain resizes: one fullscreen pass encoded into the *existing*
+frame encoder as step 0, no extra submit. Consequences:
+
+- Per-frame cost is **one texel read, independent of handle count** — a
+  future camera pass with 500 correspondences costs what 4 corners cost.
+- **No stale-LUT window**: a resize marks the bake dirty and the rebake is
+  encoded ahead of the final pass in the same frame. Do *not* lean on
+  out-of-bounds `textureLoad` returning zero — WGSL leaves that
+  implementation-defined, so it is not a portable identity fallback.
+- Format choice is deliberate for portability (CLAUDE.md `Features::empty()`):
+  `Rg32Float` is core-*renderable*, only blending needs `float32-blendable`;
+  and the LUT is read with `textureLoad` at exactly one texel per output
+  pixel, so `float32-filterable` is never needed either.
+- A camera-driven auto-align uploads a dense field straight into this LUT
+  with no analytic model, and nothing downstream changes.
+
+**The Y-flip trap.** `warp_bake.wgsl` and `final_pass.wgsl` share
+`fullscreen_vs.wgsl` verbatim *including the Y flip*, because a mismatch
+renders as a vertically mirrored warp — plausible enough on a wall to cost
+an evening. Two GPU-backed tests in `gpu.rs` pin both halves: the bake
+matches the CPU model at every pixel, and the final pass samples through it
+in the right direction with the right row.
+
+**Files and policy.** `<scene_dir>/alignment.json`, engine-written, atomic
+temp+rename, debounced ~1 s after the last change plus on shutdown (same
+`session::touch` mechanism as the sidecar), gitignored. Boot precedence:
+the file, else a one-time migration from the legacy calibration matrix,
+else identity. Migration direction is the easy thing to get backwards — the
+stored matrix is the old shader's **dest→source** map while corners are
+*dest positions of source corners*, so migration applies its **inverse** to
+the unit square. A file that fails to parse or solve degrades to identity
+with a warning rather than failing the boot.
+
+**The background is a light source.** `background` paints dest pixels whose
+source falls outside the composite. Any non-black value floods the physical
+surface and breaks the additive thesis — it is an alignment aid, not a show
+setting, and it persists, so the Align tab shows a warning pill for as long
+as it is set.
+
+**Test patterns** (`alignment.setTestPattern`) substitute a generated
+pattern for the composite **in source space**, so it warps with the content
+and reveals misalignment against physical edges. Runtime-only and never
+persisted, so a restart can't leave a grid on the wall.
+
+**Control surface.** All three verbs are inline — a drag must not queue
+behind the render thread and none of them rebuild a plan. State lives behind
+a small mutex in an `Arc<AlignmentState>` shared with the render thread;
+writers clone a snapshot out and never hold the lock across work (§1b).
+
+**UI (the Align route, ⌘2).** SVG over dest space padded ~20% on every side,
+because handles are routinely dragged off-screen; canvas units equal
+projector pixels so an arrow-key nudge is exactly one output pixel (⇧ = 10)
+— the last millimetre of physical alignment, and the one thing a mouse
+cannot do. Gestures: drag a handle to move it; **drag inside the quad to pan
+the whole image** (a plain corner write, so the extra handles ride along via
+the corner-carry rule and nothing reshapes); **click the outline to drop a
+handle on the edge** and drag it in the same motion; arrows nudge the
+selection, or pan the quad when nothing is selected. Right-click
+adds/removes handles and edits radius; corners get **Reset corner** only
+(they are structural — removing one would destroy the projective base).
+
+**Edge handles are not extra corners** — only four points can define the
+projective base. They are ordinary RBF handles that *start* exactly on the
+edge (the click snaps to the drawn boundary, and the engine's no-anchor rule
+then anchors them on the source edge), so pulling one bends that side to
+follow a wall that isn't straight. Their reach is the handle radius like any
+other, and being radially symmetric they pull some interior with them; that
+is the honest capability, and bezier edges stay deferred.
+
+**What the canvas draws is the real field.** A source-space grid is mapped
+through the model and drawn where it actually lands, evaluated in
+`state/warpMath.ts` from the **engine's own solved coefficients** — which is
+why `weights` rides along on the alignment payload as read-only derived
+state. Re-solving in the UI would have been a second solver and a guaranteed
+drift between what the operator sees and what the projector does. The
+photographic underlay behind the grid is the `preview` JPEG placed with a CSS
+`matrix3d` built from the corner homography (a 3×3 maps exactly onto
+`matrix3d`, so it comes for free) — CSS cannot express the local
+corrections, so the image follows the corner quad only and the label says so.
+Grid = truth, image = reference, projector = ground truth. Before the grid
+existed, dragging a handle changed nothing visible in the UI at all, which
+read as a broken feature.
+
+Commits go through `state/alignment.ts`, **not** `sceneCommit.ts`: this is
+not scene content, and the engine owns persistence outright, so there is no
+save button and no adopt step. Optimistic local state is per-facet, which is
+what lets a corner drag keep local corners while accepting the engine's
+carried handle positions in the same echo.
+
+**Known caveats** (from the plan's risk list; revisit only if dogfooding
+bites): extra handles *can* pull corners — the projective base is exact only
+where no residual support reaches, and the default σ = 0.35 reaches a corner
+from a quarter of the way in. Fix by shrinking the radius or re-dragging;
+if it turns out to bite regularly, pin the corners with four zero-residual
+basis functions rather than growing machinery. Folded warps (dragging
+handles past each other) are **allowed** — the operator sees the mirroring
+immediately on the wall, and fold prevention would cost more than it saves.
+
+**Deliberately not built:** camera-driven auto-alignment (the hooks are the
+dense-field upload path and the test patterns; the loop itself is an
+external script against this same WS surface, next to `wzrd/align.py` which
+already does homography estimation from photos), multi-projector / edge
+blending, soft-edge masking, per-region warp, bezier edges.
+
+Headless verification lives in `render-core/tools/align_drag.py` — corner
+sweeps, a live handle demo, and `--verify-isolation`, which asserts
+`alignment.json` comes out byte-identical across a `scene.load` + `pull`.
 
 ---
 
@@ -651,10 +819,25 @@ the *binding* selection field, so selection never reached the inspector.
 
 Now: per-layer tinted overlays are composited **once** into offscreen
 canvases and blitted per repaint; picking samples a 256px-wide per-layer
-alpha map; labels scale with pack resolution and use an outline; the store
-has distinct `selectedLayerId` / `selectedBindingId`, and a canvas click
-resolves which bindings target the region (client-side selector resolution)
-and aims the inspector at the first one.
+alpha map; region names live in the status line under the canvas, not
+painted at centroids (centroid labels landed outside thin/concave regions);
+and the store has distinct `selectedLayerId` / `selectedBindingId`.
+
+The canvas↔inspector link runs **both ways**, on the same client-side
+selector resolution (`selectorCovers` in `SurfaceCanvas.tsx`, mirroring
+`scene.rs::resolve_selector`; `pick` is ignored on purpose — it toggles
+which member *draws*, it does not narrow the member set):
+
+- canvas → inspector: a click aims the inspector at the first binding
+  covering the picked region.
+- inspector → canvas: `hoveredBindingId` in the store (set by the binding
+  rows *and* the detail panel) highlights every region that binding
+  resolves to, so a `tag`/`group`/`all` selector shows its whole footprint.
+
+Overlays paint in three tiers — hot (pointer, 0.62) / warm (selection,
+0.45) / rest (0.22, dimmed to 0.10 while anything is highlighted) — and
+coldest-first, so a highlighted region is never buried under an
+overlapping neighbour's wash.
 
 ### 3.7 Perform route
 
@@ -787,7 +970,11 @@ All **§5.x** references in this doc resolve there (numbering preserved).
   replace. A failed edit must never blank the projector or crash the engine.
   (§5.11 extends this with a post-swap performance probation.)
 - **Telemetry: emitter + consumer land together.** No declared-but-dead
-  channels.
+  channels. And **per-channel policy lives in `telemetry.rs`, never in a
+  host** — `is_sticky()` is a function for a reason: the Tauri host used to
+  keep its own copy of the sticky list, which silently went stale the next
+  time a channel was added and left the Align tab hydrating from nothing. Any
+  new "which channels behave how" rule goes next to it.
 - **Two edit paths, one state.** Monaco text and structured editors both
   funnel through `sceneCommit.ts` in the UI and `apply_scene_json` in the
   engine. Don't add a third path.
@@ -823,6 +1010,26 @@ that forces it:
   the engine never estimates, taps, or follows tempo. The server's
   `/audio/bpm` stream is deliberately ignored; kicks/onsets are the live
   sync mechanism, `transport.bpm` stays a static scene value.
+- **A non-projective base for the §2.8 warp** — fitting a scattered-data
+  interpolator (thin-plate spline, MLS, mesh) through the four dragged
+  corners gives an affine-plus-bending fit, not a perspective one: straight
+  edges bow and the image never sits flat on a keystoned wall. The base stays
+  the exact 4-corner homography; every extra handle is a correction on top of
+  it. This is the load-bearing decision in the alignment layer.
+- **Evaluating the warp model per pixel per frame** — an O(N) RBF sum in the
+  final pass is >100 M ops/frame at 64 handles and 1080p, for a field that
+  only changes when someone drags a mouse. It is baked into an offset LUT
+  instead; per-frame cost is one texel read at any handle count.
+- **Fold prevention in the warp** — dragging handles past each other produces
+  a non-injective map and visible mirroring. The operator sees it instantly
+  on the wall; guarding against it would cost more than it saves.
+- **Alignment as scene content** — no MCP verb, no `scene.json` field, never
+  per leg, never copied on promote/pull. `scene.json` is what the surface
+  does; alignment is where the light lands (§2.5 scope rule).
+- **Re-solving the warp in the UI** — the Align canvas draws the real field
+  from the engine's solved coefficients (`weights` on the alignment payload).
+  A second solver in TypeScript would drift from the one that feeds the
+  projector, and the canvas exists precisely to be trusted.
 - **Engine-side audio signal conditioning** — smoothing, attack/release,
   min/max normalization of `audio.*` all live in the audio server. The
   engine's only audio-tuning surface is effect-strength params on the

@@ -3,6 +3,12 @@
 Each tool submits work to FAL's queue via fal_client.subscribe (wrapped in
 asyncio.to_thread so the MCP event loop is never blocked) and includes
 exponential-backoff retry logic for transient errors.
+
+File flow is local-first: results are downloaded straight into the active
+project folder (`project.py`) and returned as local paths. Inputs may be local
+paths — FAL's workers can't read this disk, so a local input is pushed to
+*FAL's own* CDN via `fal_client.upload_file` just in time. That upload is the
+one unavoidable outbound copy; it is ephemeral and unrelated to S3.
 """
 
 from __future__ import annotations
@@ -10,16 +16,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import tempfile
 import time
 from typing import Optional
 
 import fal_client
-import httpx
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from .file_io import upload_async
+from . import project
+from .file_io import resolve_input_async
 from ._log import log_progress, log_done, log_error, logged_tool
 from .server import mcp, get_timeout
 
@@ -158,15 +163,28 @@ def _extract_urls(result: dict) -> list[str]:
     return urls
 
 
-async def _download_to_tmp(url: str, suffix: str = "") -> str:
-    """Download a URL to a temp file (async)."""
-    async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(resp.content)
-    tmp.close()
-    return tmp.name
+# ---------------------------------------------------------------------------
+# Local file -> FAL-visible URL
+# ---------------------------------------------------------------------------
+async def _to_fal_url(value: str) -> str:
+    """Make *value* fetchable by FAL's workers.
+
+    Passes http(s) URLs through untouched. Anything else — a local path, a
+    base64/data blob — is materialised locally and uploaded to FAL's CDN.
+    """
+    if not value or value.startswith(("http://", "https://")):
+        return value
+
+    try:
+        local = await resolve_input_async(value)
+    except FileNotFoundError:
+        raise ToolError(f"input is neither a URL nor a file on this machine: {value}")
+    return await asyncio.to_thread(fal_client.upload_file, local)
+
+
+async def _to_fal_urls(values: list[str]) -> list[str]:
+    """`_to_fal_url` across a list, uploading any local inputs concurrently."""
+    return list(await asyncio.gather(*(_to_fal_url(v) for v in values)))
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +198,7 @@ async def _run_fal_tool(
     response_info: dict,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Subscribe to FAL endpoint, download result, upload to S3, return response.
+    """Subscribe to a FAL endpoint and download the result into the project.
 
     Args:
         tool_name: Name for logging.
@@ -202,14 +220,19 @@ async def _run_fal_tool(
 
         if output_type == "video":
             log_progress(tool_name, "Downloading video from FAL...")
-            tmp = await _download_to_tmp(urls[0], suffix=".mp4")
-            uploaded = await upload_async(tmp)
-            response = {"output_video": uploaded, "info": response_info}
+            path = await project.download_async(
+                urls[0], tool=tool_name, kind=project.GENERATED, ext=".mp4"
+            )
+            response = {"output_video": path, "info": response_info}
         else:
             log_progress(tool_name, f"Downloading {len(urls)} image(s) from FAL...")
-            tmps = await asyncio.gather(*[_download_to_tmp(u, suffix=".jpg") for u in urls])
-            uploaded = list(await asyncio.gather(*[upload_async(t) for t in tmps]))
-            response = {"output_images": uploaded, "info": {**response_info, "num_images": len(uploaded)}}
+            paths = list(await asyncio.gather(*[
+                project.download_async(
+                    u, tool=tool_name, kind=project.GENERATED, ext=".jpg"
+                )
+                for u in urls
+            ]))
+            response = {"output_images": paths, "info": {**response_info, "num_images": len(paths)}}
 
         log_done(tool_name, t0, response)
         return response
@@ -241,12 +264,14 @@ async def kling_v25_image_to_video(
 
     Args:
         prompt: Text description of the desired video motion and content.
-        image_url: URL of the image to use as the first frame.
+        image_url: URL *or local file path* of the image to use as the first frame.
         duration: Video length in seconds. Choices: "5" or "10".
-        tail_image_url: Optional URL of an image for the last frame (start→end transition).
+        tail_image_url: Optional URL or local path of an image for the last frame (start→end transition).
         negative_prompt: Things to avoid in the generation.
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
     """
+    image_url, tail_image_url = await _to_fal_urls([image_url, tail_image_url])
+
     fal_args = {
         "prompt": prompt,
         "image_url": image_url,
@@ -289,14 +314,16 @@ async def kling_v3_image_to_video(
 
     Args:
         prompt: Text description of the desired video motion and content.
-        start_image_url: URL of the image to use as the first frame.
+        start_image_url: URL *or local file path* of the image to use as the first frame.
         duration: Video length in seconds. Choices: "3" through "15".
         generate_audio: Generate native audio for the video (Chinese/English). Increases cost ~50%.
-        end_image_url: Optional URL of an image for the last frame (start→end transition).
+        end_image_url: Optional URL or local path of an image for the last frame (start→end transition).
         negative_prompt: Things to avoid in the generation.
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
         aspect_ratio: Output aspect ratio. Choices: "16:9", "9:16", "1:1".
     """
+    start_image_url, end_image_url = await _to_fal_urls([start_image_url, end_image_url])
+
     fal_args = {
         "prompt": prompt,
         "start_image_url": start_image_url,
@@ -348,10 +375,11 @@ async def nano_banana_pro(
         prompt: Text description of the desired image(s). When reference images
             are provided, use image_1, image_2, … image_N in the prompt to
             refer to specific input images by their position in the list.
-        image_urls: Optional list of reference image URLs (up to 14). Each URL
-            becomes a named reference: the first URL is image_1, the second is
-            image_2, and so on. The prompt should explicitly mention these
-            references to control how each image influences the output.
+        image_urls: Optional list of reference images (up to 14), each a URL
+            *or a local file path*. Each entry becomes a named reference: the
+            first is image_1, the second is image_2, and so on. The prompt
+            should explicitly mention these references to control how each
+            image influences the output.
         num_images: Number of images to generate (1-4). You almost always want to do 1 image at a time. When the user asks for multiple images, run multiple toolcalls and tweak the prompt.
         resolution: Output resolution. Choices: "1K", "2K", "4K" (4K costs 2x).
         aspect_ratio: Output aspect ratio. Choices: "auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16".
@@ -374,7 +402,7 @@ async def nano_banana_pro(
     if seed >= 0:
         fal_args["seed"] = seed
     if image_urls:
-        fal_args["image_urls"] = image_urls
+        fal_args["image_urls"] = await _to_fal_urls(image_urls)
 
     return await _run_fal_tool(
         "nano_banana_pro", endpoint, fal_args,

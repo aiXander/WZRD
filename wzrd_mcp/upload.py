@@ -1,5 +1,9 @@
 """Upload local files to S3 and print the public URL.
 
+DORMANT — no tool calls this. Outputs stay on local disk (see `project.py`);
+this stays around for the day `file_io.upload` gets pointed at a self-owned
+bucket. Needs the `s3` extra (`boto3`).
+
 Uses content-based hashing so repeated uploads of the same file are instant.
 
 Usage:

@@ -1,9 +1,10 @@
 # wzrd-app — single-process control shell
 
-The control surface that wraps `render-core` for humans. Three routes —
-**Prepare** (surface canvas + Monaco editor + binding inspector), **Perform**
-(native preview hero + §5.6 deck bar + masters + audio strip + driver rack),
-**Debug** (collapsible panels). The headless agent path
+The control surface that wraps `render-core` for humans. Four routes, in
+load-in order — **Prepare** (surface canvas + Monaco editor + binding
+inspector), **Align** (§2.8 output warp), **Perform** (native preview hero +
+§5.6 deck bar + masters + audio strip + driver rack), **Debug** (collapsible
+panels). The headless agent path
 (`render-core --scene foo.json`, standalone binary) is unchanged; this shell
 is purely additive.
 
@@ -84,13 +85,25 @@ previous good plan stays active, error toasts on the Reload pill.
 
 - **Prepare**: surface canvas with mask overlays, layer hover/select,
   Monaco editor, structured binding inspector with selector/effect/driver
-  dropdowns.
+  dropdowns. Highlighting is bidirectional — clicking a region aims the
+  inspector at a binding that covers it, and hovering a binding lights up
+  every region its selector resolves to.
+- **Align**: the §2.8 alignment layer — drag the four corner handles until
+  the render lands on the physical surface, drag inside the quad to move the
+  whole image, click the outline to drop a handle on an edge, right-click for
+  extra handles and their radius. Arrow keys nudge by exactly one output
+  pixel (⇧ 10), or move the whole quad when nothing is selected. The grid is
+  the real field (drawn from the engine's solved coefficients); the photo
+  underlay only follows the corner quad, and the projector is ground truth.
+  Test patterns and a background picker for calibrating against a bare wall.
+  Persisted by the engine in `alignment.json`; not scene content, so it has
+  no save button and never rides along with a scene.
 - **Perform**: large preview + audio band/onset visualizer + driver rack
   listing every driver-bound param in the active scene with live values.
 - **Debug**: connectivity, render-stats, driver-bus snapshot, hot-reload
   events history, log stream with level filter, and a raw pack/scene dump.
 
-Routes switch with `⌘1` / `⌘2` / `⌘3` (Ctrl on non-mac).
+Routes switch with `⌘1` / `⌘2` / `⌘3` / `⌘4` (Ctrl on non-mac).
 
 ## Telemetry channels
 
@@ -99,7 +112,7 @@ webview's `engine:telemetry` event channel.
 
 | channel | rate | consumer |
 |---|---|---|
-| `preview` | ~15 fps | Prepare surface-canvas underlay (Perform hero is the native surface, not this channel) |
+| `preview` | ~15 fps | Prepare surface-canvas underlay + Align warp underlay (Perform hero is the native surface, not this channel) |
 | `hot_reload` | event | status strip + Debug history |
 | `audio_freshness` | 1 Hz heartbeat + transitions | OSC pill |
 | `fps` | 2 Hz | FPS pill + Debug render-stats |
@@ -109,7 +122,8 @@ webview's `engine:telemetry` event channel.
 | `connectivity` | ad-hoc | Debug connectivity |
 | `log` | ad-hoc | Debug log stream |
 | `deck` | transitions + ~10 Hz while a fade ramps | Perform deck bar (promote phase, mix, preview source) |
+| `alignment` | boot + every accepted mutation + output resize | Align route (§2.8 document, output size, handle cap) |
 
 Sticky channels (`hot_reload`, `audio_freshness`, `connectivity`, `fps`,
-`masters`, `deck`) are replayed to new subscribers so a freshly-opened
+`masters`, `deck`, `alignment`) are replayed to new subscribers so a freshly-opened
 webview shows the right pills immediately.

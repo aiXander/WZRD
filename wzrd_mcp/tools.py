@@ -1,6 +1,8 @@
 """MCP tool wrappers that bridge MCP ↔ wzrd functions.
 
-Each tool handles: resolve inputs (URL→local) → call wzrd → publish outputs.
+Each tool handles: resolve inputs (URL/path→local) → call wzrd → write outputs
+into the active project folder (see `project.py`) and return local paths.
+Inputs still accept URLs; outputs never leave this machine.
 """
 
 from __future__ import annotations
@@ -14,7 +16,8 @@ from urllib.parse import urlparse
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from .file_io import make_temp_dir, make_temp_path, resolve_input_async, upload_async
+from . import project
+from .file_io import resolve_input_async
 from ._log import log_call, log_progress, log_done, log_error, logged_tool
 from .server import mcp, get_timeout
 
@@ -53,7 +56,7 @@ async def subtract_background_frame(
             resolve_input_async(generated_image, suffix=".png"),
             resolve_input_async(background_image, suffix=".png"),
         )
-        out_path = make_temp_path(suffix=".webp")
+        out_path = project.output_path(_name, ".webp", kind=project.GENERATED)
 
         log_progress(_name, "Running background subtraction...")
         _creature_img, info = await asyncio.to_thread(
@@ -67,9 +70,8 @@ async def subtract_background_frame(
             blur_radius=blur_radius,
         )
 
-        log_progress(_name, "Uploading result...")
         result = {
-            "creature_image": await upload_async(out_path),
+            "creature_image": out_path,
             "info": {
                 "mask_coverage": info.get("mask_coverage"),
                 "creature_max_brightness": info.get("creature_max_brightness"),
@@ -125,7 +127,7 @@ async def subtract_background_video(
             resolve_input_async(video, suffix=".mp4"),
             resolve_input_async(background_image, suffix=".png"),
         )
-        out_path = make_temp_path(suffix=".mp4")
+        out_path = project.output_path(_name, ".mp4", kind=project.VIDEO)
 
         log_progress(_name, "Processing video frames...")
         info = await asyncio.to_thread(
@@ -141,9 +143,8 @@ async def subtract_background_video(
             crf=crf,
         )
 
-        log_progress(_name, "Uploading result...")
         result = {
-            "output_video": await upload_async(out_path),
+            "output_video": out_path,
             "info": {
                 "frames_processed": info.get("frames_processed"),
                 "fps": info.get("fps"),
@@ -188,7 +189,7 @@ async def detect_projection_surface(
 
         log_progress(_name, "Resolving input...")
         img_path = await resolve_input_async(image, suffix=".png")
-        out_path = make_temp_path(suffix=".webp")
+        out_path = project.output_path(_name, ".webp", kind=project.SURFACES)
 
         log_progress(_name, "Detecting projection surface...")
         _cropped, info = await asyncio.to_thread(
@@ -200,9 +201,8 @@ async def detect_projection_surface(
             output_resolution=output_resolution,
         )
 
-        log_progress(_name, "Uploading result...")
         result = {
-            "cropped_image": await upload_async(out_path),
+            "cropped_image": out_path,
             "info": {
                 "corners": info.get("corners"),
                 "original_size": info.get("original_size"),
@@ -250,7 +250,7 @@ async def align_images(
             resolve_input_async(source_image, suffix=".png"),
             resolve_input_async(target_image, suffix=".png"),
         )
-        out_path = make_temp_path(suffix=".webp")
+        out_path = project.output_path(_name, ".webp", kind=project.SURFACES)
 
         log_progress(_name, "Running feature matching & alignment...")
         _warped, info = await asyncio.to_thread(
@@ -261,9 +261,8 @@ async def align_images(
             max_features=max_features,
         )
 
-        log_progress(_name, "Uploading result...")
         result = {
-            "aligned_image": await upload_async(out_path),
+            "aligned_image": out_path,
             "info": {
                 "confidence": info.get("confidence"),
                 "method": info.get("method"),
@@ -314,7 +313,9 @@ async def darken_surface(
 
         log_progress(_name, "Resolving input...")
         img_path = await resolve_input_async(image, suffix=".png")
-        out_path = make_temp_path(suffix=".webp")
+        # Alignment aids are written next to `out_path` by the library, so a
+        # project-local output path puts them in the project too.
+        out_path = project.output_path(_name, ".webp", kind=project.SURFACES)
 
         log_progress(_name, "Running darken pipeline...")
         result = await asyncio.to_thread(
@@ -331,10 +332,9 @@ async def darken_surface(
         pil_image = result["image"]
         await asyncio.to_thread(pil_image.save, out_path, quality=90)
 
-        log_progress(_name, "Uploading result...")
-        response: dict = {"darkened_image": await upload_async(out_path)}
+        response: dict = {"darkened_image": out_path}
         if result.get("video"):
-            response["alignment_video"] = await upload_async(str(result["video"]))
+            response["alignment_video"] = str(result["video"])
 
         log_done(_name, t0, response)
         return response
@@ -384,7 +384,7 @@ async def prepare_surface(
         resolved = await asyncio.gather(*coros)
         night_path = resolved[0]
         day_path = resolved[1] if len(resolved) > 1 else None
-        out_path = make_temp_path(suffix=".webp")
+        out_path = project.output_path(_name, ".webp", kind=project.SURFACES)
 
         if day_path:
             log_progress(_name, "Running full pipeline: detect → align → darken...")
@@ -405,10 +405,9 @@ async def prepare_surface(
         pil_image = result["image"]
         await asyncio.to_thread(pil_image.save, out_path, quality=90)
 
-        log_progress(_name, "Uploading result...")
-        response: dict = {"surface_image": await upload_async(out_path)}
+        response: dict = {"surface_image": out_path}
         if result.get("video"):
-            response["alignment_video"] = await upload_async(str(result["video"]))
+            response["alignment_video"] = str(result["video"])
 
         log_done(_name, t0, response)
         return response
@@ -463,7 +462,7 @@ async def extract_color_regions(
         resolved = await asyncio.gather(*coros)
         img_path = resolved[0]
         surface_path = resolved[1] if len(resolved) > 1 else None
-        out_dir = make_temp_dir()
+        out_dir = project.output_dir(_name, kind=project.REGIONS)
 
         log_progress(_name, "Running CIELAB color clustering...")
         regions, output_dir = await asyncio.to_thread(
@@ -484,25 +483,8 @@ async def extract_color_regions(
 
         out = Path(output_dir)
 
-        log_progress(_name, f"Uploading {len(regions)} regions...")
-        # Upload all region files concurrently
-        upload_tasks = []
-        upload_keys = []  # (region_index, key_name)
-        for i, region in enumerate(regions):
-            if "crop_filename" in region:
-                upload_tasks.append(upload_async(str(out / region["crop_filename"])))
-                upload_keys.append((i, "region_mask"))
-            if "surface_filename" in region:
-                upload_tasks.append(upload_async(str(out / region["surface_filename"])))
-                upload_keys.append((i, "region_surface_image"))
-
-        metadata_file = out / "islands.json"
-        if metadata_file.exists():
-            upload_tasks.append(upload_async(str(metadata_file)))
-            upload_keys.append((-1, "metadata"))
-
-        upload_results = await asyncio.gather(*upload_tasks)
-
+        # Every region file already sits in the project's regions/<run>/ dir —
+        # just report where each one landed.
         published_regions = []
         for r in regions:
             entry = {"source_box": r.get("source_box")}
@@ -511,17 +493,17 @@ async def extract_color_regions(
             elif r.get("source_box"):
                 w, h = r["source_box"]["width"], r["source_box"]["height"]
                 entry["aspect_ratio"] = f"{w / h:.3f}"
+            if "crop_filename" in r:
+                entry["region_mask"] = str(out / r["crop_filename"])
+            if "surface_filename" in r:
+                entry["region_surface_image"] = str(out / r["surface_filename"])
             published_regions.append(entry)
-        metadata_url = None
-        for (idx, key), url in zip(upload_keys, upload_results):
-            if idx == -1:
-                metadata_url = url
-            else:
-                published_regions[idx][key] = url
 
+        metadata_file = out / "islands.json"
         result = {
             "regions": published_regions,
-            "metadata_path": metadata_url,
+            "regions_dir": str(out),
+            "metadata_path": str(metadata_file) if metadata_file.exists() else None,
         }
         log_done(_name, t0, result)
         return result
@@ -572,7 +554,7 @@ async def reproject_video(
 
         log_progress(_name, "Resolving inputs...")
         vid_path = await resolve_input_async(video, suffix=".mp4")
-        out_path = make_temp_path(suffix=".mp4")
+        out_path = project.output_path(_name, ".mp4", kind=project.VIDEO)
 
         log_progress(_name, "Reprojecting video onto canvas...")
         info = await asyncio.to_thread(
@@ -586,9 +568,8 @@ async def reproject_video(
             codec=codec,
         )
 
-        log_progress(_name, "Uploading result...")
         result = {
-            "output_video": await upload_async(out_path),
+            "output_video": out_path,
             "info": {
                 "frames_processed": info.get("frames_processed"),
                 "fps": info.get("fps"),
@@ -607,10 +588,18 @@ async def reproject_video(
 
 # ---------------------------------------------------------------------------
 # Tool 9: texture_flow
+#
+# THE LAST EDEN DEPENDENCY — disabled in tools_config.json until it is rehomed.
+# It calls a ComfyUI deployment (`comfyui-wzrd-STAGE` / `ComfyUIPremium`) that
+# lives in the *edenartlab* Modal workspace, feeds it public input URLs, and
+# reads outputs back as S3 keys in Eden's bucket. Nothing here can be fixed by
+# a local refactor; the workflow + deploy script have to move first.
+# See docs/TODO/eden-decoupling.md.
 # ---------------------------------------------------------------------------
 
-# S3/CloudFront settings for downloading TextureFlow outputs
-_TF_BUCKET = os.getenv("AWS_BUCKET_NAME", "edenartlab-stage-data")
+# S3/CloudFront settings for downloading TextureFlow outputs. No Eden default:
+# a rehomed deployment must name its own bucket.
+_TF_BUCKET = os.getenv("AWS_BUCKET_NAME")
 _TF_REGION = os.getenv("AWS_REGION_NAME", "us-east-1")
 _TF_CLOUDFRONT = os.getenv("CLOUDFRONT_URL")
 
@@ -619,6 +608,12 @@ def _tf_file_url(filename: str) -> str:
     """Build a download URL for an S3 key from the TextureFlow result."""
     if _TF_CLOUDFRONT:
         return f"{_TF_CLOUDFRONT}/{filename}"
+    if not _TF_BUCKET:
+        raise ToolError(
+            "TextureFlow returned an S3 key but no bucket is configured. "
+            "Set AWS_BUCKET_NAME (or CLOUDFRONT_URL) for the deployment that "
+            "produced it — see docs/TODO/eden-decoupling.md."
+        )
     return f"https://{_TF_BUCKET}.s3.{_TF_REGION}.amazonaws.com/{filename}"
 
 
@@ -796,6 +791,15 @@ async def texture_flow(
                     key = fallback_keys[i] if i < len(fallback_keys) else f"extra_output_{i}"
                     response[key] = url
 
+        # Bring every remote result home before returning it.
+        log_progress(_name, f"Downloading {len(response)} output(s)...")
+        keys = list(response)
+        paths = await asyncio.gather(*(
+            project.download_async(response[k], tool=f"{_name}_{k}", kind=project.GENERATED)
+            for k in keys
+        ))
+        response = dict(zip(keys, paths))
+
         log_done(_name, t0, response)
         return response
     except ToolError:
@@ -821,6 +825,7 @@ async def build_layerpack(
     canny: str = "",
     feather_px: int = 1,
     include_background: bool = False,
+    pack_name: str = "",
     ctx: Optional[Context] = None,
 ) -> dict:
     """Build a WZRD layer pack (pack.json + masks/ + references/) for the realtime render-core.
@@ -854,6 +859,8 @@ async def build_layerpack(
         feather_px: Mask edge feathering radius (default 1; 0 = hard edges).
         include_background: If true, auto-generates `000_background.png` as the
             complement of all input masks.
+        pack_name: Folder name for the pack inside the project's `packs/`
+            directory. Defaults to a timestamped name.
     """
     _name = "build_layerpack"
     t0 = time.time()
@@ -883,8 +890,8 @@ async def build_layerpack(
         # Stage masks in a temp dir with stable, ordered filenames so the
         # layerpack discovery sees them in the order the caller supplied.
         from pathlib import Path
-        staging = Path(make_temp_dir())
-        masks_dir = staging / "masks_in"
+        from tempfile import mkdtemp
+        masks_dir = Path(mkdtemp(prefix="wzrd_masks_")) / "masks_in"
         masks_dir.mkdir()
         from shutil import copyfile
         ordered_filenames: list[str] = []
@@ -918,7 +925,10 @@ async def build_layerpack(
         if projector_width > 0 and projector_height > 0:
             projector_resolution = (projector_width, projector_height)
 
-        pack_dir = staging / "pack"
+        # The pack lands in the project so render-core can load it directly:
+        # a scene.json at the project root points at `packs/<name>` and the
+        # engine resolves masks relative to pack.json, off local disk.
+        pack_dir = Path(project.output_dir(_name, kind=project.PACKS, name=pack_name))
 
         log_progress(_name, "Building layer pack...")
         scene = await asyncio.to_thread(
@@ -934,35 +944,12 @@ async def build_layerpack(
             include_background=include_background,
         )
 
-        log_progress(_name, f"Uploading pack ({len(scene['layers'])} layers)...")
-        # Upload masks and the surface in parallel; rewrite pack.json with URLs.
-        files_to_upload: list[tuple[str, Path]] = []
-        for layer in scene["layers"]:
-            files_to_upload.append((f"layer:{layer['id']}", pack_dir / layer["mask"]))
-        if scene.get("surface"):
-            files_to_upload.append(("surface", pack_dir / scene["surface"]))
-        if scene.get("source_capture"):
-            files_to_upload.append(("source_capture", pack_dir / scene["source_capture"]))
-
-        upload_urls = await asyncio.gather(*(upload_async(str(p)) for _, p in files_to_upload))
-
-        url_map = dict(zip([k for k, _ in files_to_upload], upload_urls))
-        for layer in scene["layers"]:
-            layer["mask_url"] = url_map[f"layer:{layer['id']}"]
-        if scene.get("surface"):
-            scene["surface_url"] = url_map["surface"]
-        if scene.get("source_capture"):
-            scene["source_capture_url"] = url_map["source_capture"]
-
-        # Persist the rewritten pack.json and publish it too.
-        import json as _json
-        scene_path = pack_dir / "pack.json"
-        scene_path.write_text(_json.dumps(scene, indent=2))
-        scene_url = await upload_async(str(scene_path))
-
+        # `_build` already wrote pack.json with mask paths relative to the pack
+        # dir — exactly what render-core expects. Nothing to rewrite.
         result = {
             "scene": scene,
-            "scene_url": scene_url,
+            "pack_dir": str(pack_dir),
+            "pack_json": str(pack_dir / "pack.json"),
             "layer_count": len(scene["layers"]),
             "projector_resolution": scene["projector_resolution"],
         }
@@ -1027,7 +1014,7 @@ async def simulate_view(
             resolve_input_async(projector_video, suffix=".mp4"),
             resolve_input_async(surface_image, suffix=".png"),
         )
-        out_path = make_temp_path(suffix=".mp4")
+        out_path = project.output_path(_name, ".mp4", kind=project.VIDEO)
 
         log_progress(_name, "Compositing projector video onto surface...")
         info = await asyncio.to_thread(
@@ -1042,9 +1029,8 @@ async def simulate_view(
             crf=crf,
         )
 
-        log_progress(_name, "Uploading result...")
         result = {
-            "simulated_view_video": await upload_async(out_path),
+            "simulated_view_video": out_path,
             "info": {
                 "frames_processed": info.get("frames_processed"),
                 "fps": info.get("fps"),

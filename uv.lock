@@ -1198,7 +1198,7 @@ wheels = [
 
 [[package]]
 name = "modal"
-version = "1.5.1"
+version = "1.5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1215,9 +1215,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/54/56/a8d1a1dd705044e0c3534642361e8586db98908b683f8231b9fd39a86209/modal-1.5.1.tar.gz", hash = "sha256:f8fb7f4d3ccc5b774370704b1aabb79e629ea7e6681a7f9671af5cf77161be12", size = 801962, upload-time = "2026-06-23T15:44:18.853Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/09/13/c54908743129b75f9761ebcc767f8de5e5b16e2a0303e171f7ae38d90d4d/modal-1.5.3.tar.gz", hash = "sha256:0551c6fa2386ce78619f1a058eb4dd3ca527a54048952ea870e26704557c76c4", size = 844542, upload-time = "2026-07-23T21:06:49.14Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/85/67/c91cb2ee6cbae523ae051f5ecfebd9fc24518fb84b9e92859d32fbbe3a71/modal-1.5.1-py3-none-any.whl", hash = "sha256:49aeda1a4fafc71994c3aa63d3e2321419b586de0303113fa5bfc68f31ad5c95", size = 915761, upload-time = "2026-06-23T15:44:16.48Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/5d/834ba7387383077538f28a1d17d2df95d596e225a44a1ea1207ad90977f3/modal-1.5.3-py3-none-any.whl", hash = "sha256:d3fbe1d95321d1e4bdb08140bf42711084d705e7e3de644f7ae55c9b96b6c51d", size = 961068, upload-time = "2026-07-23T21:06:46.866Z" },
 ]
 
 [[package]]
@@ -3388,7 +3388,6 @@ islands = [
     { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 mcp = [
-    { name = "boto3" },
     { name = "fal-client" },
     { name = "fastmcp" },
     { name = "httpx" },
@@ -3397,16 +3396,17 @@ mcp = [
     { name = "uvicorn" },
 ]
 modal = [
-    { name = "boto3" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "modal" },
 ]
+s3 = [
+    { name = "boto3" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", marker = "extra == 'mcp'", specifier = ">=1.34" },
-    { name = "boto3", marker = "extra == 'modal'", specifier = ">=1.34" },
+    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
     { name = "fal-client", marker = "extra == 'mcp'", specifier = ">=0.5" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=3.0" },
     { name = "fastmcp", marker = "extra == 'modal'", specifier = ">=3.0" },
@@ -3422,7 +3422,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'mcp'", specifier = ">=0.30" },
     { name = "websockets", marker = "extra == 'engine'", specifier = ">=12" },
 ]
-provides-extras = ["islands", "mcp", "modal", "engine"]
+provides-extras = ["islands", "mcp", "modal", "s3", "engine"]
 
 [[package]]
 name = "yarl"

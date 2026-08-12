@@ -75,8 +75,13 @@ export function BindingInspector() {
   const pack = useStore((s) => s.pack);
   const selected = useStore((s) => s.selectedBindingId);
   const setSelected = useStore((s) => s.setSelectedBindingId);
+  const setHovered = useStore((s) => s.setHoveredBindingId);
   const effects = useStore((s) => s.effects);
   const drivers = useStore((s) => s.drivers);
+
+  // Leaving the inspector entirely (route switch, unmount) must not strand a
+  // highlight on the surface canvas.
+  useEffect(() => () => setHovered(null), [setHovered]);
 
   // Effect catalog (declared inputs incl. defaults) via `effect.describe`.
   // Drives param defaults on effect switch and the add-param choices, so
@@ -155,7 +160,13 @@ export function BindingInspector() {
         </button>
       </div>
 
-      <ul className="border border-ink-700 rounded divide-y divide-ink-700">
+      {/* Hovering a row highlights the regions it drives on the surface
+          canvas; the row list clears the highlight as a whole so moving
+          between rows doesn't flicker through a null. */}
+      <ul
+        className="border border-ink-700 rounded divide-y divide-ink-700"
+        onMouseLeave={() => setHovered(null)}
+      >
         {bindings.map((b) => (
           <li
             key={b.id}
@@ -163,6 +174,7 @@ export function BindingInspector() {
               'px-2 py-1 cursor-pointer flex items-center justify-between ' +
               (selected === b.id ? 'bg-ink-600 text-zinc-100' : 'hover:bg-ink-700')
             }
+            onMouseEnter={() => setHovered(b.id)}
             onClick={() => setSelected(b.id)}
           >
             <div className="truncate">
@@ -184,6 +196,10 @@ export function BindingInspector() {
       </ul>
 
       {current && (
+        <div
+          onMouseEnter={() => setHovered(current.id)}
+          onMouseLeave={() => setHovered(null)}
+        >
         <BindingEditor
           binding={current}
           pack={pack}
@@ -200,6 +216,7 @@ export function BindingInspector() {
             })
           }
         />
+        </div>
       )}
     </div>
   );
@@ -285,6 +302,11 @@ function BindingEditor({
   }
 
   const ids: string[] = pack?.layers.map((l: any) => l.id) ?? [];
+  /** Dropdown text: human label when the pack carries one, else the id. */
+  const layerText = (id: string) => {
+    const l = pack?.layers.find((x: any) => x.id === id);
+    return l?.label && l.label !== l.id ? `${l.label} · ${id}` : id;
+  };
   const tags = new Set<string>();
   pack?.layers.forEach((l: any) => l.tags.forEach((t: string) => tags.add(t)));
   const tagList = Array.from(tags).sort();
@@ -325,7 +347,7 @@ function BindingEditor({
               )}
               {ids.map((id) => (
                 <option key={id} value={id}>
-                  {id}
+                  {layerText(id)}
                 </option>
               ))}
             </select>

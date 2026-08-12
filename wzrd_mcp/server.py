@@ -15,6 +15,7 @@ _CONFIG_PATH = Path(__file__).parent / "tools_config.json"
 _DEFAULT_TIMEOUT = 120  # seconds
 
 _DEFAULT_TOOLS = {
+    "set_project": {"enabled": True, "timeout": 30},
     "subtract_background_frame": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "subtract_background_video": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "detect_projection_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
@@ -23,7 +24,9 @@ _DEFAULT_TOOLS = {
     "prepare_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "extract_color_regions": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "reproject_video": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "texture_flow": {"enabled": True, "timeout": 1500},
+    # Off until it is rehomed out of Eden's Modal workspace — see
+    # docs/TODO/eden-decoupling.md.
+    "texture_flow": {"enabled": False, "timeout": 1500},
     "kling_v3_image_to_video": {"enabled": True, "timeout": 600},
     "nano_banana_pro": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "simulate_view": {"enabled": True, "timeout": 300},
@@ -83,16 +86,21 @@ mcp = FastMCP(
         "tools for whichever the task needs; tool names are self-describing.\n\n"
         "1) OFFLINE CONTENT PIPELINE — prepare surfaces and generate/segment the\n"
         "content that becomes a layer pack. Load these when the task is about\n"
-        "producing assets from photos or prompts (not driving the live engine):\n"
+        "producing assets from photos or prompts (not driving the live engine).\n"
+        "Everything is LOCAL: call set_project FIRST to pick the folder this\n"
+        "session writes into; every tool then returns absolute local paths (and\n"
+        "accepts them as inputs), so results are chained path-to-path and land\n"
+        "next to the scene the engine loads.\n"
         "- prepare_surface / extract_color_regions / build_layerpack — surface prep,\n"
         "  color-region segmentation (islands), and authoring the layer pack.\n"
         "- subtract_background_video / reproject_video / simulate_view — extract\n"
         "  moving content, reposition island regions, preview additive projection.\n"
-        "- texture_flow (morphing AI loops, remote Modal GPU), kling_v25_image_to_video\n"
-        "  (5/10s image→video via FAL), nano_banana_pro (text→image + edit via FAL).\n"
-        "Typical flow: prepare_surface → generate content (e.g. texture_flow) →\n"
-        "subtract_background_video → (optionally extract_color_regions → reproject_video)\n"
-        "→ build_layerpack.\n\n"
+        "- kling_v25_image_to_video (5/10s image→video via FAL), nano_banana_pro\n"
+        "  (text→image + multi-reference edit via FAL). Remote results download\n"
+        "  into the project; local paths given as inputs are uploaded for you.\n"
+        "Typical flow: set_project → prepare_surface → generate content (e.g.\n"
+        "nano_banana_pro → kling_v25_image_to_video) → subtract_background_video →\n"
+        "(optionally extract_color_regions → reproject_video) → build_layerpack.\n\n"
         "2) LIVE ENGINE AUTHORING — drive the realtime render-core over its WS\n"
         "(ws://127.0.0.1:9123). Load these when the operator wants to change what's\n"
         "rendering NOW (bindings, WGSL effects, layer labels/groups). ALWAYS call\n"
@@ -107,13 +115,14 @@ mcp = FastMCP(
         "  can target the operator's surface-language ('the trunk', group 'canopy').\n"
         "Writes target the DESIGN leg only; promoting design→live is a human UI act.\n"
         "Requires the local `.[engine]` extra (websockets); absent on Modal.\n\n"
-        "All image/video inputs accept URLs or local file paths.\n"
-        "All outputs include the processed file and an info dict with metadata."
+        "All image/video inputs accept local file paths or URLs.\n"
+        "All outputs include the produced file's local path and an info dict."
     ),
 )
 
 # Import tools module to register all @mcp.tool() decorated functions.
 # This must happen after `mcp` is defined since tools.py imports `mcp` from here.
+from . import project_tools as _project_tools  # noqa: E402, F401
 from . import tools as _tools  # noqa: E402, F401
 from . import fal_tools as _fal_tools  # noqa: E402, F401
 from . import local_tools as _local_tools  # noqa: E402, F401

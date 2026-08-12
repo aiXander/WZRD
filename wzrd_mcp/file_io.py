@@ -1,4 +1,11 @@
-"""File I/O: download URLs to local tmp files, upload local files to S3."""
+"""File I/O: download URLs to local tmp files, upload local files to S3.
+
+`resolve_input()` is still the input side of every tool. The S3 **upload** side
+is dormant: tools now publish through `project.py`, which keeps results on
+local disk. The code below is kept intact so it can be pointed at a
+self-owned bucket later — nothing in the server calls `upload()` today, and
+`boto3` is imported lazily so the dependency is optional.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +18,6 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-import boto3
 import httpx
 
 # ---------------------------------------------------------------------------
@@ -23,6 +29,8 @@ _s3_client = None
 def _s3():
     global _s3_client
     if _s3_client is None:
+        import boto3  # optional dep — only the dormant upload path needs it
+
         _s3_client = boto3.client(
             "s3",
             aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],

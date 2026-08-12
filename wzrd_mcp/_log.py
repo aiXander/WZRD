@@ -6,6 +6,7 @@ import contextvars
 import functools
 import inspect
 import json
+import sys
 import time
 import traceback
 from datetime import datetime
@@ -37,22 +38,34 @@ def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+def _emit(msg: str) -> None:
+    """Write one log line to stderr.
+
+    Never stdout: under the stdio transport (Claude Desktop spawns us and speaks
+    JSON-RPC over the pipe) stdout *is* the protocol stream, so a stray print
+    there breaks framing and the server dies on connect. stderr is the sanctioned
+    log channel for stdio servers — Desktop tees it to
+    ``~/Library/Logs/Claude/mcp-server-<name>.log``.
+    """
+    print(msg, file=sys.stderr, flush=True)
+
+
 def log_call(tool_name: str, args: dict) -> float:
     """Log an incoming tool call with its arguments. Returns start time."""
     if DEBUG:
-        print(f"\n{_CYAN}{_BOLD}[{_ts()}] ▶ TOOL CALL: {tool_name}{_RESET}")
+        _emit(f"\n{_CYAN}{_BOLD}[{_ts()}] ▶ TOOL CALL: {tool_name}{_RESET}")
         for k, v in args.items():
             val = repr(v)
             if len(val) > 120:
                 val = val[:117] + "..."
-            print(f"  {_DIM}{k}={_RESET}{val}")
+            _emit(f"  {_DIM}{k}={_RESET}{val}")
     return time.time()
 
 
 def log_progress(tool_name: str, message: str) -> None:
     """Log a progress update during tool execution."""
     if DEBUG:
-        print(f"{_YELLOW}[{_ts()}]   ⟳ {tool_name}: {message}{_RESET}")
+        _emit(f"{_YELLOW}[{_ts()}]   ⟳ {tool_name}: {message}{_RESET}")
 
 
 def log_done(tool_name: str, start_time: float, result: object = None) -> None:
@@ -60,13 +73,13 @@ def log_done(tool_name: str, start_time: float, result: object = None) -> None:
     if not DEBUG:
         return
     elapsed = time.time() - start_time
-    print(f"{_GREEN}[{_ts()}] ✓ {tool_name} completed ({elapsed:.1f}s){_RESET}")
+    _emit(f"{_GREEN}[{_ts()}] ✓ {tool_name} completed ({elapsed:.1f}s){_RESET}")
     if result is not None:
         try:
             formatted = json.dumps(result, indent=2, default=str)
         except (TypeError, ValueError):
             formatted = repr(result)
-        print(f"{_DIM}  Result: {formatted}{_RESET}")
+        _emit(f"{_DIM}  Result: {formatted}{_RESET}")
 
 
 def log_error(tool_name: str, error: Exception, start_time: float) -> None:
@@ -74,8 +87,8 @@ def log_error(tool_name: str, error: Exception, start_time: float) -> None:
     if not DEBUG:
         return
     elapsed = time.time() - start_time
-    print(f"{_RED}[{_ts()}] ✗ {tool_name} failed ({elapsed:.1f}s): {error}{_RESET}")
-    print(f"{_DIM}{traceback.format_exc()}{_RESET}")
+    _emit(f"{_RED}[{_ts()}] ✗ {tool_name} failed ({elapsed:.1f}s): {error}{_RESET}")
+    _emit(f"{_DIM}{traceback.format_exc()}{_RESET}")
 
 
 def log_overhead(tool_name: str, req_received: float, tool_start: float,
@@ -88,7 +101,7 @@ def log_overhead(tool_name: str, req_received: float, tool_start: float,
     post_ms = (response_sent - tool_end) * 1000
     overhead_ms = pre_ms + post_ms
     total_s = response_sent - req_received
-    print(
+    _emit(
         f"{_CYAN}[{_ts()}] ⏱  {tool_name}:  "
         f"pre={pre_ms:.0f}ms  tool={tool_s:.1f}s  post={post_ms:.0f}ms  "
         f"{_BOLD}overhead={overhead_ms:.0f}ms  total={total_s:.1f}s{_RESET}"

@@ -15,6 +15,7 @@
 //! embedder (e.g. a future in-process Tauri host) constructs `Core` directly
 //! and drives it from its own render thread.
 
+pub mod alignment;
 pub mod app;
 pub mod compositor;
 pub mod core;

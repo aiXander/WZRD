@@ -63,28 +63,47 @@ function buildAssets(img: HTMLImageElement, w: number, h: number, hue: number): 
   return { overlay, pickData, pickW: PICK_W, pickH };
 }
 
-/** Which bindings' selectors resolve to this layer? */
-function bindingsForLayer(sceneJson: string, pack: PackInfo, layer: PackLayer): string[] {
-  let scene: any;
-  try {
-    scene = JSON.parse(sceneJson);
-  } catch {
-    return [];
+/** Does this binding's selector cover this layer? */
+function selectorCovers(select: any, pack: PackInfo, layer: PackLayer): boolean {
+  const s = select ?? {};
+  if (s.all === true) return true;
+  if (s.id === layer.id) return true;
+  if (s.tag && layer.tags.includes(s.tag)) return true;
+  if (s.group) {
+    const g = (pack.groups ?? []).find((grp) => grp.id === s.group);
+    if (g && g.members.includes(layer.id)) return true;
   }
-  const groups = new Set(
-    (pack.groups ?? [])
-      .filter((g) => g.members.includes(layer.id))
-      .map((g) => g.id)
-  );
+  return false;
+}
+
+/** Which bindings' selectors resolve to this layer? */
+function bindingsForLayer(scene: any, pack: PackInfo, layer: PackLayer): string[] {
   const out: string[] = [];
-  for (const b of scene.bindings ?? []) {
-    const s = b.select ?? {};
-    const hit =
-      s.all === true ||
-      s.id === layer.id ||
-      (s.tag && layer.tags.includes(s.tag)) ||
-      (s.group && groups.has(s.group));
-    if (hit) out.push(b.id);
+  for (const b of scene?.bindings ?? []) {
+    if (selectorCovers(b.select, pack, layer)) out.push(b.id);
+  }
+  return out;
+}
+
+/**
+ * Inverse of `bindingsForLayer`: which layers does this binding light up?
+ *
+ * `pick` is deliberately ignored — the engine resolves a selector to its
+ * whole member set and lets `pick` toggle which member *draws*
+ * (`scene.rs::resolve_selector`), so the member set is what "this binding
+ * owns these regions" should show.
+ */
+function layersForBinding(
+  scene: any,
+  pack: PackInfo | null,
+  bindingId: string | null
+): Set<string> {
+  const out = new Set<string>();
+  if (!bindingId || !pack) return out;
+  const binding = (scene?.bindings ?? []).find((b: any) => b.id === bindingId);
+  if (!binding) return out;
+  for (const layer of pack.layers) {
+    if (selectorCovers(binding.select, pack, layer)) out.add(layer.id);
   }
   return out;
 }
@@ -95,6 +114,8 @@ export function SurfaceCanvas() {
   const sceneJson = useStore((s) => s.sceneJson);
   const selectedLayer = useStore((s) => s.selectedLayerId);
   const setSelectedLayer = useStore((s) => s.setSelectedLayerId);
+  const selectedBinding = useStore((s) => s.selectedBindingId);
+  const hoveredBinding = useStore((s) => s.hoveredBindingId);
   const setSelectedBinding = useStore((s) => s.setSelectedBindingId);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const assetsRef = useRef<Record<string, LayerAssets>>({});
@@ -152,6 +173,33 @@ export function SurfaceCanvas() {
     };
   }, [preview]);
 
+  // Parsed once per scene edit — the selector resolvers below run on every
+  // pointer move.
+  const scene = useMemo(() => {
+    try {
+      return JSON.parse(sceneJson);
+    } catch {
+      return null;
+    }
+  }, [sceneJson]);
+
+  // Two highlight tiers, fed from both directions (canvas pointer and
+  // inspector pointer/selection) so hovering a binding row lights up exactly
+  // the regions that binding drives.
+  //   hot  — what the pointer is on *right now*
+  //   warm — what is currently selected
+  const hot = useMemo(() => {
+    const s = layersForBinding(scene, pack, hoveredBinding);
+    if (hoverId) s.add(hoverId);
+    return s;
+  }, [scene, pack, hoveredBinding, hoverId]);
+
+  const warm = useMemo(() => {
+    const s = layersForBinding(scene, pack, selectedBinding);
+    if (selectedLayer) s.add(selectedLayer);
+    return s;
+  }, [scene, pack, selectedBinding, selectedLayer]);
+
   // Repaint. All expensive work is pre-composited; this is a handful of
   // drawImage calls.
   useEffect(() => {
@@ -173,12 +221,22 @@ export function SurfaceCanvas() {
     }
 
     if (showOverlays) {
-      pack.layers.forEach((layer) => {
-        const a = assetsRef.current[layer.id];
-        if (!a) return;
-        const active = selectedLayer === layer.id || hoverId === layer.id;
-        ctx.globalAlpha = active ? 0.55 : 0.22;
-        ctx.drawImage(a.overlay, 0, 0);
+      // Paint coldest-first so a highlighted region is never buried under an
+      // overlapping neighbour's dim wash — the whole point of the highlight
+      // is that it reads at a glance.
+      const anyHighlight = hot.size > 0 || warm.size > 0;
+      const tier = (layer: PackLayer) =>
+        hot.has(layer.id) ? 2 : warm.has(layer.id) ? 1 : 0;
+      const alpha = [anyHighlight ? 0.1 : 0.22, 0.45, 0.62];
+
+      [0, 1, 2].forEach((t) => {
+        pack.layers.forEach((layer) => {
+          if (tier(layer) !== t) return;
+          const a = assetsRef.current[layer.id];
+          if (!a) return;
+          ctx.globalAlpha = alpha[t];
+          ctx.drawImage(a.overlay, 0, 0);
+        });
       });
       ctx.globalAlpha = 1;
     }
@@ -186,7 +244,7 @@ export function SurfaceCanvas() {
     // Region names are shown on hover (in the status line below the canvas),
     // not painted at centroids — centroid labels landed in the wrong place for
     // thin/concave regions and cluttered the surface.
-  }, [pack, previewImg, assetsVersion, selectedLayer, hoverId, showOverlays]);
+  }, [pack, previewImg, assetsVersion, hot, warm, showOverlays]);
 
   const layers = useMemo(() => pack?.layers ?? [], [pack]);
 
@@ -220,7 +278,7 @@ export function SurfaceCanvas() {
       // Aim the inspector at the first binding whose selector covers this
       // region — "selecting a layer aims everything else" (design spec).
       const layer = pack.layers.find((l) => l.id === layerId);
-      const targets = layer ? bindingsForLayer(sceneJson, pack, layer) : [];
+      const targets = layer ? bindingsForLayer(scene, pack, layer) : [];
       setSelectedBinding(targets[0] ?? null);
     } else {
       setSelectedBinding(null);
@@ -230,8 +288,25 @@ export function SurfaceCanvas() {
   const hoverBindings = useMemo(() => {
     if (!hoverId || !pack) return [];
     const layer = pack.layers.find((l) => l.id === hoverId);
-    return layer ? bindingsForLayer(sceneJson, pack, layer) : [];
-  }, [hoverId, pack, sceneJson]);
+    return layer ? bindingsForLayer(scene, pack, layer) : [];
+  }, [hoverId, pack, scene]);
+
+  /** Human label when the pack has one, else the raw id. */
+  function nameOf(layerId: string): string {
+    const l = pack?.layers.find((x) => x.id === layerId);
+    return l?.label && l.label !== l.id ? l.label : layerId;
+  }
+
+  // Regions lit by the binding row under the pointer — reported in the same
+  // status line so the inspector→surface link is legible even for a selector
+  // (tag / group / all) that lights up several at once.
+  const bindingHoverNames = useMemo(
+    () =>
+      hoveredBinding && !hoverId
+        ? [...layersForBinding(scene, pack, hoveredBinding)]
+        : [],
+    [hoveredBinding, hoverId, scene, pack]
+  );
 
   if (!pack) {
     return <div className="text-xs text-zinc-500">waiting for pack info…</div>;
@@ -259,7 +334,7 @@ export function SurfaceCanvas() {
               className="text-accent-violet truncate min-w-0"
               title={selectedLayer}
             >
-              selected: {selectedLayer}
+              selected: {nameOf(selectedLayer)}
             </span>
           </>
         )}
@@ -274,13 +349,24 @@ export function SurfaceCanvas() {
       <div className="text-xs text-zinc-400 min-h-[1.25rem] whitespace-nowrap overflow-hidden text-ellipsis">
         {hoverId ? (
           <>
-            <span className="text-zinc-200">{hoverId}</span>
+            <span className="text-zinc-200">{nameOf(hoverId)}</span>
             {hoverBindings.length > 0 && (
               <span className="text-zinc-500">
                 {' '}
                 · bound by {hoverBindings.join(', ')}
               </span>
             )}
+          </>
+        ) : hoveredBinding ? (
+          <>
+            <span className="text-zinc-200">{hoveredBinding}</span>
+            <span className="text-zinc-500">
+              {' '}
+              ·{' '}
+              {bindingHoverNames.length === 0
+                ? 'selects no region'
+                : `drives ${bindingHoverNames.map(nameOf).join(', ')}`}
+            </span>
           </>
         ) : (
           <span className="text-zinc-600">

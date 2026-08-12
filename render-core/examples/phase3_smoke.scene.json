@@ -7,55 +7,55 @@
   "bindings": [
     {
       "select": {
-        "id": "primary"
+        "id": "main_facade"
       },
       "effect": "flow_noise",
       "params": {
-        "scale": 4,
+        "scale": 50,
         "speed": 1,
-        "bright": 1.3,
+        "bright": 1.2999999523162842,
         "tint": "#ffffff"
       },
-      "id": "primary_noise"
+      "id": "facade_noise"
     },
     {
       "select": {
-        "id": "region_mask_002_color_07fb04"
+        "id": "left_tower"
       },
       "effect": "vbars",
       "params": {
         "speed": 1,
         "count": 36,
         "duty": 0.5,
-        "color": "#ffffff"
+        "color": "#000000"
       },
-      "id": "mask02_vbars"
+      "id": "left_tower_bars"
     },
     {
       "select": {
-        "id": "region_mask_003_color_fefd00"
+        "id": "right_wing"
       },
       "effect": "vbars",
       "params": {
-        "speed": -1.5,
+        "speed": -1.7,
         "count": 30,
-        "duty": 0.4,
+        "duty": 0.5,
         "color": "#ff4dd2"
       },
-      "id": "mask03_vbars"
+      "id": "right_wing_bars"
     },
     {
       "select": {
-        "id": "region_mask_004_color_fd0800"
+        "id": "base_wall"
       },
-      "effect": "vbars",
+      "effect": "flow_noise",
       "params": {
-        "speed": 3,
-        "count": 18,
-        "duty": 0.6,
-        "color": "#ffd400"
+        "scale": 3,
+        "speed": 1,
+        "bright": 1.2999999523162842,
+        "tint": "#ffffff"
       },
-      "id": "mask04_vbars"
+      "id": "base_wall_noise"
     }
   ],
   "post": []
