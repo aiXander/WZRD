@@ -1,5 +1,6 @@
 {
   "set_project": {"enabled": true, "timeout": 30},
+  "load_skill": {"enabled": true, "timeout": 15},
   "subtract_background_frame": {"enabled": false, "timeout": 60},
   "subtract_background_video": {"enabled": true, "timeout": 300},
   "detect_projection_surface": {"enabled": false, "timeout": 60},
@@ -13,8 +14,10 @@
   "textureflow_warm": {"enabled": true, "timeout": 120},
   "kling_v25_image_to_video": {"enabled": true, "timeout": 420},
   "kling_v3_image_to_video": {"enabled": false, "timeout": 420},
-  "nano_banana_pro": {"enabled": true, "timeout": 180},
+  "nano_banana": {"enabled": true, "timeout": 180},
   "simulate_view": {"enabled": true, "timeout": 300},
+  "view_media": {"enabled": true, "timeout": 60},
+  "concat_videos": {"enabled": true, "timeout": 300},
   "capture_camera_snapshot": {"enabled": false, "timeout": 30},
   "get_scene_context": {"enabled": true, "timeout": 60},
   "upsert_binding": {"enabled": true, "timeout": 30},

@@ -1,147 +1,152 @@
-"""FastMCP server definition for WZRD."""
+"""FastMCP server composition root for WZRD (FastMCP 4 / MCP SDK 2.x).
+
+At import time:
+
+1. Load `tools_config.json` — the operator gate: per-tool `{enabled, timeout}`.
+2. Build the `FastMCP` instance. Its `instructions` are the always-on context:
+   the physics of additive projection, the local-first file contract, and the
+   one-line skills index. Everything deeper (workflows, prompt formulas, model
+   craft) lives in skills and is loaded on demand — see `skill_catalog.py`.
+3. Import every tool module. Each registers its tools through `tool()` below,
+   the one registration path: name = function name, timeout from the config,
+   MCP tool annotations, text-only results, logging + error wrapping.
+4. Remove the tools the config disables, and refuse to boot if one survives.
+"""
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from fastmcp import FastMCP
+from fastmcp.tools import Tool
+from mcp.types import ToolAnnotations
+
+from . import skill_catalog
+from ._log import _emit, logged_tool
+from ._text_result import jsonify_result
 
 # ---------------------------------------------------------------------------
-# Tool activation config
+# tools_config.json — the single source of per-tool toggles + timeouts.
+# A registered tool missing from it runs enabled with the default timeout,
+# and says so on stderr at boot.
 # ---------------------------------------------------------------------------
 _CONFIG_PATH = Path(__file__).parent / "tools_config.json"
 _DEFAULT_TIMEOUT = 120  # seconds
 
-_DEFAULT_TOOLS = {
-    "set_project": {"enabled": True, "timeout": 30},
-    "subtract_background_frame": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "subtract_background_video": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "detect_projection_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "align_images": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "darken_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "prepare_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "extract_color_regions": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "reproject_video": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    # Renders on our own Modal app `wzrd-textureflow` (env `wzrd`) — see
-    # docs/reference/textureflow.md.
-    "texture_flow": {"enabled": True, "timeout": 1500},
-    "textureflow_warm": {"enabled": True, "timeout": 120},
-    "kling_v3_image_to_video": {"enabled": True, "timeout": 600},
-    "nano_banana_pro": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    "simulate_view": {"enabled": True, "timeout": 300},
-    "capture_camera_snapshot": {"enabled": True, "timeout": 30},
-    # §5.10 engine authoring tools — localhost-only (the engine WS binds
-    # 127.0.0.1:9123), so they default OFF; the local tools_config.json
-    # flips them on. The Modal image also never installs `websockets`, so a
-    # cloud deployment cannot carry them regardless of config.
-    "get_scene_context": {"enabled": False, "timeout": 60},
-    "upsert_binding": {"enabled": False, "timeout": 30},
-    "remove_binding": {"enabled": False, "timeout": 30},
-    "upsert_effect": {"enabled": False, "timeout": 30},
-    "remove_effect": {"enabled": False, "timeout": 30},
-    "set_groups": {"enabled": False, "timeout": 30},
-    "set_labels": {"enabled": False, "timeout": 30},
-    "set_scene": {"enabled": False, "timeout": 30},
-    "validate_wgsl": {"enabled": False, "timeout": 30},
-    "get_preview": {"enabled": False, "timeout": 30},
-}
-
-
-def _load_tool_config() -> dict:
-    """Load tool config. Supports both old (bool) and new (dict) formats."""
-    merged = {k: dict(v) for k, v in _DEFAULT_TOOLS.items()}
-    if _CONFIG_PATH.exists():
-        with open(_CONFIG_PATH) as f:
-            raw = json.load(f)
-        for name, value in raw.items():
-            if isinstance(value, bool):
-                # Legacy format: bare bool → convert
-                merged.setdefault(name, {"enabled": True, "timeout": _DEFAULT_TIMEOUT})
-                merged[name]["enabled"] = value
-            elif isinstance(value, dict):
-                merged.setdefault(name, {"enabled": True, "timeout": _DEFAULT_TIMEOUT})
-                merged[name].update(value)
-    return merged
-
-
-TOOL_CONFIG = _load_tool_config()
+TOOL_CONFIG: dict[str, dict] = json.loads(_CONFIG_PATH.read_text()) if _CONFIG_PATH.exists() else {}
 
 
 def get_timeout(tool_name: str) -> float:
-    """Get the configured timeout (seconds) for a tool."""
     cfg = TOOL_CONFIG.get(tool_name)
     if cfg is None:
-        print(f"\033[33m⚠ WZRD: tool '{tool_name}' not found in tools_config.json — using default timeout ({_DEFAULT_TIMEOUT}s)\033[0m")
+        _emit(f"\033[33m⚠ WZRD: tool '{tool_name}' has no tools_config.json entry — "
+              f"enabled, default timeout {_DEFAULT_TIMEOUT}s\033[0m")
         return float(_DEFAULT_TIMEOUT)
     return float(cfg.get("timeout", _DEFAULT_TIMEOUT))
 
-# ---------------------------------------------------------------------------
-# Server instance
-# ---------------------------------------------------------------------------
-mcp = FastMCP(
-    "WZRD",
-    instructions=(
-        "WZRD is a VJ projection-mapping toolkit. It spans two areas — load the\n"
-        "tools for whichever the task needs; tool names are self-describing.\n\n"
-        "1) OFFLINE CONTENT PIPELINE — prepare surfaces and generate/segment the\n"
-        "content that becomes a layer pack. Load these when the task is about\n"
-        "producing assets from photos or prompts (not driving the live engine).\n"
-        "Everything is LOCAL: call set_project FIRST to pick the folder this\n"
-        "session writes into; every tool then returns absolute local paths (and\n"
-        "accepts them as inputs), so results are chained path-to-path and land\n"
-        "next to the scene the engine loads.\n"
-        "- prepare_surface / extract_color_regions / build_layerpack — surface prep,\n"
-        "  color-region segmentation (islands), and authoring the layer pack.\n"
-        "- subtract_background_video / reproject_video / simulate_view — extract\n"
-        "  moving content, reposition island regions, preview additive projection.\n"
-        "- kling_v25_image_to_video (5/10s image→video via FAL), nano_banana_pro\n"
-        "  (text→image + multi-reference edit via FAL). Remote results download\n"
-        "  into the project; local paths given as inputs are uploaded for you.\n"
-        "Typical flow: set_project → prepare_surface → generate content (e.g.\n"
-        "nano_banana_pro → kling_v25_image_to_video) → subtract_background_video →\n"
-        "(optionally extract_color_regions → reproject_video) → build_layerpack.\n\n"
-        "2) LIVE ENGINE AUTHORING — drive the realtime render-core over its WS\n"
-        "(ws://127.0.0.1:9123). Load these when the operator wants to change what's\n"
-        "rendering NOW (bindings, WGSL effects, layer labels/groups). ALWAYS call\n"
-        "get_scene_context FIRST — it reflects the human's live UI edits and tells\n"
-        "you what exists before you mutate:\n"
-        "- get_scene_context / get_preview — read live state; grab a design-composite frame.\n"
-        "- upsert_binding / remove_binding — add/replace/remove one binding (granular,\n"
-        "  CAS-guarded). set_scene only for initial authoring or a full structural rewrite.\n"
-        "- upsert_effect / remove_effect / validate_wgsl — author project-local WGSL\n"
-        "  effects (naga-validated, pre-flight probed; validate_wgsl is a cheap dry run).\n"
-        "- set_labels / set_groups — name layers and define groups so later commands\n"
-        "  can target the operator's surface-language ('the trunk', group 'canopy').\n"
-        "Writes target the DESIGN leg only; promoting design→live is a human UI act.\n"
-        "Requires the local `.[engine]` extra (websockets); absent on Modal.\n\n"
-        "All image/video inputs accept local file paths or URLs.\n"
-        "All outputs include the produced file's local path and an info dict."
-    ),
-)
 
-# Import tools module to register all @mcp.tool() decorated functions.
-# This must happen after `mcp` is defined since tools.py imports `mcp` from here.
+# ---------------------------------------------------------------------------
+# Server instance. Instructions = level 1 of progressive disclosure: short,
+# always loaded, and pointing at the skills for everything else.
+# ---------------------------------------------------------------------------
+_INSTRUCTIONS = f"""\
+WZRD turns physical surfaces (buildings, rocks, trees, walls, stages) into animated light: \
+additive projection mapping, where only what changes gets projected and the rest stays dark \
+and merges with reality.
+
+Physics that governs every decision:
+- A projector only ADDS light onto a (dark) surface. Black output = no light = the real surface shows.
+- Content must be bright and luminous to read; dark subjects vanish. Light spill onto nearby \
+surface features sells the illusion.
+- Areas that reflect nothing (sky, glass, voids, steep angles) stay dark whatever you send there.
+- The real surface never moves: generated media must keep the background pixel-static (no camera \
+motion, no global flicker), or background subtraction lights up the whole frame.
+
+Files are LOCAL: call set_project first; every tool writes into that project folder and returns \
+absolute paths, which chain straight into the next tool. Inputs accept local paths or URLs. \
+Look at what you made (view_media) before presenting it; don't celebrate first results, let the \
+user judge. Run at most 6 generation calls in parallel.
+
+Skills hold the workflows, prompt formulas and model craft. Before any multi-step job or any \
+generation prompt, load the matching skill with load_skill(name) (also readable as the MCP \
+resource skill://<name>/SKILL.md):
+{skill_catalog.index_lines()}"""
+
+mcp = FastMCP("WZRD", instructions=_INSTRUCTIONS, version="0.3.0")
+
+
+# ---------------------------------------------------------------------------
+# The one tool-registration path.
+# ---------------------------------------------------------------------------
+def tool(
+    *,
+    title: str,
+    tags: set[str],
+    read_only: bool = False,
+    destructive: bool = False,
+    idempotent: bool = False,
+    open_world: bool = False,
+):
+    """Register an async tool function with WZRD's standard stack.
+
+    `@mcp.tool(output_schema=None)` → `jsonify_result` (one JSON text block,
+    never text + structuredContent) → `logged_tool` (logging, ToolError
+    wrapping, request timing) → body. The annotations are MCP's behaviour
+    hints: `open_world` = calls a paid/remote service, `destructive` =
+    overwrites or deletes user-visible state, `read_only` = no side effects.
+    """
+
+    def deco(fn):
+        return mcp.tool(
+            name=fn.__name__,
+            title=title,
+            tags=tags,
+            annotations=ToolAnnotations(
+                title=title,
+                read_only_hint=read_only,
+                destructive_hint=destructive,
+                idempotent_hint=idempotent,
+                open_world_hint=open_world,
+            ),
+            output_schema=None,
+            timeout=get_timeout(fn.__name__),
+        )(jsonify_result(logged_tool(fn)))
+
+    return deco
+
+
+# Tool modules register via `tool()` on import; they need `mcp`/`tool` above.
 from . import project_tools as _project_tools  # noqa: E402, F401
+from . import skill_tools as _skill_tools  # noqa: E402, F401
 from . import tools as _tools  # noqa: E402, F401
+from . import media_tools as _media_tools  # noqa: E402, F401
 from . import fal_tools as _fal_tools  # noqa: E402, F401
+from . import google_tools as _google_tools  # noqa: E402, F401
 from . import local_tools as _local_tools  # noqa: E402, F401
-from . import engine_tools as _engine_tools  # noqa: E402, F401  (§5.10 — no-op without `websockets`)
+from . import engine_tools as _engine_tools  # noqa: E402, F401  (no-op without `websockets`)
+
 
 # ---------------------------------------------------------------------------
-# Filter out disabled tools based on config
+# Operator gate: drop disabled tools; a disabled tool that is still
+# registered afterwards is a boot failure, not a warning.
 # ---------------------------------------------------------------------------
+def _registered_tool_names() -> set[str]:
+    # Sync read of the provider's component dict (what its async `_list_tools`
+    # returns): this runs at import, possibly inside a running event loop.
+    return {c.name for c in mcp.local_provider._components.values() if isinstance(c, Tool)}
 
 
 def _apply_tool_config() -> None:
-    """Remove disabled tools from the server's tool registry."""
-    for name, cfg in TOOL_CONFIG.items():
-        if not cfg.get("enabled", True):
-            try:
-                mcp.local_provider.remove_tool(name)
-            except (KeyError, ValueError):
-                pass
+    disabled = {name for name, cfg in TOOL_CONFIG.items() if not cfg.get("enabled", True)}
+    for name in disabled:
+        try:
+            mcp.local_provider.remove_tool(name)
+        except (KeyError, ValueError, LookupError):
+            pass  # not registered (e.g. engine tools without `websockets`)
+    alive = disabled & _registered_tool_names()
+    if alive:
+        raise RuntimeError(f"tools_config.json disables {sorted(alive)} but they are still registered")
 
 
 _apply_tool_config()

@@ -186,6 +186,44 @@ def test_prepare_surface_full():
     assert os.path.isfile(os.path.join(out_dir, "output.jpg"))
 
 
+def test_concat():
+    """Two segments → one clip; boundary + loop frames dropped."""
+    _require(TEST_VIDEO)
+    import cv2
+    from wzrd.concat import concat_videos
+    out_dir = _result_dir("concat")
+    n = int(cv2.VideoCapture(TEST_VIDEO).get(cv2.CAP_PROP_FRAME_COUNT))
+    info = concat_videos([TEST_VIDEO] * 2, os.path.join(out_dir, "story.mp4"), seamless_loop=True)
+    assert info["frames"] == 2 * n - 1 - 1, info
+    assert os.path.isfile(os.path.join(out_dir, "story.mp4"))
+
+
+def test_mcp():
+    """The MCP server boots, serves skills three ways, and ships text-only results."""
+    import asyncio
+    from fastmcp import Client
+    from wzrd_mcp import skill_catalog
+    from wzrd_mcp.server import mcp
+
+    async def run():
+        async with Client(mcp) as c:
+            tools = {t.name: t for t in await c.list_tools()}
+            assert "load_skill" in tools and "view_media" in tools
+            assert all(t.output_schema is None for t in tools.values()), "a tool advertises an output schema"
+            for name in skill_catalog.catalog():
+                assert name in mcp.instructions, f"skill {name} missing from the instructions index"
+                r = await c.call_tool("load_skill", {"name": name})
+                assert len(r.content) == 1 and r.structured_content is None
+                assert (await c.read_resource(f"skill://{name}/SKILL.md"))[0].text.startswith("---")
+            workflows = [s.name for s in skill_catalog.catalog().values() if s.kind == "workflow"]
+            prompts = {p.name for p in await c.list_prompts()}
+            assert prompts == {w.replace("-", "_") for w in workflows}, prompts
+            r = await c.call_tool("set_project", {})
+            assert len(r.content) == 1 and r.content[0].text.startswith("{")
+
+    asyncio.run(run())
+
+
 # ── Test registry ───────────────────────────────────────────────────────────
 
 TESTS = {
@@ -198,6 +236,8 @@ TESTS = {
     "islands": test_islands,
     "layerpack": test_layerpack,
     "reproject": test_reproject,
+    "concat": test_concat,
+    "mcp": test_mcp,
 }
 
 

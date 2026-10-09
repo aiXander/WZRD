@@ -1,32 +1,36 @@
 """MCP tool wrappers that bridge MCP ↔ wzrd functions.
 
-Each tool handles: resolve inputs (URL/path→local) → call wzrd → write outputs
-into the active project folder (see `project.py`) and return local paths.
-Inputs still accept URLs; outputs never leave this machine.
+Each tool: resolve inputs (URL/path → local) → call wzrd → write outputs into
+the active project folder (see `project.py`) → return local paths. Logging,
+error wrapping and the text-only result come from `server.tool()`.
+
+Descriptions carry the contract (arguments, ranges, traps); the craft — which
+tool when, recipes, prompt formulas — lives in the skills (`skills/`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import time
 from pathlib import Path
-from typing import Optional
+from shutil import copyfile
+from tempfile import mkdtemp
+from typing import Annotated, Any, Optional
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
+from pydantic import Field
 
 from . import project
+from ._log import log_progress
 from .file_io import resolve_input_async
-from ._log import log_call, log_progress, log_done, log_error, logged_tool
-from .server import mcp, get_timeout
+from .server import tool
 
 
 # ---------------------------------------------------------------------------
-# Tool 1: subtract_background_frame
+# Background subtraction
 # ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("subtract_background_frame"))
-@logged_tool
+@tool(title="Subtract background (image)", tags={"content"})
 async def subtract_background_frame(
     generated_image: str,
     background_image: str,
@@ -36,62 +40,35 @@ async def subtract_background_frame(
     blur_radius: float = 0.004,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Remove static projection surface background from a generated image, extracting the foreground subject for additive projection mapping using luminance-based differences.
+    """Keep only what a generated image ADDED on top of the static surface photo, on black — the projector-ready still.
 
     Args:
-        generated_image: URL or path to the generated image with subject.
-        background_image: URL or path to the background reference (no subject).
-        threshold: Luminance difference cutoff (0-255). Higher = less sensitive. Range 5-30.
+        generated_image: Path or URL of the generated image (surface + subject).
+        background_image: Path or URL of the bare surface it was generated on.
+        threshold: Luminance difference cutoff (0-255, useful 5-30). Higher = less sensitive.
         ramp: Soft transition width above threshold. Higher = softer edges.
         gamma: Gamma correction. Values < 1.0 brighten the output.
         blur_radius: Mask feathering as fraction of image size.
     """
-    _name = "subtract_background_frame"
-    t0 = time.time()
-    try:
-        from wzrd.subtract_frame import subtract_background_file
+    from wzrd.subtract_frame import subtract_background_file
 
-        log_progress(_name, "Resolving inputs...")
-        gen_path, bg_path = await asyncio.gather(
-            resolve_input_async(generated_image, suffix=".png"),
-            resolve_input_async(background_image, suffix=".png"),
-        )
-        out_path = project.output_path(_name, ".webp", kind=project.GENERATED)
-
-        log_progress(_name, "Running background subtraction...")
-        _creature_img, info = await asyncio.to_thread(
-            subtract_background_file,
-            generated_path=gen_path,
-            background_path=bg_path,
-            output_path=out_path,
-            threshold=threshold,
-            ramp=ramp,
-            gamma=gamma,
-            blur_radius=blur_radius,
-        )
-
-        result = {
-            "creature_image": out_path,
-            "info": {
-                "mask_coverage": info.get("mask_coverage"),
-                "creature_max_brightness": info.get("creature_max_brightness"),
-                "creature_mean_brightness": info.get("creature_mean_brightness"),
-            },
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    gen_path, bg_path = await asyncio.gather(
+        resolve_input_async(generated_image, suffix=".png"),
+        resolve_input_async(background_image, suffix=".png"),
+    )
+    out_path = project.output_path("subtract_background_frame", ".webp", kind=project.GENERATED)
+    _img, info = await asyncio.to_thread(
+        subtract_background_file,
+        generated_path=gen_path, background_path=bg_path, output_path=out_path,
+        threshold=threshold, ramp=ramp, gamma=gamma, blur_radius=blur_radius,
+    )
+    return {
+        "creature_image": out_path,
+        "info": {k: info.get(k) for k in ("mask_coverage", "creature_max_brightness", "creature_mean_brightness")},
+    }
 
 
-# ---------------------------------------------------------------------------
-# Tool 2: subtract_background_video
-# ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("subtract_background_video"))
-@logged_tool
+@tool(title="Subtract background (video)", tags={"content"})
 async def subtract_background_video(
     video: str,
     background_image: str,
@@ -103,68 +80,45 @@ async def subtract_background_video(
     crf: int = 23,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Remove background from an entire video frame-by-frame for projection mapping content.
+    """Turn a generated video of the surface into projector output: per frame, keep only what differs from the static surface photo; everything else goes black.
 
-    This is a slower operation. Processing time scales with video length and resolution.
+    Camera drift or global flicker in the source shows up here as noise across
+    the whole frame — inspect the result (view_media) before using it.
+    Slow-ish: scales with length and resolution.
 
     Args:
-        video: URL or path to the input video.
-        background_image: URL or path to the background reference image.
-        threshold: Luminance difference cutoff (0-255).
+        video: Path or URL of the generated video (surface + animation).
+        background_image: Path or URL of the bare surface (the video's start frame or the surface photo).
+        threshold: Luminance difference cutoff (0-255). Raise it if the result is noisy.
         gamma: Gamma correction. Values < 1.0 brighten output.
         ramp: Soft transition width above threshold.
         blur_radius: Mask feathering as fraction of image size.
-        codec: Video codec (e.g. libx264, h264_videotoolbox).
+        codec: ffmpeg video codec (libx264 everywhere; h264_videotoolbox on a Mac is faster).
         crf: Video quality — lower is better (0-51).
     """
-    _name = "subtract_background_video"
-    t0 = time.time()
-    try:
-        from wzrd.subtract_video import subtract_background_video as _subtract_bg_video
+    from wzrd.subtract_video import subtract_background_video as _subtract_bg_video
 
-        log_progress(_name, "Resolving inputs...")
-        vid_path, bg_path = await asyncio.gather(
-            resolve_input_async(video, suffix=".mp4"),
-            resolve_input_async(background_image, suffix=".png"),
-        )
-        out_path = project.output_path(_name, ".mp4", kind=project.VIDEO)
-
-        log_progress(_name, "Processing video frames...")
-        info = await asyncio.to_thread(
-            _subtract_bg_video,
-            video_path=vid_path,
-            background_path=bg_path,
-            output_path=out_path,
-            threshold=threshold,
-            ramp=ramp,
-            gamma=gamma,
-            blur_radius=blur_radius,
-            codec=codec,
-            crf=crf,
-        )
-
-        result = {
-            "output_video": out_path,
-            "info": {
-                "frames_processed": info.get("frames_processed"),
-                "fps": info.get("fps"),
-                "video_size": info.get("video_size"),
-            },
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    vid_path, bg_path = await asyncio.gather(
+        resolve_input_async(video, suffix=".mp4"),
+        resolve_input_async(background_image, suffix=".png"),
+    )
+    out_path = project.output_path("subtract_background_video", ".mp4", kind=project.VIDEO)
+    log_progress("subtract_background_video", "Processing video frames...")
+    info = await asyncio.to_thread(
+        _subtract_bg_video,
+        video_path=vid_path, background_path=bg_path, output_path=out_path,
+        threshold=threshold, ramp=ramp, gamma=gamma, blur_radius=blur_radius, codec=codec, crf=crf,
+    )
+    return {
+        "output_video": out_path,
+        "info": {k: info.get(k) for k in ("frames_processed", "fps", "video_size")},
+    }
 
 
 # ---------------------------------------------------------------------------
-# Tool 3: detect_projection_surface
+# Surface preparation
 # ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("detect_projection_surface"))
-@logged_tool
+@tool(title="Detect projection surface", tags={"surface"})
 async def detect_projection_surface(
     image: str,
     margin: float = 0.01,
@@ -172,118 +126,61 @@ async def detect_projection_surface(
     output_resolution: int = 1920,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Detect and extract a projection surface from a night-time photo of projector light on a projection surface.
-
-    Finds the illuminated quadrilateral (screen/wall) and returns a rectified, perspective-corrected crop.
+    """Find the lit quadrilateral in a night photo of projector light on a surface and return a perspective-corrected crop.
 
     Args:
-        image: URL or path to photo containing the projection surface.
-        margin: Inward shrinkage fraction (0.0–0.1) to avoid edge artifacts.
+        image: Path or URL of the photo containing the projection surface.
+        margin: Inward shrinkage fraction (0.0-0.1) to avoid edge artifacts.
         target_aspect_ratio: Force output aspect ratio, e.g. "16:9" or "4:3".
-        output_resolution: Output width in pixels. None keeps original resolution.
+        output_resolution: Output width in pixels.
     """
-    _name = "detect_projection_surface"
-    t0 = time.time()
-    try:
-        from wzrd.detect import detect_projection_area
+    from wzrd.detect import detect_projection_area
 
-        log_progress(_name, "Resolving input...")
-        img_path = await resolve_input_async(image, suffix=".png")
-        out_path = project.output_path(_name, ".webp", kind=project.SURFACES)
-
-        log_progress(_name, "Detecting projection surface...")
-        _cropped, info = await asyncio.to_thread(
-            detect_projection_area,
-            image_path=img_path,
-            output_path=out_path,
-            margin=margin,
-            target_aspect_ratio=target_aspect_ratio,
-            output_resolution=output_resolution,
-        )
-
-        result = {
-            "cropped_image": out_path,
-            "info": {
-                "corners": info.get("corners"),
-                "original_size": info.get("original_size"),
-                "cropped_size": info.get("cropped_size"),
-                "margin": info.get("margin"),
-                "target_aspect_ratio": info.get("target_aspect_ratio"),
-            },
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    img_path = await resolve_input_async(image, suffix=".png")
+    out_path = project.output_path("detect_projection_surface", ".webp", kind=project.SURFACES)
+    _cropped, info = await asyncio.to_thread(
+        detect_projection_area,
+        image_path=img_path, output_path=out_path, margin=margin,
+        target_aspect_ratio=target_aspect_ratio, output_resolution=output_resolution,
+    )
+    return {
+        "cropped_image": out_path,
+        "info": {k: info.get(k) for k in ("corners", "original_size", "cropped_size", "margin", "target_aspect_ratio")},
+    }
 
 
-# ---------------------------------------------------------------------------
-# Tool 4: align_images
-# ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("align_images"))
-@logged_tool
+@tool(title="Align images", tags={"surface"})
 async def align_images(
     source_image: str,
     target_image: str,
     max_features: int = 2500,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Align a source image to match a target image's perspective.
-
-    Uses SIFT/AKAZE feature matching with template matching fallback and optional ECC sub-pixel refinement.
+    """Warp a source image onto a target image's perspective (SIFT/AKAZE + RANSAC, template-matching fallback, ECC refinement).
 
     Args:
-        source_image: URL or path to the image to warp.
-        target_image: URL or path to the reference image to align to.
+        source_image: Path or URL of the image to warp.
+        target_image: Path or URL of the reference image to align to.
         max_features: SIFT feature detection limit.
     """
-    _name = "align_images"
-    t0 = time.time()
-    try:
-        from wzrd.align import align_images_file
+    from wzrd.align import align_images_file
 
-        log_progress(_name, "Resolving inputs...")
-        src_path, tgt_path = await asyncio.gather(
-            resolve_input_async(source_image, suffix=".png"),
-            resolve_input_async(target_image, suffix=".png"),
-        )
-        out_path = project.output_path(_name, ".webp", kind=project.SURFACES)
-
-        log_progress(_name, "Running feature matching & alignment...")
-        _warped, info = await asyncio.to_thread(
-            align_images_file,
-            source_path=src_path,
-            target_path=tgt_path,
-            output_path=out_path,
-            max_features=max_features,
-        )
-
-        result = {
-            "aligned_image": out_path,
-            "info": {
-                "confidence": info.get("confidence"),
-                "method": info.get("method"),
-                "num_inliers": info.get("num_inliers"),
-                "num_matches": info.get("num_matches"),
-            },
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    src_path, tgt_path = await asyncio.gather(
+        resolve_input_async(source_image, suffix=".png"),
+        resolve_input_async(target_image, suffix=".png"),
+    )
+    out_path = project.output_path("align_images", ".webp", kind=project.SURFACES)
+    _warped, info = await asyncio.to_thread(
+        align_images_file,
+        source_path=src_path, target_path=tgt_path, output_path=out_path, max_features=max_features,
+    )
+    return {
+        "aligned_image": out_path,
+        "info": {k: info.get(k) for k in ("confidence", "method", "num_inliers", "num_matches")},
+    }
 
 
-# ---------------------------------------------------------------------------
-# Tool 5: darken_surface
-# ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("darken_surface"))
-@logged_tool
+@tool(title="Darken surface", tags={"surface"})
 async def darken_surface(
     image: str,
     max_brightness: float = 0.25,
@@ -293,141 +190,87 @@ async def darken_surface(
     alignment_aids: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Darken a surface photo for additive projection mapping.
-
-    Uses gradient-weighted histogram equalization to preserve detail while reducing brightness
-    so that the projector output appears natural on the surface.
+    """Darken a surface photo (gradient-weighted histogram equalization in CIELAB) so it looks like the surface at night, detail kept — the base every generation is drawn on.
 
     Args:
-        image: URL or path to the surface image.
-        max_brightness: Luminance budget ceiling (0.0–1.0). Lower = darker output.
+        image: Path or URL of the surface image.
+        max_brightness: Luminance ceiling (0.0-1.0). Lower = darker output.
         detail_boost: Detail amplification factor.
         target_aspect: Output aspect ratio, e.g. "16:9".
         base_resolution: Output width in pixels.
-        alignment_aids: Whether to generate an alignment aid video to be used for aligning the projector with the surface (only needed once per VJ session).
+        alignment_aids: Also render an alignment-aid video for lining the projector up with the surface (once per session).
     """
-    _name = "darken_surface"
-    t0 = time.time()
-    try:
-        from wzrd.darken import darken_image_file
+    from wzrd.darken import darken_image_file
 
-        log_progress(_name, "Resolving input...")
-        img_path = await resolve_input_async(image, suffix=".png")
-        # Alignment aids are written next to `out_path` by the library, so a
-        # project-local output path puts them in the project too.
-        out_path = project.output_path(_name, ".webp", kind=project.SURFACES)
-
-        log_progress(_name, "Running darken pipeline...")
-        result = await asyncio.to_thread(
-            darken_image_file,
-            input_path=img_path,
-            output_path=out_path,
-            max_brightness=max_brightness,
-            detail_boost=detail_boost,
-            target_aspect=target_aspect,
-            base_resolution=base_resolution,
-            alignment_aids=alignment_aids,
-        )
-
-        pil_image = result["image"]
-        await asyncio.to_thread(pil_image.save, out_path, quality=90)
-
-        response: dict = {"darkened_image": out_path}
-        if result.get("video"):
-            response["alignment_video"] = str(result["video"])
-
-        log_done(_name, t0, response)
-        return response
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    img_path = await resolve_input_async(image, suffix=".png")
+    # Alignment aids are written next to `out_path` by the library.
+    out_path = project.output_path("darken_surface", ".webp", kind=project.SURFACES)
+    result = await asyncio.to_thread(
+        darken_image_file,
+        input_path=img_path, output_path=out_path, max_brightness=max_brightness,
+        detail_boost=detail_boost, target_aspect=target_aspect,
+        base_resolution=base_resolution, alignment_aids=alignment_aids,
+    )
+    await asyncio.to_thread(result["image"].save, out_path, quality=90)
+    response: dict = {"darkened_image": out_path}
+    if result.get("video"):
+        response["alignment_video"] = str(result["video"])
+    return response
 
 
-# ---------------------------------------------------------------------------
-# Tool 6: prepare_surface
-# ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("prepare_surface"))
-@logged_tool
+@tool(title="Prepare surface", tags={"surface"})
 async def prepare_surface(
     night_image: str,
-    day_image: str = "",
+    day_image: Optional[str] = None,
     target_aspect: str = "16:9",
     max_brightness: float = 0.20,
     margin: float = 0.01,
     alignment_aids: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Full pipeline to prepare a projection surface from photos.
+    """Photos → the dark, projector-aligned surface image every later step builds on.
 
-    If both day and night images are provided: detect surface → align → darken.
-    If only night image: darken only.
+    With a day photo: detect the lit area in the night photo → align the day
+    photo to it → darken. Night photo only: darken only.
 
     Args:
-        night_image: URL or path to nighttime photo with projector on.
-        day_image: URL or path to daytime photo of the same surface (triggers full pipeline).
+        night_image: Path or URL of the night photo with the projector on (white frame).
+        day_image: Path or URL of a daytime photo of the same surface (enables detect + align).
         target_aspect: Output aspect ratio.
-        max_brightness: Luminance ceiling (0.0–1.0).
+        max_brightness: Luminance ceiling (0.0-1.0).
         margin: Detection margin for surface extraction.
-        alignment_aids: Whether to generate an alignment aid video to be used for aligning the projector with the surface (only needed once per VJ session).
+        alignment_aids: Also render an alignment-aid video for lining the projector up with the surface (once per session).
     """
-    _name = "prepare_surface"
-    t0 = time.time()
-    try:
-        from wzrd.prepare_surface import prepare_surface as _prepare_surface
+    from wzrd.prepare_surface import prepare_surface as _prepare_surface
 
-        log_progress(_name, "Resolving inputs...")
-        coros = [resolve_input_async(night_image, suffix=".png")]
-        if day_image != "":
-            coros.append(resolve_input_async(day_image, suffix=".png"))
-        resolved = await asyncio.gather(*coros)
-        night_path = resolved[0]
-        day_path = resolved[1] if len(resolved) > 1 else None
-        out_path = project.output_path(_name, ".webp", kind=project.SURFACES)
-
-        if day_path:
-            log_progress(_name, "Running full pipeline: detect → align → darken...")
-        else:
-            log_progress(_name, "Running darken-only pipeline...")
-
-        result = await asyncio.to_thread(
-            _prepare_surface,
-            night_image_path=night_path,
-            day_image_path=day_path,
-            output_path=out_path,
-            margin=margin,
-            max_brightness=max_brightness,
-            target_aspect=target_aspect,
-            alignment_aids=alignment_aids,
-        )
-
-        pil_image = result["image"]
-        await asyncio.to_thread(pil_image.save, out_path, quality=90)
-
-        response: dict = {"surface_image": out_path}
-        if result.get("video"):
-            response["alignment_video"] = str(result["video"])
-
-        log_done(_name, t0, response)
-        return response
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    coros = [resolve_input_async(night_image, suffix=".png")]
+    if day_image:
+        coros.append(resolve_input_async(day_image, suffix=".png"))
+    resolved = await asyncio.gather(*coros)
+    out_path = project.output_path("prepare_surface", ".webp", kind=project.SURFACES)
+    log_progress("prepare_surface", "detect → align → darken" if day_image else "darken only")
+    result = await asyncio.to_thread(
+        _prepare_surface,
+        night_image_path=resolved[0], day_image_path=resolved[1] if day_image else None,
+        output_path=out_path, margin=margin, max_brightness=max_brightness,
+        target_aspect=target_aspect, alignment_aids=alignment_aids,
+    )
+    await asyncio.to_thread(result["image"].save, out_path, quality=90)
+    response: dict = {"surface_image": out_path}
+    if result.get("video"):
+        response["alignment_video"] = str(result["video"])
+    return response
 
 
 # ---------------------------------------------------------------------------
-# Tool 7: extract_color_regions
+# Regions (islands)
 # ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("extract_color_regions"))
-@logged_tool
+@tool(title="Extract color regions", tags={"regions"})
 async def extract_color_regions(
     image: str,
     max_colors: int = 8,
     min_area_fraction: float = 0.01,
-    surface_image: str = "",
+    surface_image: Optional[str] = None,
     output_min_size: int = 512,
     delta_e_threshold: float = 5.0,
     background_threshold: float = 15.0,
@@ -435,90 +278,59 @@ async def extract_color_regions(
     standardize_output_aspect: bool = True,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Segment an image into color-based regions (islands) using greedy clustering in CIELAB color space.
+    """Split a flat-color segmentation map into region masks ("islands"), each with its bounding box on the canvas.
 
-    Automatically discovers the number of distinct colors. Useful for splitting a surface into zones for independent content projection.
+    Input is usually a solid-color segmentation map of the surface (black =
+    background). Each region's `source_box` is what reproject_video needs.
 
     Args:
-        image: URL or path to the input image.
-        max_colors: Upper cap on number of distinct colors to keep.
-        min_area_fraction: Minimum region size as fraction of total image area.
-        surface_image: Optional surface image to extract corresponding region crops from.
-        output_min_size: Minimum output dimension in pixels for each region crop.
-        delta_e_threshold: CIELAB deltaE threshold for merging similar colors. Lower = more sensitive to subtle differences. Default 15.0.
-        background_threshold: CIELAB deltaE from background below which pixels are treated as background. Default 15.0.
-        merge_same_color: If true, all disconnected blobs of the same color are combined into one region. Default true.
-        standardize_output_aspect: If true, pad output crops to the closest standard aspect ratio (1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9). Masks are padded with black; surface crops are extended from source pixels. Default true.
+        image: Path or URL of the segmentation map.
+        max_colors: Upper cap on distinct colors kept.
+        min_area_fraction: Minimum region size as fraction of the image.
+        surface_image: Optional surface image to also cut matching per-region surface crops from.
+        output_min_size: Minimum output dimension in pixels for each crop.
+        delta_e_threshold: CIELAB deltaE for merging similar colors. Lower = splits subtler differences.
+        background_threshold: CIELAB deltaE from the background below which pixels count as background.
+        merge_same_color: Combine disconnected blobs of the same color into one region.
+        standardize_output_aspect: Pad crops to the nearest standard aspect (1:1, 3:2, 4:3, 16:9, 21:9, …; masks pad black, surface crops extend from source pixels).
     """
-    _name = "extract_color_regions"
-    t0 = time.time()
-    try:
-        from wzrd.islands import extract_color_regions as _extract_color_regions
+    from wzrd.islands import extract_color_regions as _extract_color_regions
 
-        log_progress(_name, "Resolving inputs...")
-        coros = [resolve_input_async(image, suffix=".png")]
-        if surface_image != "":
-            coros.append(resolve_input_async(surface_image, suffix=".png"))
-        resolved = await asyncio.gather(*coros)
-        img_path = resolved[0]
-        surface_path = resolved[1] if len(resolved) > 1 else None
-        out_dir = project.output_dir(_name, kind=project.REGIONS)
-
-        log_progress(_name, "Running CIELAB color clustering...")
-        regions, output_dir = await asyncio.to_thread(
-            _extract_color_regions,
-            image=img_path,
-            output_dir=out_dir,
-            max_colors=max_colors,
-            min_area_fraction=min_area_fraction,
-            surface=surface_path,
-            output_min_size=output_min_size,
-            delta_e_threshold=delta_e_threshold,
-            background_threshold=background_threshold,
-            merge_same_color=merge_same_color,
-            standardize_output_aspect=standardize_output_aspect,
-        )
-
-        from pathlib import Path
-
-        out = Path(output_dir)
-
-        # Every region file already sits in the project's regions/<run>/ dir —
-        # just report where each one landed.
-        published_regions = []
-        for r in regions:
-            entry = {"source_box": r.get("source_box")}
-            if "standard_aspect" in r:
-                entry["aspect_ratio"] = r["standard_aspect"]
-            elif r.get("source_box"):
-                w, h = r["source_box"]["width"], r["source_box"]["height"]
-                entry["aspect_ratio"] = f"{w / h:.3f}"
-            if "crop_filename" in r:
-                entry["region_mask"] = str(out / r["crop_filename"])
-            if "surface_filename" in r:
-                entry["region_surface_image"] = str(out / r["surface_filename"])
-            published_regions.append(entry)
-
-        metadata_file = out / "islands.json"
-        result = {
-            "regions": published_regions,
-            "regions_dir": str(out),
-            "metadata_path": str(metadata_file) if metadata_file.exists() else None,
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    coros = [resolve_input_async(image, suffix=".png")]
+    if surface_image:
+        coros.append(resolve_input_async(surface_image, suffix=".png"))
+    resolved = await asyncio.gather(*coros)
+    out_dir = project.output_dir("extract_color_regions", kind=project.REGIONS)
+    regions, output_dir = await asyncio.to_thread(
+        _extract_color_regions,
+        image=resolved[0], output_dir=out_dir, max_colors=max_colors,
+        min_area_fraction=min_area_fraction, surface=resolved[1] if surface_image else None,
+        output_min_size=output_min_size, delta_e_threshold=delta_e_threshold,
+        background_threshold=background_threshold, merge_same_color=merge_same_color,
+        standardize_output_aspect=standardize_output_aspect,
+    )
+    out = Path(output_dir)
+    published = []
+    for r in regions:
+        entry: dict[str, Any] = {"source_box": r.get("source_box")}
+        if "standard_aspect" in r:
+            entry["aspect_ratio"] = r["standard_aspect"]
+        elif r.get("source_box"):
+            entry["aspect_ratio"] = f"{r['source_box']['width'] / r['source_box']['height']:.3f}"
+        if "crop_filename" in r:
+            entry["region_mask"] = str(out / r["crop_filename"])
+        if "surface_filename" in r:
+            entry["region_surface_image"] = str(out / r["surface_filename"])
+        published.append(entry)
+    metadata_file = out / "islands.json"
+    return {
+        "regions": published,
+        "regions_dir": str(out),
+        "metadata_path": str(metadata_file) if metadata_file.exists() else None,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Tool 8: reproject_video
-# ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("reproject_video"))
-@logged_tool
+@tool(title="Reproject region video", tags={"regions"})
 async def reproject_video(
     video: str,
     x: int,
@@ -531,71 +343,44 @@ async def reproject_video(
     crf: int = 23,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Place a processed video (typically a segmented section of a projection surface) back at its original position of the full projection canvas.
+    """Place a region ("island") video back at its position on the full projection canvas, black elsewhere.
 
-    Used to reposition generated island regions back into a full-frame projection output for additive compositing.
-    The x, y, width, height values come from the source_box returned by extract_color_regions for the specific region being reprojected.
+    x, y, width, height are the region's `source_box` from extract_color_regions.
 
     Args:
-        video: URL or path to the island video.
-        x: Island x-offset on canvas (from source_box).
-        y: Island y-offset on canvas (from source_box).
-        width: Island source width in pixels (from source_box).
-        height: Island source height in pixels (from source_box).
+        video: Path or URL of the island video.
+        x: source_box.x
+        y: source_box.y
+        width: source_box.width
+        height: source_box.height
         target_aspect: Canvas aspect ratio, e.g. "16:9".
         base_resolution: Canvas width in pixels.
-        codec: Video codec.
-        crf: Quality setting — lower is better (0-51).
+        codec: ffmpeg video codec.
+        crf: Quality — lower is better (0-51).
     """
-    _name = "reproject_video"
-    t0 = time.time()
-    try:
-        from wzrd.reproject import reproject_video_with_aspect
+    from wzrd.reproject import reproject_video_with_aspect
 
-        log_progress(_name, "Resolving inputs...")
-        vid_path = await resolve_input_async(video, suffix=".mp4")
-        out_path = project.output_path(_name, ".mp4", kind=project.VIDEO)
-
-        log_progress(_name, "Reprojecting video onto canvas...")
-        info = await asyncio.to_thread(
-            reproject_video_with_aspect,
-            video_path=vid_path,
-            island_metadata={"x": x, "y": y, "width": width, "height": height},
-            output_path=out_path,
-            target_aspect=target_aspect,
-            base_resolution=base_resolution,
-            crf=crf,
-            codec=codec,
-        )
-
-        result = {
-            "output_video": out_path,
-            "info": {
-                "frames_processed": info.get("frames_processed"),
-                "fps": info.get("fps"),
-                "canvas_size": info.get("canvas_size"),
-                "island_position": info.get("island_position"),
-            },
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    vid_path = await resolve_input_async(video, suffix=".mp4")
+    out_path = project.output_path("reproject_video", ".mp4", kind=project.VIDEO)
+    info = await asyncio.to_thread(
+        reproject_video_with_aspect,
+        video_path=vid_path, island_metadata={"x": x, "y": y, "width": width, "height": height},
+        output_path=out_path, target_aspect=target_aspect, base_resolution=base_resolution,
+        crf=crf, codec=codec,
+    )
+    return {
+        "output_video": out_path,
+        "info": {k: info.get(k) for k in ("frames_processed", "fps", "canvas_size", "island_position")},
+    }
 
 
 # ---------------------------------------------------------------------------
-# Tool 9: texture_flow
-#
-# Calls our own Modal deployment `wzrd-textureflow` (env `wzrd`, source in
+# TextureFlow — our own Modal app `wzrd-textureflow` (env `wzrd`, source in
 # deploy/textureflow/). Local files travel as bytes in `files`, URLs pass
-# through, and the returned mp4 bytes land in the project's generated/ folder.
+# through, the returned mp4 bytes land in the project's generated/ folder.
 # Only caller-set args are sent: the server owns the defaults (api.yaml) and
 # all validation. Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
-
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
 
 
@@ -626,8 +411,11 @@ def _tf_pack_media(args: dict) -> dict[str, bytes]:
     return files
 
 
-@mcp.tool(timeout=get_timeout("texture_flow"))
-@logged_tool
+def _tf_target() -> tuple[str, str]:
+    return os.getenv("TEXTUREFLOW_APP", "wzrd-textureflow"), os.getenv("WZRD_MODAL_ENV", "wzrd")
+
+
+@tool(title="TextureFlow animation", tags={"generate", "textureflow"}, open_world=True)
 async def texture_flow(
     images: list[str],
     n_seconds: Optional[float] = None,
@@ -652,286 +440,202 @@ async def texture_flow(
     output_codec: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Generate a smooth, morphing animation video from style images using the TextureFlow AI model (runs on WZRD's own Modal GPU endpoint).
+    """Render an abstract, morphing, seamlessly flowing animation from 1-6 style images (TextureFlow: SD1.5 + AnimateDiff + IP-Adapter + ControlNet, on WZRD's own Modal GPU).
 
-    TextureFlow creates trippy, artistic, morphing animations from 1-6 style images based on AnimateDiff, SDv15 and IP-adapter and controlnet.
-    Ideal for VJ loops, animated logos, abstract animations, and projection mapping content.
+    For textures, VJ loops, animated logos and per-region fills. It cannot tell
+    a story and takes no keyframes: style images drive textures and colors but
+    never appear verbatim. Load skill `textureflow` for recipes and settings.
 
-    The style images drive the textures, content, and colors of the output video, but style images will never appear in the generated video exactly as keyframes.
-    Scale video length proportionally with number of style images (~3s per image is a good rule of thumb).
-
-    Every media argument (images, control_input, diffusion_mask) takes a local file path or an http(s) URL.
-    Leave an argument out to get the server default (listed per arg below). Note the defaults render a full-HD upscaled
-    video (use_upscale and upscale_esrgan on), which takes ~6 min warm; set use_upscale=false AND upscale_esrgan=false for fast tests (~30 s at 384x384).
-    A cold GPU start adds about a minute.
-
-    Optional shape guidance (controlnet):
-    - Set use_controlnet1=true and provide a control_input image/video to add shape guidance.
-    - Great for embedding logo contours, projection surface lines, or driving animations with simple motion videos.
-    - Without control_input, TextureFlow often produces visually appealing results out-of-the-box.
-    - With control_input, results can be amazing but may require tuning (especially controlnet_strength1).
-
-    Example use cases:
-    - Abstract artistic animation from style image(s) (will deform input, great for smooth animated textures)
-    - Mixing multiple style images with various mapping modes for VJ content
-    - Logo animation: logo as control_input + texture images as style
-    - Motion-driven animation: simple motion video/GIF as control_input
-    - Animated QR codes: QR code as control_input with preprocessor1="none"
-    - Island videos: a region mask as diffusion_mask, no control_input (white = animated, black = stays black)
+    Omit an argument to get the server default. Defaults render full-HD
+    upscaled (~6 min warm); for tests set use_upscale=false AND
+    upscale_esrgan=false (~30 s at 384x384). A cold GPU adds ~1 min
+    (textureflow_warm before a show). Media args take a local path or URL.
 
     Args:
-        images: 1-6 style images (local paths or URLs) driving the content/textures/colors of the video. More images = more variety.
-        n_seconds: Video length in seconds (2.0-24.0, default 6). Scale with number of style images (~3s per image).
-        width: Video width in pixels (320-1280, step 32, default 640). High values may cause duplication artifacts and are very slow.
-        height: Video height in pixels (320-1280, step 32, default 640). High values may cause duplication artifacts and are very slow.
-        base_model: SD1.5 checkpoint. Options: "SD15/juggernaut_reborn.safetensors" (realistic, best default), "SD15/darkSushiMixMix_225D.safetensors" (more creative/abstract, softer, pastel colors), "SD15/protogenV22Anime_protogenV22.safetensors" (anime/cartoon, flat colors).
-        use_controlnet1: Enable controlnet shape guidance (default false). Requires control_input.
-        control_input: Local path or URL of an image/GIF/video for shape guidance. Used as controlnet input when use_controlnet1=true. Can be a logo, surface photo, motion video, or QR code. It is also the "shape input" in two places regardless of use_controlnet1: the img2img start when denoise < 1, and what shows in black diffusion_mask regions (see those args). Omitted = a black video.
-        diffusion_mask: Optional local path or URL of an image/video mask controlling which regions are affected by diffusion. White regions get animated; black regions keep the *shape input* untouched, i.e. they stay black only when no control_input is given (with a control_input, its own pixels show through there, even with use_controlnet1=false). Use this to generate island videos (omit control_input so the rest stays black). Can also be e.g. a shape-filling video. The mask edge is grown and blurred.
-        preprocessor1: Shape guidance type (only used when use_controlnet1=true). Options: "Scribble_XDoG_Preprocessor" (default; rough shape, good quality), "CannyEdgePreprocessor" (strong detailed edges), "DepthAnythingV2Preprocessor" (depth structure, ignores edges), "AnyLineArtPreprocessor_aux" (lineart), "OpenposePreprocessor" (human pose: extracts a body/hand/face stick-figure skeleton and the output follows that pose; needs a clearly visible person, ideally full-body; with no person the control signal is black, so shape guidance does nothing, no error), "none" (luminance/QR mode - maintains dark/bright regions). The server rejects anything else and lists the valid options.
-        controlnet_strength1: Shape guidance strength 0.0-1.0 (only when use_controlnet1=true, default 0.45). Subtle: 0.35-0.45, strong: 0.45-0.65. Too high can look bad.
-        denoise: AI strength on top of the shape input, 0.1-1.0 (default 1.0). Two different modes, not a smooth dial:
-            - 1.0 (default): fresh render from noise; the shape input only guides via controlnet.
-            - < 1.0: img2img that starts from control_input itself (fit to width/height), so its colors, darkness and layout carry over. This happens whenever control_input is set, even with use_controlnet1=false. Without a control_input the start is a black frame, so denoise < 1 gives a near-black video: never lower denoise without a control_input.
-            There is a big jump between 0.99 and 1.0. Below 1, the steps actually run are the last n_steps of int(n_steps / denoise), so the dial is coarse at low n_steps: at n_steps=4 every value in 0.81-0.99 renders identically, and finer control needs more steps.
-            Measured (n_steps=4): a flat black/white logo at 0.7 comes back almost unchanged; a photo at 0.7-0.95 is restyled progressively while its composition stays put. Use 0.7-0.9 to "AI-skin" a photo or projection surface; use 1.0 when the style images should dominate.
-        control_input_fit_strategy: How to resize shape input to target dimensions. "fill / crop" (default, recommended), "stretch" (distorts), "pad" (can cause artifacts).
-        map_shape_input_to_ip_masks: Advanced: use color clusters from shape input to spatially map style images. Only enable when shape input has flat single-color regions. Overrides mapping_mode.
-        mapping_mode: Motion pattern for style image mapping. Options: "concentric_circles_inwards", "concentric_circles_outwards" (default), "concentric_rectangles_inwards", "concentric_rectangles_outwards", "rotating_segments_clockwise", "rotating_segments_counter_clockwise" (avoid unless asked), "pushing_segments_clockwise", "pushing_segments_counter_clockwise", "vertical_stripes_left", "vertical_stripes_right", "horizontal_stripes_up" (good for demos), "horizontal_stripes_down".
-        n_steps: LCM denoising steps (4-14, default 8). Lower = faster/cheaper, higher = slightly better quality. Runtime scales linearly with n_steps.
-        motion_scale: Animation motion strength (0.7-1.4, default 1.1). 0.9 = subtle, 1.25 = more motion. Above 1.3 is rarely desirable.
-        use_upscale: HD upscaling second pass (default true). Set false for faster/cheaper experimentation, true for HD videos.
-        upscale_resolution: Max dimension for latent upscale (1024-1536, step 64, default 1280). Only used when use_upscale=true.
-        upscale_esrgan: ESRGAN postprocessing to full HD (1920 px on the long side) (default true). Great for sharp/realistic, less ideal for organic/stylistic. Runs even when use_upscale=false, so turn both off for fast tests.
-        seed: Random seed (0-2147483647). Omit for random; the seed actually used is returned as `seed`, so pass it back to reproduce a render.
-        output_codec: "h264" (default, plays everywhere) or "hevc10" (HEVC 10-bit, smaller/higher fidelity, not decodable everywhere). Applies to output_video and first_pass_video.
-
-    Returns:
-        Local paths of output_video, first_pass_video, control_signal_preview and mapping_motion_preview
-        (each present if the graph produced it), plus seed, params (every resolved arg), request_id and timings.
+        images: 1-6 style images driving content, textures and colors.
+        n_seconds: Length in seconds (2-24, default 6). ~3 s per style image.
+        width: Pixels (320-1280, step 32, default 640). High values are slow and can duplicate content.
+        height: Pixels (320-1280, step 32, default 640).
+        base_model: "SD15/juggernaut_reborn.safetensors" (realistic, default), "SD15/darkSushiMixMix_225D.safetensors" (creative, soft pastel), "SD15/protogenV22Anime_protogenV22.safetensors" (anime, flat colors).
+        use_controlnet1: Enable shape guidance from control_input (default false).
+        control_input: Image/GIF/video giving shape (logo, surface photo, motion clip, QR). Also the img2img start when denoise < 1, and what shows through black diffusion_mask areas — even with use_controlnet1=false.
+        diffusion_mask: Image/video mask: white = animated, black = keeps the shape input (stays black only when there is no control_input). Edge is grown and blurred. Use for region/island videos.
+        preprocessor1: With use_controlnet1: "Scribble_XDoG_Preprocessor" (default, rough shape), "CannyEdgePreprocessor" (strong edges), "DepthAnythingV2Preprocessor" (depth), "AnyLineArtPreprocessor_aux" (lineart), "OpenposePreprocessor" (needs a visible person, else no guidance), "none" (luminance/QR mode).
+        controlnet_strength1: 0.0-1.0, default 0.45. Subtle 0.35-0.45, strong 0.45-0.65; higher tends to look bad.
+        denoise: 0.1-1.0, default 1.0 (fresh render; shape only via controlnet). Below 1 = img2img from control_input, so its colors and layout carry over (0.7-0.9 "AI-skins" a photo or surface). NEVER < 1 without a control_input: the start is black, so the video comes out near-black. Coarse at low n_steps (at 4 steps, 0.81-0.99 all render the same).
+        control_input_fit_strategy: "fill / crop" (default), "stretch", "pad".
+        map_shape_input_to_ip_masks: Map style images onto the flat color clusters of the shape input (only for flat single-color regions). Overrides mapping_mode.
+        mapping_mode: Motion pattern: concentric_circles_inwards/outwards (default outwards), concentric_rectangles_inwards/outwards, rotating_segments_clockwise/counter_clockwise (avoid unless asked), pushing_segments_clockwise/counter_clockwise, vertical_stripes_left/right, horizontal_stripes_up/down.
+        n_steps: LCM steps (4-14, default 8). Runtime scales linearly.
+        motion_scale: Motion strength (0.7-1.4, default 1.1). 0.9 subtle, 1.25 lively; >1.3 rarely good.
+        use_upscale: HD latent-upscale second pass (default true).
+        upscale_resolution: Long side for the latent upscale (1024-1536, step 64, default 1280).
+        upscale_esrgan: ESRGAN to 1920 px long side (default true; sharp/realistic, less ideal for organic looks). Runs even with use_upscale=false.
+        seed: 0-2147483647. Omit for random; the used seed is returned, pass it back to reproduce.
+        output_codec: "h264" (default) or "hevc10" (smaller, higher fidelity, not decodable everywhere).
     """
     # First statement on purpose: locals() is exactly the tool's parameters here.
     args = {k: v for k, v in locals().items() if k != "ctx" and v is not None}
-    _name = "texture_flow"
-    t0 = time.time()
-    try:
-        import modal
+    import modal
 
-        files = await asyncio.to_thread(_tf_pack_media, args)
+    files = await asyncio.to_thread(_tf_pack_media, args)
+    app_name, env = _tf_target()
+    mb = sum(len(b) for b in files.values()) / 1e6
+    log_progress("texture_flow", f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
+    tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
+    res = await tf.render.remote.aio(args=args, files=files)
 
-        app_name = os.getenv("TEXTUREFLOW_APP", "wzrd-textureflow")
-        env = os.getenv("WZRD_MODAL_ENV", "wzrd")
-        mb = sum(len(b) for b in files.values()) / 1e6
-        log_progress(_name, f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
-        tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
-        res = await tf.render.remote.aio(args=args, files=files)
-
-        response: dict = {}
-        for key, out in res["outputs"].items():
-            path = project.output_path(f"{_name}_{key}", Path(out["filename"]).suffix or ".mp4",
-                                       kind=project.GENERATED)
-            await asyncio.to_thread(Path(path).write_bytes, out["bytes"])
-            response[key] = path
-        response.update(seed=res["params"].get("seed"), params=res["params"],
-                        request_id=res["request_id"], timings=res["timings"])
-
-        log_done(_name, t0, {k: v for k, v in response.items() if k != "params"})
-        return response
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    response: dict = {}
+    for key, out in res["outputs"].items():
+        path = project.output_path(f"texture_flow_{key}", Path(out["filename"]).suffix or ".mp4",
+                                   kind=project.GENERATED)
+        await asyncio.to_thread(Path(path).write_bytes, out["bytes"])
+        response[key] = path
+    response.update(seed=res["params"].get("seed"), params=res["params"],
+                    request_id=res["request_id"], timings=res["timings"])
+    return response
 
 
-@mcp.tool(timeout=get_timeout("textureflow_warm"))
-@logged_tool
+@tool(title="Keep TextureFlow GPU warm", tags={"generate", "textureflow"}, idempotent=True, open_world=True)
 async def textureflow_warm(minutes: float = 60, ctx: Optional[Context] = None) -> dict:
-    """Keep one TextureFlow GPU container running so renders skip the cold start (normally +15-20 s; the first cold starts after a redeploy take 2-3 min).
+    """Keep one TextureFlow GPU container running so renders skip the cold start (normally +15-20 s; the first after a redeploy take 2-3 min).
 
-    Use before a live session or show: textureflow_warm(minutes=180). Calling again moves the deadline;
-    minutes=0 cools down immediately. The timer runs on Modal, so the container scales back to zero by
-    itself even if this machine goes offline. An idle warm L40S costs roughly $2/hour — cool down when done.
+    Calling again moves the deadline; minutes=0 cools down now. The timer runs
+    on Modal, so it scales back to zero even if this machine goes offline.
+    An idle warm L40S costs ~$2/hour — cool down when done.
 
     Args:
-        minutes: How long to stay warm from now (0-720). 0 = scale back to zero now.
+        minutes: How long to stay warm from now (0-720). 0 = scale to zero now.
     """
-    _name = "textureflow_warm"
-    t0 = time.time()
-    try:
-        import modal
+    import modal
 
-        app_name = os.getenv("TEXTUREFLOW_APP", "wzrd-textureflow")
-        env = os.getenv("WZRD_MODAL_ENV", "wzrd")
-        fn = modal.Function.from_name(app_name, "set_warm", environment_name=env)
-        result = await fn.remote.aio(minutes)
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    app_name, env = _tf_target()
+    fn = modal.Function.from_name(app_name, "set_warm", environment_name=env)
+    return await fn.remote.aio(minutes)
 
 
 # ---------------------------------------------------------------------------
-# Tool: build_layerpack
+# Layer pack — the offline ↔ realtime handoff
 # ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("build_layerpack"))
-@logged_tool
+_LAYERPACK_TAGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "layers": {
+            "type": "object",
+            "description": "Per-mask metadata keyed by mask id (or filename).",
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "parent": {"type": "string"},
+                    "z": {"type": "integer"},
+                },
+            },
+        },
+        "groups": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "members": {"type": "array", "items": {"type": "string"}}},
+                "required": ["id", "members"],
+            },
+        },
+    },
+}
+
+
+@tool(title="Build layer pack", tags={"regions", "engine"})
 async def build_layerpack(
     masks: list[str],
-    surface_image: str = "",
-    mask_ids: list[str] | None = None,
-    tags: dict | None = None,
+    surface_image: Optional[str] = None,
+    mask_ids: Optional[list[str]] = None,
+    tags: Annotated[
+        Optional[dict[str, Any]],
+        Field(description="Optional per-layer labels/tags/parent/z and layer groups.",
+              json_schema_extra=_LAYERPACK_TAGS_SCHEMA),
+    ] = None,
     projector_width: int = 0,
     projector_height: int = 0,
-    source_capture: str = "",
-    canny: str = "",
+    source_capture: Optional[str] = None,
+    canny: Optional[str] = None,
     feather_px: int = 1,
     include_background: bool = False,
-    pack_name: str = "",
+    pack_name: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Build a WZRD layer pack (pack.json + masks/ + references/) for the realtime render-core.
+    """Build a layer pack (pack.json + masks/ + references/) in the project's packs/ — what the realtime engine loads.
 
-    Takes a set of semantic mask images (typically the output of `extract_color_regions`,
-    possibly hand-edited / SAM-refined) and an optional per-mask tags structure, and
-    emits a self-contained layer pack the realtime engine consumes.
-
-    Per-layer identity (id, tags, group, parent) is stable across re-shoots and
-    re-segmentations — bindings target ids, not mask filenames.
+    Each mask becomes one addressable layer. Give stable `mask_ids` so engine
+    bindings keep targeting the same layer across re-shoots/re-segmentations.
 
     Args:
-        masks: List of mask image URLs/paths. Each becomes one layer slice
-            (R8 grayscale, projector-resolution). Hard cap: 256 layers.
-        surface_image: URL/path to the darkened/aligned surface image used as
-            preview overlay and to derive projector_resolution if not given.
-        mask_ids: Optional parallel list of semantic ids (length must match `masks`).
-            Required if you want stable ids; otherwise ids default to mask stems.
-        tags: Optional structured tags dict: {
-            "layers": {
-                "<mask_filename_or_id>": {
-                    "label": "...", "tags": ["..."], "parent": "...", "z": 1
-                }
-            },
-            "groups": [{"id": "...", "members": ["..."]}]
-        }
-        projector_width: Width in px. Defaults to surface image width.
-        projector_height: Height in px. Defaults to surface image height.
-        source_capture: Optional original photo URL/path (copied into references/).
-        canny: Optional canny/edge aid URL/path (copied into references/).
-        feather_px: Mask edge feathering radius (default 1; 0 = hard edges).
-        include_background: If true, auto-generates `000_background.png` as the
-            complement of all input masks.
-        pack_name: Folder name for the pack inside the project's `packs/`
-            directory. Defaults to a timestamped name.
+        masks: Mask images (paths/URLs), typically extract_color_regions' region_mask files. Max 256.
+        surface_image: The darkened/aligned surface (preview overlay; sets projector resolution if not given).
+        mask_ids: Semantic ids parallel to `masks` (same length); default = mask file stems.
+        projector_width: Pixels; defaults to the surface image width.
+        projector_height: Pixels; defaults to the surface image height.
+        source_capture: Original photo, copied into references/.
+        canny: Edge aid image, copied into references/.
+        feather_px: Mask edge feathering radius (0 = hard edges).
+        include_background: Also generate `000_background.png`, the complement of all masks.
+        pack_name: Folder name under packs/; default timestamped.
     """
-    _name = "build_layerpack"
-    t0 = time.time()
-    try:
-        from wzrd.layerpack import build_layerpack as _build
+    from wzrd.layerpack import build_layerpack as _build
 
-        log_progress(_name, "Resolving inputs...")
-        mask_coros = [resolve_input_async(m, suffix=".png") for m in masks]
-        extra_coros: list = []
-        if surface_image:
-            extra_coros.append(resolve_input_async(surface_image, suffix=".png"))
-        if source_capture:
-            extra_coros.append(resolve_input_async(source_capture, suffix=".png"))
-        if canny:
-            extra_coros.append(resolve_input_async(canny, suffix=".png"))
-        resolved_masks = await asyncio.gather(*mask_coros)
-        resolved_extras = await asyncio.gather(*extra_coros)
+    if mask_ids and len(mask_ids) != len(masks):
+        raise ToolError("mask_ids length must match masks length")
 
-        extras_iter = iter(resolved_extras)
-        surf_path = next(extras_iter) if surface_image else None
-        src_path = next(extras_iter) if source_capture else None
-        cny_path = next(extras_iter) if canny else None
+    resolved_masks = await asyncio.gather(*(resolve_input_async(m, suffix=".png") for m in masks))
 
-        if mask_ids and len(mask_ids) != len(resolved_masks):
-            raise ToolError("mask_ids length must match masks length")
+    async def _opt(ref: Optional[str]) -> Optional[str]:
+        return await resolve_input_async(ref, suffix=".png") if ref else None
 
-        # Stage masks in a temp dir with stable, ordered filenames so the
-        # layerpack discovery sees them in the order the caller supplied.
-        from pathlib import Path
-        from tempfile import mkdtemp
-        masks_dir = Path(mkdtemp(prefix="wzrd_masks_")) / "masks_in"
-        masks_dir.mkdir()
-        from shutil import copyfile
-        ordered_filenames: list[str] = []
-        for i, src in enumerate(resolved_masks):
-            stem = mask_ids[i] if mask_ids else f"layer_{i:03d}"
-            dest_name = f"{i:03d}_{stem}.png"
-            copyfile(src, masks_dir / dest_name)
-            ordered_filenames.append(dest_name)
+    surf_path, src_path, cny_path = await asyncio.gather(_opt(surface_image), _opt(source_capture), _opt(canny))
 
-        # If caller supplied per-mask metadata under tags["layers"], rekey it to
-        # match our deterministic staging filenames (so it actually applies).
-        rekeyed_tags = dict(tags or {})
-        if mask_ids and rekeyed_tags.get("layers"):
-            src_layers = rekeyed_tags["layers"]
-            new_layers: dict = {}
-            for i, stem in enumerate(mask_ids):
-                if stem in src_layers:
-                    entry = dict(src_layers[stem])
-                    entry.setdefault("id", stem)
-                    new_layers[ordered_filenames[i]] = entry
-                else:
-                    new_layers[ordered_filenames[i]] = {"id": stem}
-            rekeyed_tags["layers"] = new_layers
-        elif mask_ids:
-            rekeyed_tags["layers"] = {
-                ordered_filenames[i]: {"id": mask_ids[i]}
-                for i in range(len(mask_ids))
-            }
+    # Stage masks with stable, ordered filenames so layerpack discovery sees
+    # them in the caller's order.
+    masks_dir = Path(mkdtemp(prefix="wzrd_masks_")) / "masks_in"
+    masks_dir.mkdir()
+    ordered: list[str] = []
+    for i, src in enumerate(resolved_masks):
+        dest = f"{i:03d}_{mask_ids[i] if mask_ids else f'layer_{i:03d}'}.png"
+        copyfile(src, masks_dir / dest)
+        ordered.append(dest)
 
-        projector_resolution = None
-        if projector_width > 0 and projector_height > 0:
-            projector_resolution = (projector_width, projector_height)
-
-        # The pack lands in the project so render-core can load it directly:
-        # a scene.json at the project root points at `packs/<name>` and the
-        # engine resolves masks relative to pack.json, off local disk.
-        pack_dir = Path(project.output_dir(_name, kind=project.PACKS, name=pack_name))
-
-        log_progress(_name, "Building layer pack...")
-        scene = await asyncio.to_thread(
-            _build,
-            masks_dir=str(masks_dir),
-            output_dir=str(pack_dir),
-            surface=surf_path,
-            tags=rekeyed_tags,
-            projector_resolution=projector_resolution,
-            source_capture=src_path,
-            canny=cny_path,
-            feather_px=feather_px,
-            include_background=include_background,
-        )
-
-        # `_build` already wrote pack.json with mask paths relative to the pack
-        # dir — exactly what render-core expects. Nothing to rewrite.
-        result = {
-            "scene": scene,
-            "pack_dir": str(pack_dir),
-            "pack_json": str(pack_dir / "pack.json"),
-            "layer_count": len(scene["layers"]),
-            "projector_resolution": scene["projector_resolution"],
+    # Rekey caller per-mask metadata to the staging filenames so it applies.
+    rekeyed = dict(tags or {})
+    if mask_ids:
+        src_layers = rekeyed.get("layers") or {}
+        rekeyed["layers"] = {
+            ordered[i]: {**src_layers.get(stem, {}), "id": src_layers.get(stem, {}).get("id", stem)}
+            for i, stem in enumerate(mask_ids)
         }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+
+    projector_resolution = (projector_width, projector_height) if projector_width > 0 and projector_height > 0 else None
+
+    # The pack lands in the project so render-core loads it straight off disk.
+    pack_dir = Path(project.output_dir("build_layerpack", kind=project.PACKS, name=pack_name or ""))
+    log_progress("build_layerpack", "Building layer pack...")
+    scene = await asyncio.to_thread(
+        _build,
+        masks_dir=str(masks_dir), output_dir=str(pack_dir), surface=surf_path, tags=rekeyed,
+        projector_resolution=projector_resolution, source_capture=src_path, canny=cny_path,
+        feather_px=feather_px, include_background=include_background,
+    )
+    return {
+        "scene": scene,
+        "pack_dir": str(pack_dir),
+        "pack_json": str(pack_dir / "pack.json"),
+        "layer_count": len(scene["layers"]),
+        "projector_resolution": scene["projector_resolution"],
+    }
 
 
 # ---------------------------------------------------------------------------
-# Tool 10: simulate_view
+# Preview
 # ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("simulate_view"))
-@logged_tool
+@tool(title="Simulate projected view", tags={"preview"})
 async def simulate_view(
     projector_video: str,
     surface_image: str,
@@ -942,72 +646,31 @@ async def simulate_view(
     crf: int = 18,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Simulate the real-world viewing experience of additive projection mapping.
-
-    Composites a projector output video (purely additive light on black background)
-    onto a projection surface image to predict what a human viewer would actually see.
-    Non-reflective regions (sky, etc. turned to black) stay dark — projected light
-    is modulated by surface reflectivity derived from the surface image luminance.
-
-    Use this after generating projector content (via texture_flow, kling, or
-    subtract_background_video) to preview how the projection will look on the
-    actual surface before projecting.
+    """Predict what a viewer will see: composite projector output (additive light on black) onto the surface photo, modulated by the surface's reflectivity.
 
     Args:
-        projector_video: URL or path to the projector output video (additive light
-            content — a background-subtracted kling video or raw textureflow output).
-        surface_image: URL or path to the projection surface image. Ideally
-            pre-processed so non-reflective regions (sky, etc.) are pure black
-            (e.g. via nano_banana_pro masking).
-        surface_weight: How visible the underlying surface texture is (0.0-1.0).
-            Lower = more contrast from projection only, higher = more visible
-            ambient surface detail. Default 0.35.
-        projection_strength: Multiplier for projected light intensity (0.5-2.0).
-            Values > 1.0 simulate a brighter projector. Default 1.0.
-        ambient: Minimum reflectivity floor for non-black surface pixels (0.0-0.3).
-            Adds subtle light bounce on dark (but not black) surface areas.
-        codec: Video codec (e.g. libx264, h264_videotoolbox).
-        crf: Video quality — lower is better (0-51).
+        projector_video: Projector output (a background-subtracted video, or raw TextureFlow output).
+        surface_image: The surface photo, ideally with non-reflective areas (sky…) masked to pure black.
+        surface_weight: How visible the bare surface texture is (0.0-1.0). Lower = more projection contrast.
+        projection_strength: Projected light multiplier (0.5-2.0); >1 simulates a brighter projector.
+        ambient: Reflectivity floor for dark-but-not-black surface pixels (0.0-0.3).
+        codec: ffmpeg video codec.
+        crf: Quality — lower is better (0-51).
     """
-    _name = "simulate_view"
-    t0 = time.time()
-    try:
-        from wzrd.simulate_view import simulate_view as _simulate_view
+    from wzrd.simulate_view import simulate_view as _simulate_view
 
-        log_progress(_name, "Resolving inputs...")
-        vid_path, surf_path = await asyncio.gather(
-            resolve_input_async(projector_video, suffix=".mp4"),
-            resolve_input_async(surface_image, suffix=".png"),
-        )
-        out_path = project.output_path(_name, ".mp4", kind=project.VIDEO)
-
-        log_progress(_name, "Compositing projector video onto surface...")
-        info = await asyncio.to_thread(
-            _simulate_view,
-            projector_video_path=vid_path,
-            surface_image_path=surf_path,
-            output_path=out_path,
-            surface_weight=surface_weight,
-            projection_strength=projection_strength,
-            ambient=ambient,
-            codec=codec,
-            crf=crf,
-        )
-
-        result = {
-            "simulated_view_video": out_path,
-            "info": {
-                "frames_processed": info.get("frames_processed"),
-                "fps": info.get("fps"),
-                "video_size": info.get("video_size"),
-                "surface_weight": info.get("surface_weight"),
-                "projection_strength": info.get("projection_strength"),
-            },
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    vid_path, surf_path = await asyncio.gather(
+        resolve_input_async(projector_video, suffix=".mp4"),
+        resolve_input_async(surface_image, suffix=".png"),
+    )
+    out_path = project.output_path("simulate_view", ".mp4", kind=project.VIDEO)
+    info = await asyncio.to_thread(
+        _simulate_view,
+        projector_video_path=vid_path, surface_image_path=surf_path, output_path=out_path,
+        surface_weight=surface_weight, projection_strength=projection_strength,
+        ambient=ambient, codec=codec, crf=crf,
+    )
+    return {
+        "simulated_view_video": out_path,
+        "info": {k: info.get(k) for k in ("frames_processed", "fps", "video_size", "surface_weight", "projection_strength")},
+    }

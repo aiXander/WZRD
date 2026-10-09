@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Optional
 
 from fastmcp import Context
-from fastmcp.exceptions import ToolError
 
 from . import project
-from ._log import log_call, log_progress, log_done, log_error, logged_tool
-from .server import mcp, get_timeout
+from .server import tool
 
 
 def _capture_frame(out_path: str, camera_index: int = 0, warmup_frames: int = 5) -> str:
@@ -39,8 +36,7 @@ def _capture_frame(out_path: str, camera_index: int = 0, warmup_frames: int = 5)
         cap.release()
 
 
-@mcp.tool(timeout=get_timeout("capture_camera_snapshot"))
-@logged_tool
+@tool(title="Camera snapshot", tags={"surface"})
 async def capture_camera_snapshot(
     camera_index: int = 0,
     ctx: Optional[Context] = None,
@@ -54,26 +50,6 @@ async def capture_camera_snapshot(
     Args:
         camera_index: Which camera to use (0 = default/built-in, 1+ = external USB cameras).
     """
-    _name = "capture_camera_snapshot"
-    t0 = time.time()
-    try:
-        out_path = project.output_path(
-            f"cam{camera_index}", ".webp", kind=project.CAPTURES
-        )
-
-        log_progress(_name, f"Capturing from camera {camera_index}...")
-        img_path = await asyncio.to_thread(_capture_frame, out_path, camera_index)
-
-        result = {
-            "snapshot_image": img_path,
-            "info": {
-                "camera_index": camera_index,
-            },
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    out_path = project.output_path(f"cam{camera_index}", ".webp", kind=project.CAPTURES)
+    img_path = await asyncio.to_thread(_capture_frame, out_path, camera_index)
+    return {"snapshot_image": img_path, "info": {"camera_index": camera_index}}

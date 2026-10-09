@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextvars
 import functools
-import inspect
 import json
 import sys
 import time
@@ -82,13 +81,14 @@ def log_done(tool_name: str, start_time: float, result: object = None) -> None:
         _emit(f"{_DIM}  Result: {formatted}{_RESET}")
 
 
-def log_error(tool_name: str, error: Exception, start_time: float) -> None:
-    """Log a tool error with traceback."""
+def log_error(tool_name: str, error: Exception, start_time: float, *, tb: bool = True) -> None:
+    """Log a tool error, with traceback unless it is an expected refusal."""
     if not DEBUG:
         return
     elapsed = time.time() - start_time
     _emit(f"{_RED}[{_ts()}] ✗ {tool_name} failed ({elapsed:.1f}s): {error}{_RESET}")
-    _emit(f"{_DIM}{traceback.format_exc()}{_RESET}")
+    if tb:
+        _emit(f"{_DIM}{traceback.format_exc()}{_RESET}")
 
 
 def log_overhead(tool_name: str, req_received: float, tool_start: float,
@@ -109,32 +109,37 @@ def log_overhead(tool_name: str, req_received: float, tool_start: float,
 
 
 def logged_tool(fn):
-    """Decorator that auto-logs all client-supplied params on entry.
+    """Log a tool call end to end and turn any failure into a `ToolError`.
 
-    Stacks with @mcp.tool() — apply this *below* @mcp.tool() so that
-    FastMCP sees the original signature for schema generation.
+    Logs the client-supplied params on entry, the result (or the error +
+    traceback) on exit, and stamps request timing for `TimingMiddleware`.
+    A `ToolError` raised by the body passes through as-is; any other
+    exception is logged and re-raised as `ToolError(str(exc))` so the agent
+    sees an actionable message instead of FastMCP's masked "internal error".
+    Tool bodies therefore need no try/except/log boilerplate of their own.
 
-    Usage:
-        @mcp.tool()
-        @logged_tool
-        async def my_tool(arg1: str, arg2: int = 5, ctx=None) -> dict:
-            ...
+    Applied by `server.tool()` — never stack it by hand.
     """
-    sig = inspect.signature(fn)
+    from fastmcp.exceptions import ToolError
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
-        # Only log params actually supplied by the caller, not defaults
-        client_args = {
-            k: v for k, v in kwargs.items() if k not in _SKIP_PARAMS
-        }
-        log_call(fn.__name__, client_args)
+        client_args = {k: v for k, v in kwargs.items() if k not in _SKIP_PARAMS}
+        t0 = log_call(fn.__name__, client_args)
         timing = _request_timing.get(None)
         if timing is not None:
             timing["tool_name"] = fn.__name__
             timing["tool_start"] = time.time()
         try:
-            return await fn(*args, **kwargs)
+            result = await fn(*args, **kwargs)
+            log_done(fn.__name__, t0, result if isinstance(result, dict) else None)
+            return result
+        except ToolError as exc:
+            log_error(fn.__name__, exc, t0, tb=False)
+            raise
+        except Exception as exc:
+            log_error(fn.__name__, exc, t0)
+            raise ToolError(str(exc)) from exc
         finally:
             if timing is not None:
                 timing["tool_end"] = time.time()

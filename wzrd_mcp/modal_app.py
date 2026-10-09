@@ -21,8 +21,11 @@ Authentication:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import modal
+
+_HERE = Path(__file__).resolve().parent
 
 _NO_AUTH_AT_DEPLOY = os.environ.get("WZRD_NO_AUTH", "0") == "1"
 # Was Eden's "eve-secrets-PROD"; name your own secret instead.
@@ -34,7 +37,8 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "libgl1-mesa-glx", "libglib2.0-0")
     .pip_install(
-        "fastmcp>=3.0",
+        "fastmcp>=4.0.11,<5",
+        "mcp>=2.3,<3",
         "httpx>=0.27",
         "scikit-learn>=1.3.0",
         "pillow>=10.0.0",
@@ -42,9 +46,14 @@ image = (
         "opencv-python>=4.8.0,<4.11.0",
         "starlette",
         "fal_client",
+        "google-genai>=2.29",
     )
     .env({"WZRD_NO_AUTH": "1" if _NO_AUTH_AT_DEPLOY else "0"})
     .add_local_python_source("wzrd", "wzrd_mcp")
+    # add_local_python_source ships ONLY .py files: without these two mounts
+    # the container boots with every tool enabled and an empty skills catalog.
+    .add_local_file(_HERE / "tools_config.json", "/root/wzrd_mcp/tools_config.json")
+    .add_local_dir(_HERE / "skills", "/root/wzrd_mcp/skills")
 )
 
 with image.imports():

@@ -1,4 +1,6 @@
-"""FAL API tool wrappers for the WZRD MCP server.
+"""FAL API tool wrappers for the WZRD MCP server: the Kling image→video tools.
+
+(Nano Banana images go to Google directly — see `google_tools.py`.)
 
 Each tool submits work to FAL's queue via fal_client.subscribe (wrapped in
 asyncio.to_thread so the MCP event loop is never blocked) and includes
@@ -16,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 from typing import Optional
 
 import fal_client
@@ -24,9 +25,10 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from . import project
+from ._keepalive import with_keepalive
 from .file_io import resolve_input_async
-from ._log import log_progress, log_done, log_error, logged_tool
-from .server import mcp, get_timeout
+from ._log import log_progress
+from .server import tool
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +70,8 @@ async def _fal_subscribe(
 ) -> dict:
     """Call fal_client.subscribe in a thread with retry + exponential backoff.
 
-    When *ctx* is provided, sends periodic MCP progress notifications as
-    keepalives so the client connection doesn't time out during long FAL jobs.
+    When *ctx* is provided, `with_keepalive` pings it while the job runs so the
+    MCP client connection doesn't time out during long FAL jobs.
     """
     if not os.getenv("FAL_KEY"):
         raise ValueError("FAL_KEY environment variable is not set")
@@ -90,36 +92,16 @@ async def _fal_subscribe(
                         if tool_name:
                             log_progress(tool_name, f"FAL: {msg}")
 
-            # Run subscribe in a thread; meanwhile send keepalive progress
-            # notifications every 15s so the MCP client doesn't drop us.
-            subscribe_task = asyncio.ensure_future(
+            return await with_keepalive(
                 asyncio.to_thread(
                     fal_client.subscribe,
                     endpoint,
                     arguments=args,
                     with_logs=True,
                     on_queue_update=_on_update,
-                )
+                ),
+                ctx, "FAL",
             )
-
-            tick = 0
-            while not subscribe_task.done():
-                await asyncio.sleep(15)
-                if subscribe_task.done():
-                    break
-                tick += 1
-                if ctx:
-                    try:
-                        await ctx.report_progress(
-                            progress=tick,
-                            total=0,
-                            message=f"Waiting for FAL ({tick * 15}s elapsed)…",
-                        )
-                    except Exception:
-                        pass  # best-effort keepalive
-
-            result = await subscribe_task
-            return result
 
         except Exception as exc:
             last_err = exc
@@ -166,7 +148,7 @@ def _extract_urls(result: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 # Local file -> FAL-visible URL
 # ---------------------------------------------------------------------------
-async def _to_fal_url(value: str) -> str:
+async def _to_fal_url(value: Optional[str]) -> Optional[str]:
     """Make *value* fetchable by FAL's workers.
 
     Passes http(s) URLs through untouched. Anything else — a local path, a
@@ -182,7 +164,7 @@ async def _to_fal_url(value: str) -> str:
     return await asyncio.to_thread(fal_client.upload_file, local)
 
 
-async def _to_fal_urls(values: list[str]) -> list[str]:
+async def _to_fal_urls(values: list[Optional[str]]) -> list[Optional[str]]:
     """`_to_fal_url` across a list, uploading any local inputs concurrently."""
     return list(await asyncio.gather(*(_to_fal_url(v) for v in values)))
 
@@ -208,59 +190,41 @@ async def _run_fal_tool(
         response_info: Extra metadata included in the response "info" dict.
         ctx: Optional MCP context for progress reporting.
     """
-    t0 = time.time()
-    try:
-        result = await _fal_subscribe(endpoint, fal_args, tool_name=tool_name, ctx=ctx)
+    result = await _fal_subscribe(endpoint, fal_args, tool_name=tool_name, ctx=ctx)
 
-        urls = _extract_urls(result)
-        if not urls:
-            err = f"No {output_type} URL(s) in FAL response"
-            log_error(tool_name, ValueError(err), t0)
-            raise ToolError(err)
+    urls = _extract_urls(result)
+    if not urls:
+        raise ToolError(f"No {output_type} URL(s) in FAL response")
 
-        if output_type == "video":
-            log_progress(tool_name, "Downloading video from FAL...")
-            path = await project.download_async(
-                urls[0], tool=tool_name, kind=project.GENERATED, ext=".mp4"
-            )
-            response = {"output_video": path, "info": response_info}
-        else:
-            log_progress(tool_name, f"Downloading {len(urls)} image(s) from FAL...")
-            paths = list(await asyncio.gather(*[
-                project.download_async(
-                    u, tool=tool_name, kind=project.GENERATED, ext=".jpg"
-                )
-                for u in urls
-            ]))
-            response = {"output_images": paths, "info": {**response_info, "num_images": len(paths)}}
+    if output_type == "video":
+        log_progress(tool_name, "Downloading video from FAL...")
+        path = await project.download_async(urls[0], tool=tool_name, kind=project.GENERATED, ext=".mp4")
+        return {"output_video": path, "info": response_info}
 
-        log_done(tool_name, t0, response)
-        return response
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(tool_name, exc, t0)
-        raise ToolError(str(exc))
+    log_progress(tool_name, f"Downloading {len(urls)} image(s) from FAL...")
+    paths = list(await asyncio.gather(*[
+        project.download_async(u, tool=tool_name, kind=project.GENERATED, ext=".jpg") for u in urls
+    ]))
+    return {"output_images": paths, "info": {**response_info, "num_images": len(paths)}}
 
 
 # ---------------------------------------------------------------------------
 # Tool: Kling v2.5 Turbo Pro Image-to-Video
 # ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("kling_v25_image_to_video"))
-@logged_tool
+@tool(title="Image to video (Kling v2.5)", tags={"generate", "video"}, open_world=True)
 async def kling_v25_image_to_video(
     prompt: str,
     image_url: str,
     duration: str = "5",
-    tail_image_url: str = "",
+    tail_image_url: Optional[str] = None,
     negative_prompt: str = "blur, distort, and low quality",
     cfg_scale: float = 0.5,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Generate a 5 or 10 second video from a starting image using Kling v2.5 Turbo Pro via FAL.
+    """Animate a start frame (optionally into an end frame) as a 5 or 10 s video with Kling v2.5 Turbo Pro via FAL.
 
-    Creates high-quality videos from a single starting image. Optionally provide
-    a tail (end) image for start→end transitions.
+    For projection, write the prompt per skill `video-prompting` (static
+    camera, unchanged dark background, motion described plainly).
 
     Args:
         prompt: Text description of the desired video motion and content.
@@ -294,14 +258,13 @@ async def kling_v25_image_to_video(
 # ---------------------------------------------------------------------------
 # Tool: Kling v3 Image-to-Video
 # ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("kling_v3_image_to_video"))
-@logged_tool
+@tool(title="Image to video (Kling v3)", tags={"generate", "video"}, open_world=True)
 async def kling_v3_image_to_video(
     prompt: str,
     start_image_url: str,
     duration: str = "5",
     generate_audio: bool = False,
-    end_image_url: str = "",
+    end_image_url: Optional[str] = None,
     negative_prompt: str = "blur, distort, and low quality",
     cfg_scale: float = 0.5,
     aspect_ratio: str = "16:9",
@@ -341,72 +304,5 @@ async def kling_v3_image_to_video(
         "fal-ai/kling-video/v3/standard/image-to-video",
         fal_args, output_type="video",
         response_info={"duration": duration, "aspect_ratio": aspect_ratio},
-        ctx=ctx,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Tool: Nano Banana Pro (txt2img + img2img unified)
-# ---------------------------------------------------------------------------
-@mcp.tool(timeout=get_timeout("nano_banana_pro"))
-@logged_tool
-async def nano_banana_pro(
-    prompt: str,
-    image_urls: list[str] = [],
-    num_images: int = 1,
-    resolution: str = "1K",
-    aspect_ratio: str = "1:1",
-    enable_web_search: bool = False,
-    seed: int = -1,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Generate or edit images using Google's Nano Banana Pro model via FAL.
-
-    When no image_urls are provided this runs text-to-image generation.
-    When image_urls are provided it switches to editing/reference mode: the
-    images become named references that the prompt can address as image_1,
-    image_2, … image_N (matching the order they appear in the list, up to 14).
-
-    For example, with two reference images you might write a prompt like:
-    "Place the character from image_1 into the landscape shown in image_2,
-    matching the lighting and color palette of image_2."
-
-    Args:
-        prompt: Text description of the desired image(s). When reference images
-            are provided, use image_1, image_2, … image_N in the prompt to
-            refer to specific input images by their position in the list.
-        image_urls: Optional list of reference images (up to 14), each a URL
-            *or a local file path*. Each entry becomes a named reference: the
-            first is image_1, the second is image_2, and so on. The prompt
-            should explicitly mention these references to control how each
-            image influences the output.
-        num_images: Number of images to generate (1-4). You almost always want to do 1 image at a time. When the user asks for multiple images, run multiple toolcalls and tweak the prompt.
-        resolution: Output resolution. Choices: "1K", "2K", "4K" (4K costs 2x).
-        aspect_ratio: Output aspect ratio. Choices: "auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16".
-        enable_web_search: Use web search for current events or real-world references.
-        seed: Random seed for reproducibility (0-2147483647).
-    """
-    endpoint = "fal-ai/nano-banana-pro/edit" if image_urls else "fal-ai/nano-banana-pro"
-    mode = "edit" if image_urls else "txt2img"
-
-    fal_args: dict = {
-        "prompt": prompt,
-        "num_images": num_images,
-        "aspect_ratio": aspect_ratio,
-        "output_format": "jpeg",
-    }
-    if resolution:
-        fal_args["resolution"] = resolution
-    if enable_web_search:
-        fal_args["enable_web_search"] = True
-    if seed >= 0:
-        fal_args["seed"] = seed
-    if image_urls:
-        fal_args["image_urls"] = await _to_fal_urls(image_urls)
-
-    return await _run_fal_tool(
-        "nano_banana_pro", endpoint, fal_args,
-        output_type="images",
-        response_info={"resolution": resolution, "aspect_ratio": aspect_ratio, "mode": mode},
         ctx=ctx,
     )

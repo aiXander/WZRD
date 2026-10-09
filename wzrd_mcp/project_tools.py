@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 from fastmcp import Context
-from fastmcp.exceptions import ToolError
 
 from . import project
-from ._log import log_done, log_error, logged_tool
-from .server import mcp, get_timeout
+from .server import tool
 
 
-@mcp.tool(timeout=get_timeout("set_project"))
-@logged_tool
-async def set_project(name: str = "", ctx: Optional[Context] = None) -> dict:
+@tool(title="Set project", tags={"project"}, idempotent=True)
+async def set_project(name: Optional[str] = None, ctx: Optional[Context] = None) -> dict:
     """Choose the project folder that every subsequent tool writes its output into.
 
     A project is one self-contained folder on this machine holding everything
@@ -27,24 +23,13 @@ async def set_project(name: str = "", ctx: Optional[Context] = None) -> dict:
     the project named by the WZRD_PROJECT env var, else "default".
 
     Args:
-        name: Project name (created if it doesn't exist yet). Leave empty to
+        name: Project name (created if it doesn't exist yet). Omit to
             just report the active project and list the existing ones.
     """
-    _name = "set_project"
-    t0 = time.time()
-    try:
-        if name:
-            project.set_project(name)
-
-        result = {
-            **project.describe(),
-            "projects_root": str(project.projects_root()),
-            "existing_projects": project.list_projects(),
-        }
-        log_done(_name, t0, result)
-        return result
-    except ToolError:
-        raise
-    except Exception as exc:
-        log_error(_name, exc, t0)
-        raise ToolError(str(exc))
+    if name:
+        project.set_project(name)
+    return {
+        **project.describe(),
+        "projects_root": str(project.projects_root()),
+        "existing_projects": project.list_projects(),
+    }

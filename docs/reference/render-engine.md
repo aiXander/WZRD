@@ -516,8 +516,8 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
 `wzrd_mcp/engine_tools.py` exposes **only the authoring slice** of the WS
 surface to a local Claude Code session (persistent JSON-RPC client to
 `ws://127.0.0.1:9123`, override `WZRD_ENGINE_WS`; optional dep extra
-`.[engine]` → `websockets`, tools default-off in `server.py`, enabled in the
-local `tools_config.json`, structurally absent from the Modal image). Setup
+`.[engine]` → `websockets`; the tools only register when it is installed,
+so the Modal image never carries them; toggles in `tools_config.json`). Setup
 recipe: repo `README.md` § "AI scene authoring".
 
 **Two seats (the core boundary).** The agent authors *structure & shaders*

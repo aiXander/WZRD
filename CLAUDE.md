@@ -17,6 +17,8 @@ WZRD is an additive projection-mapping system: only changing regions get project
 - `docs/reference/render-engine.md` — **primary engine context doc**: current system state, contracts (scene.json, layer pack, RPC/telemetry, WGSL), invariants from the 2026-07 performance pass, working agreements, rejected approaches. Read before touching `render-core/` or `wzrd-app/`.
 - `docs/reference/user_design_spec.md` — the product north star; every engine trade-off answers to it.
 - `docs/reference/textureflow.md` — the TextureFlow GPU endpoint on Modal (`deploy/textureflow/`, app `wzrd-textureflow`, env `wzrd`): render contract, pinned stack, weights volume, input traps, GPU-snapshot fast boot, the MCP client, timings. Open when touching `deploy/textureflow/` or the `texture_flow` / `textureflow_warm` MCP tools.
+- `docs/reference/mcp-server.md` — the MCP server: progressive disclosure (instructions → skills → references), the `server.tool()` registration stack, skills format and how they're served (tool / resources / prompts), `tools_config.json` gate, file map, how to add a tool or skill. Open when touching anything in `wzrd_mcp/` or its skills.
+- `docs/reference/hosted-models.md` — which hosted models the MCP's `nano_banana` (Google direct) / `kling_*` (FAL) tools call and why (the 2026-10 blind shootout that put Nano Banana 2.1 in), Google backend traps (Vertex draft images, client config), prices, and how to re-run the comparisons (`scripts/fal_shootout.py`, `scripts/google_nb_probe.py`). Open when touching `wzrd_mcp/google_tools.py` / `fal_tools.py` or swapping a model.
 - `docs/reference/resources.md` — running index of external links (repos, papers, tools) worth knowing about, each with a short "why we'd care" note. Nothing in it is a dependency; drop new links here.
 - `docs/TODO/render-engine-roadmap.md` — structural roadmap; the stable index of what's next (§5.11 post-swap probation → §5.5 WGSL `#import` → auto-pilot playlist / §5.7 layer object). Landed sections are drained to pointers into the reference doc. Other in-flight plans live alongside it in `docs/TODO/`; you'll be pointed at one by name.
 - Single-process collapse — **LANDED 2026-07-12** (Steps 2–3: in-process TauriHost + native lossless preview). Current-state residue: `docs/reference/render-engine.md` §1/§1b; the plan husk is retired in `docs/finished/`.
@@ -129,26 +131,22 @@ land in a project folder on this machine and every tool returns absolute local
 paths (and accepts them as inputs), so steps chain path-to-path and a project
 folder is directly loadable by the engine.
 
-**Key files:**
-- `server.py` — FastMCP instance, tool registry, config loading
-- `project.py` — Project folders under `projects/` (gitignored; `WZRD_PROJECTS_ROOT` moves the root, `WZRD_PROJECT` picks one). Reserve destinations with `output_path`/`output_dir` *before* running work so libraries write straight into the project (sidecar files like alignment-aid videos follow for free); `store`/`download_async` bring in files produced elsewhere. **The layout is a render-core scene directory on purpose** — `scene.json` + `effects/` + `packs/<pack>/` — which is why `build_layerpack` output loads as-is
-- `project_tools.py` — the `set_project` tool (session-level active project; step one of any content-pipeline session)
-- `tools.py` — Tool wrappers for core wzrd functions (subtract, detect, align, darken, prepare_surface, islands, reproject, layerpack, simulate_view, texture_flow, textureflow_warm)
-- `fal_tools.py` — FAL API integrations (kling, nano_banana_pro). Results download into the project; **local inputs are uploaded to FAL's own CDN just in time** (`_to_fal_url`) since FAL's workers can't read this disk — the only outbound file copy left
-- `engine_tools.py` — §5.10 authoring tools against the realtime engine's WS (`ws://127.0.0.1:9123`); local-only (needs `.[engine]` → `websockets`, absent from the Modal image), default-off in `server.py`, on in local `tools_config.json`. Contract: `docs/reference/render-engine.md` §2.7
-- `file_io.py` — Input resolution (URL → download, base64 decode, local path). Its S3 upload half is **dormant** — no tool calls it, `boto3` is lazily imported behind the optional `s3` extra; kept for a future self-owned bucket
-- `_log.py` — Terminal logging with colors/timestamps; `@logged_tool` decorator auto-logs tool invocations. **All output goes to stderr via `_emit`** — under the `--stdio` transport stdout carries JSON-RPC, so a `print()` to stdout anywhere in a tool breaks the protocol
-- `auth.py` / `modal_app.py` — remote-deployment surface, **parked**: a container's project folder is ephemeral scratch, so the cloud path needs a durable sink before it means anything again
-- `tools_config.json` — Per-tool activation toggles (tools can be disabled here)
+FastMCP 4 / MCP SDK 2.x. **Server map, registration stack, skills and the
+operator gate: `docs/reference/mcp-server.md`.** What bites in most sessions:
 
-**Tool registration pattern:** Tools use `@mcp.tool()` for MCP registration stacked with `@logged_tool` for automatic parameter logging.
+- **Register every tool with `server.tool(title=, tags=, …hints)`**, never a bare `@mcp.tool` — it applies the timeout from `tools_config.json`, text-only results, MCP annotations and `logged_tool` (logging + error wrapping), so tool bodies have no try/except/log boilerplate. Every tool needs a `tools_config.json` entry.
+- **Craft goes in skills, contracts in docstrings.** Workflows, prompt formulas and recipes live in `wzrd_mcp/skills/<name>/SKILL.md` (loaded on demand via `load_skill` / `skill://` resources / prompts); the server `instructions` carry only physics, the file contract and the generated skills index. Skills name tools, so renaming a tool means grepping `skills/` too.
+- `project.py` — Project folders under `projects/` (gitignored; `WZRD_PROJECTS_ROOT` moves the root, `WZRD_PROJECT` picks one). Reserve destinations with `output_path`/`output_dir` *before* running work so libraries write straight into the project (sidecar files like alignment-aid videos follow for free); `store`/`download_async` bring in files produced elsewhere. **The layout is a render-core scene directory on purpose** — `scene.json` + `effects/` + `packs/<pack>/` — which is why `build_layerpack` output loads as-is.
+- **All logging goes to stderr via `_log._emit`** — under the `--stdio` transport stdout carries JSON-RPC, so a `print()` to stdout anywhere in a tool breaks the protocol.
+- `fal_tools.py` uploads local inputs to FAL's own CDN just in time (FAL's workers can't read this disk); `google_tools.py` sends refs inline. `file_io.py`'s S3 half, `auth.py` and `modal_app.py` are **parked** (a container's project folder is ephemeral scratch).
 
 **Flow:** local paths (or URLs) in → call wzrd function → write into the active project → return local paths.
 
 **`texture_flow` renders on our own Modal app** `wzrd-textureflow` (env `wzrd`): local paths are sent as bytes, URLs pass through, only caller-set args go over the wire (server owns the api.yaml defaults), mp4s land in the project's `generated/`. No Eden, no S3. A redeploy of `deploy/textureflow/` discards its GPU snapshot, so the next 1–2 cold starts take 2–3 min — prime it before a show (`textureflow_warm`). Contract: `docs/reference/textureflow.md`.
 
 **Environment variables (`.env` loaded automatically, see `.env.example`):**
-- `FAL_KEY` — Required for FAL tools (kling, nano_banana_pro). The only key a local session needs
+- `GEMINI_API_KEY` — Required for `nano_banana` (Google Gemini API). `VERTEX_API_KEY` (+ optional `GOOGLE_CLOUD_PROJECT`) is the fallback when it's unset
+- `FAL_KEY` — Required for the kling tools
 - `WZRD_PROJECT`, `WZRD_PROJECTS_ROOT` — default project name / root folder for outputs
 - `WZRD_API_KEY`, `WZRD_MODAL_SECRET` — remote deployment only
 - `AWS_*`, `CLOUDFRONT_URL` — read by nothing on the local path; they only wake the dormant S3 code

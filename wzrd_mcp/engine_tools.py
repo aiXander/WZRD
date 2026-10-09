@@ -22,16 +22,18 @@ and the edit loop never re-emits whole scene JSON in either direction.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import time
 from collections import deque
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastmcp.exceptions import ToolError
+from fastmcp.utilities.types import Image
+from pydantic import Field
 
-from ._log import logged_tool
-from .server import mcp, get_timeout
+from .server import tool
 
 try:
     import websockets
@@ -50,17 +52,58 @@ _STANDING_CHANNELS = ["hot_reload", "connectivity", "fps", "deck", "masters", "c
 _FACETS = ("layers", "bindings", "effects", "drivers")
 
 
-def _engine_tool(name: str):
-    """Register an engine tool — no-op passthrough when websockets is
-    missing (cloud deployment), so importing this module never breaks the
-    server."""
+def _engine_tool(title: str, **hints):
+    """Register an engine tool via `server.tool()` — no-op passthrough when
+    websockets is missing (cloud deployment), so importing this module never
+    breaks the server."""
 
     def deco(fn):
         if websockets is None:
             return fn
-        return mcp.tool(timeout=get_timeout(name))(logged_tool(fn))
+        return tool(title=title, tags={"engine"}, **hints)(fn)
 
     return deco
+
+
+# Structured args must be SAYABLE: a bare `dict` publishes an object schema
+# with no properties, and a grammar-constrained decoder can then only emit {}.
+_BINDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "select": {
+            "type": "object",
+            "description": 'Exactly one of {"id": …} | {"tag": …} | {"group": …} | {"all": true}; optional "pick": {"mode": "random_each"|"random_static", "rate": {"driver": "clock.bars", "n": 4}}.',
+        },
+        "effect": {"type": "string", "description": "Effect name: built-in (tint, hueCycle, flash, wobble) or project-local (author with upsert_effect)."},
+        "params": {
+            "type": "object",
+            "description": 'Effect inputs: a constant ("#ffffff", 1.2) or a driver, e.g. {"driver": "audio.onset", "band": "low", "decay": 0.15}, {"driver": "clock.phase", "rate": 1}, {"driver": "ui.slider", "name": "x", "default": 0.1}.',
+        },
+    },
+    "required": ["select", "effect"],
+}
+_DESCRIPTOR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "inputs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string", "description": "float | color | …"},
+                    "default": {},
+                    "min": {"type": "number"},
+                    "max": {"type": "number"},
+                    "step": {"type": "number"},
+                    "unit": {"type": "string"},
+                    "widget": {"type": "string"},
+                },
+                "required": ["name", "type"],
+            },
+        },
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -404,9 +447,7 @@ def _render_effect_full(desc: dict) -> str:
 def _image_block(b64: str):
     """Best-effort MCP image content block from base64 JPEG."""
     try:
-        from mcp.types import ImageContent
-
-        return ImageContent(type="image", data=b64, mimeType="image/jpeg")
+        return Image(data=base64.b64decode(b64), format="jpeg")
     except Exception:
         return None
 
@@ -439,7 +480,7 @@ def _apply_reply(result: dict, what: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-@_engine_tool("get_scene_context")
+@_engine_tool("Read engine scene", read_only=True)
 async def get_scene_context(
     scope: Optional[list[Literal["layers", "bindings", "effects", "drivers"]]] = None,
     depth: Literal["digest", "full"] = "digest",
@@ -578,8 +619,11 @@ async def get_scene_context(
 # ---------------------------------------------------------------------------
 
 
-@_engine_tool("upsert_binding")
-async def upsert_binding(id: str, binding: dict) -> list:
+@_engine_tool("Upsert binding", idempotent=True)
+async def upsert_binding(
+    id: str,
+    binding: Annotated[dict[str, Any], Field(json_schema_extra=_BINDING_SCHEMA)],
+) -> list:
     """Create or replace ONE binding in the design scene (facet: bindings).
     The rest of the scene never enters context: this does an engine-side
     read → splice → compare-and-swap write, and rejects with a re-read
@@ -616,7 +660,7 @@ async def upsert_binding(id: str, binding: dict) -> list:
     return _apply_reply(result, f"binding '{id}' {verb}")
 
 
-@_engine_tool("remove_binding")
+@_engine_tool("Remove binding", destructive=True, idempotent=True)
 async def remove_binding(id: str) -> list:
     """Remove one binding from the design scene by id (facet: bindings)."""
     state = await _client.request("scene.getState", {})
@@ -636,9 +680,11 @@ async def remove_binding(id: str) -> list:
     return _apply_reply(result, f"binding '{id}' removed")
 
 
-@_engine_tool("upsert_effect")
+@_engine_tool("Upsert WGSL effect", idempotent=True)
 async def upsert_effect(
-    name: str, wgsl: str, descriptor: Optional[dict] = None
+    name: str,
+    wgsl: str,
+    descriptor: Annotated[Optional[dict[str, Any]], Field(json_schema_extra=_DESCRIPTOR_SCHEMA)] = None,
 ) -> list:
     """Write or update a project-local WGSL effect (facet: effects). The
     engine naga-validates FIRST (a broken shader returns line-mapped
@@ -666,7 +712,7 @@ async def upsert_effect(
     return _apply_reply(result, f"effect '{name}' upserted")
 
 
-@_engine_tool("remove_effect")
+@_engine_tool("Remove effect", destructive=True, idempotent=True)
 async def remove_effect(name: str) -> str:
     """Delete a project-local effect's files from disk (facet: effects).
     The in-memory definition survives until restart, so bindings that still
@@ -675,7 +721,7 @@ async def remove_effect(name: str) -> str:
     return f"r{result.get('rev')}: effect '{name}' removed from disk."
 
 
-@_engine_tool("set_groups")
+@_engine_tool("Set layer groups", idempotent=True)
 async def set_groups(groups: dict[str, Optional[list[str]]]) -> str:
     """Create/update/remove named layer groups in the pack's identity
     sidecar (facet: layers). Per-key: a list of layer ids sets that group's
@@ -692,7 +738,7 @@ async def set_groups(groups: dict[str, Optional[list[str]]]) -> str:
     return f"r{result.get('rev')}: groups updated. Current groups: {gdesc}"
 
 
-@_engine_tool("set_labels")
+@_engine_tool("Set layer labels", idempotent=True)
 async def set_labels(labels: dict[str, Optional[str]]) -> str:
     """Set human labels on pack layers in the identity sidecar (facet:
     layers). Per-key: a string sets the label, null clears it. Labels are
@@ -708,7 +754,7 @@ async def set_labels(labels: dict[str, Optional[str]]) -> str:
     return f"r{result.get('rev')}: labels updated. Labelled layers: {ldesc}"
 
 
-@_engine_tool("set_scene")
+@_engine_tool("Replace design scene", destructive=True)
 async def set_scene(scene_json: str) -> list:
     """Replace the ENTIRE design scene (escape hatch — prefer the granular
     upsert_binding/remove_binding verbs, which never re-emit the whole scene
@@ -729,7 +775,7 @@ async def set_scene(scene_json: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-@_engine_tool("validate_wgsl")
+@_engine_tool("Validate WGSL", read_only=True)
 async def validate_wgsl(source: str) -> str:
     """Dry-run naga validation of an effect WGSL body (no write, no probe).
     Diagnostics are remapped to your source's line numbers. Cheap — use it
@@ -744,7 +790,7 @@ async def validate_wgsl(source: str) -> str:
     return "WGSL invalid:\n" + "\n".join(lines)
 
 
-@_engine_tool("get_preview")
+@_engine_tool("Design preview frame", read_only=True)
 async def get_preview() -> list:
     """One JPEG frame of the DESIGN composite — what your current design leg
     looks like right now. Use after edits that reuse cached shaders (no
