@@ -1,0 +1,158 @@
+{
+  "_doc": "TextureFlow weights. path = ComfyUI-relative = path inside volume textureflow-models. url: public source ('generate' = made by download_models, null = no public source; seeded from Eden S3 only). sha256 verified on download when set. seeded_from = the Eden S3 key the one-time seed copied (see seed_from_eden.py).",
+  "files": [
+    {
+      "path": "custom_nodes/ComfyUI-Frame-Interpolation/ckpts/rife/rife47.pth",
+      "url": "https://github.com/Fannovel16/ComfyUI-Frame-Interpolation/releases/download/models/rife47.pth",
+      "sha256": "6a8a825ab2750558bdd20dcced386fd82b7222c7ba58c11d3b611d9c44f1be63",
+      "bytes": null
+    },
+    {
+      "path": "custom_nodes/comfyui_controlnet_aux/ckpts/lllyasviel/Annotators/body_pose_model.pth",
+      "url": "https://huggingface.co/lllyasviel/Annotators/resolve/main/body_pose_model.pth",
+      "sha256": "25a948c16078b0f08e236bda51a385d855ef4c153598947c28c0d47ed94bb746",
+      "bytes": 209267595
+    },
+    {
+      "path": "custom_nodes/comfyui_controlnet_aux/ckpts/lllyasviel/Annotators/hand_pose_model.pth",
+      "url": "https://huggingface.co/lllyasviel/Annotators/resolve/main/hand_pose_model.pth",
+      "sha256": "b76b00d1750901abd07b9f9d8c98cc3385b8fe834a26d4b4f0aad439e75fc600",
+      "bytes": 147341049
+    },
+    {
+      "path": "custom_nodes/comfyui_controlnet_aux/ckpts/lllyasviel/Annotators/facenet.pth",
+      "url": "https://huggingface.co/lllyasviel/Annotators/resolve/main/facenet.pth",
+      "sha256": "8beb52e548624ffcc4aed12af7aee7dcbfaeea420c75609fee999fe7add79d43",
+      "bytes": 153718792
+    },
+    {
+      "path": "custom_nodes/comfyui_controlnet_aux/ckpts/TheMistoAI/MistoLine/Anyline/MTEED.pth",
+      "url": "https://huggingface.co/TheMistoAI/MistoLine/resolve/main/Anyline/MTEED.pth",
+      "sha256": "a3c2d8a8ce9422555c787160bd46362d761325a565333c0e3f6a53e0bae2abdb",
+      "bytes": 248298
+    },
+    {
+      "path": "custom_nodes/comfyui_controlnet_aux/ckpts/depth-anything/Depth-Anything-V2-Large/depth_anything_v2_vitl.pth",
+      "url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Large/resolve/main/depth_anything_v2_vitl.pth",
+      "sha256": "a7ea19fa0ed99244e67b624c72b8580b7e9553043245905be58796a608eb9345",
+      "bytes": 1341395338
+    },
+    {
+      "path": "input/a_black_video.mp4",
+      "url": "generate",
+      "sha256": "6cc54785f2f9ac2a9d20b2f556a34529cc0d54b4c1739351c953e852509d61e1",
+      "bytes": 109046,
+      "seeded_from": "comfyui/models2/assets/a_black_video.mp4"
+    },
+    {
+      "path": "input/a_white_image.jpg",
+      "url": "generate",
+      "sha256": "a10709705f9fa25ea9908963fa5f1495ad8ab18a91b2f9986cfec1db78dfc1d6",
+      "bytes": 3274,
+      "seeded_from": "comfyui/models2/assets/a_white_image.jpg"
+    },
+    {
+      "path": "models/animatediff_models/AnimateLCM_sd15_t2v.ckpt",
+      "url": "https://huggingface.co/wangfuyun/AnimateLCM/resolve/main/AnimateLCM_sd15_t2v.ckpt",
+      "sha256": "b46c3de62e5696af72c4056e3cdcbea12fbc19581c0aad7b6f2b027851148f5f",
+      "bytes": 1813041929,
+      "seeded_from": "comfyui/models2/animatediff_models/AnimateLCM_sd15_t2v.ckpt"
+    },
+    {
+      "path": "models/checkpoints/SD15/darkSushiMixMix_225D.safetensors",
+      "url": "https://huggingface.co/asiryan/dark-sushi/resolve/main/darkSushiMixMix_225D.safetensors",
+      "sha256": "cca17b08da3254aa2f0242a84ab8641c89d1bc71cc1046fc79f8e906581a97ba",
+      "bytes": 2132627182
+    },
+    {
+      "path": "models/checkpoints/SD15/juggernaut_reborn.safetensors",
+      "url": "https://civitai.com/api/download/models/274039?fileId=214158",
+      "sha256": "338b85bc4f7628bc42cce336242e79154a57c2a4360531436e97f7793568f18c",
+      "bytes": 2132653060,
+      "seeded_from": "comfyui/models2/checkpoints/juggernaut_reborn.safetensors"
+    },
+    {
+      "path": "models/checkpoints/SD15/protogenV22Anime_protogenV22.safetensors",
+      "url": "https://huggingface.co/darkstorm2150/Protogen_v2.2_Official_Release/resolve/main/Protogen_V2.2.safetensors",
+      "sha256": "125410396648d4b622b7d3aa38d95f7d67ea44ee5669bc31c12f344a10f73ca9",
+      "bytes": 4265096902
+    },
+    {
+      "path": "models/clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+      "url": "https://huggingface.co/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors",
+      "sha256": "6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030",
+      "bytes": 2528373448,
+      "seeded_from": "comfyui/models2/clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+    },
+    {
+      "path": "models/controlnet/control_v11f1p_sd15_depth.pth",
+      "url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11f1p_sd15_depth.pth",
+      "sha256": "761077ffe369fe8cf16ae353f8226bd4ca29805b161052f82c0170c7b50f1d99",
+      "bytes": 1445235365,
+      "seeded_from": "comfyui/models2/controlnet/control_v11f1p_sd15_depth.pth"
+    },
+    {
+      "path": "models/controlnet/control_v11p_sd15_canny.pth",
+      "url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_canny.pth",
+      "sha256": "f99cfe4c70910e38e3fece9918a4979ed7d3dcf9b81cee293e1755363af5406a",
+      "bytes": 1445234681,
+      "seeded_from": "comfyui/models2/controlnet/control_v11p_sd15_canny.pth"
+    },
+    {
+      "path": "models/controlnet/control_v11p_sd15_lineart.pth",
+      "url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_lineart.pth",
+      "sha256": "fb5fb912696830da948e5056b50adfa3fcc68ff760c43e4e7a8499853af43c61",
+      "bytes": 1445235365,
+      "seeded_from": "comfyui/models2/controlnet/control_v11p_sd15_lineart.pth"
+    },
+    {
+      "path": "models/controlnet/control_v11p_sd15_openpose.pth",
+      "url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_openpose.pth",
+      "sha256": "db97becd92cd19aff71352a60e93c2508decba3dee64f01f686727b9b406a9dd",
+      "bytes": 1445235707,
+      "seeded_from": "comfyui/models2/controlnet/control_v11p_sd15_openpose.pth"
+    },
+    {
+      "path": "models/controlnet/control_v11p_sd15_scribble.pth",
+      "url": "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11p_sd15_scribble.pth",
+      "sha256": "14d33e8bc14ba679595d976789e4eedc36a3d2d21866ab5896355a7e6677749f",
+      "bytes": 1445235707,
+      "seeded_from": "comfyui/models2/controlnet/control_v11p_sd15_scribble.pth"
+    },
+    {
+      "path": "models/controlnet/controlnetQRPatternQR_v2Sd15.safetensors",
+      "url": "https://huggingface.co/Nacholmo/controlnet-qr-pattern-v2/resolve/main/automatic1111/QRPattern_v2_9500.safetensors",
+      "sha256": "f0648652d783aae9cba26193b598b47607e2cd48b8e63f994cdd2d8cfbc516bd",
+      "bytes": 1445154816,
+      "seeded_from": "comfyui/models2/controlnet/controlnetQRPatternQR_v2Sd15.safetensors"
+    },
+    {
+      "path": "models/embeddings/NEG_EMBED_STABLE_YOGI_V3.pt",
+      "url": null,
+      "sha256": "b81539d8303b0f090cd2f5d3af987fad4907cc640979cc9cd1555c602f693e0a",
+      "bytes": 6916,
+      "seeded_from": "comfyui/models2/embeddings/NEG_EMBED_STABLE_YOGI_V3.pt"
+    },
+    {
+      "path": "models/ipadapter/ip-adapter-plus_sd15.safetensors",
+      "url": "https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter-plus_sd15.safetensors",
+      "sha256": "a1c250be40455cc61a43da1201ec3f1edaea71214865fb47f57927e06cbe4996",
+      "bytes": 98183288,
+      "seeded_from": "comfyui/models2/ipadapter/ip-adapter-plus_sd15.safetensors"
+    },
+    {
+      "path": "models/loras/AnimateLCM_sd15_t2v_lora.safetensors",
+      "url": "https://huggingface.co/wangfuyun/AnimateLCM/resolve/main/AnimateLCM_sd15_t2v_lora.safetensors",
+      "sha256": "8f90d840e075ff588a58e22c6586e2ae9a6f7922996ee6649a7f01072333afe4",
+      "bytes": 134621556,
+      "seeded_from": "comfyui/models2/loras/AnimateLCM_sd15_t2v_lora.safetensors"
+    },
+    {
+      "path": "models/upscale_models/RealESRGAN_x2plus.pth",
+      "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+      "sha256": "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb",
+      "bytes": 67061725,
+      "seeded_from": "comfyui/models2/upscale_models/RealESRGAN_x2plus.pth"
+    }
+  ]
+}

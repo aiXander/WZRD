@@ -2,32 +2,24 @@
 
 Goal: run the whole toolkit + MCP server on localhost, with a **project folder
 per job** holding every asset, and no dependency on Eden's AWS account, Modal
-workspace, or `eve` conventions. Iterative — sprint 1 has landed, the rest is
-below.
+workspace, or `eve` conventions. Iterative — sprint 1 and the TextureFlow
+rehome have landed; what's left is below.
 
 ## Open work
 
-### 1. TextureFlow rehome (the last hard dependency)
+### 1. Teardown of the old Eden deployments (**only with Xander's OK**)
 
-`texture_flow` is **disabled** in `tools_config.json` and `server.py`. It calls
-`modal.Cls.from_name("comfyui-wzrd-STAGE", "ComfyUIPremium")`, which lives in
-the **`edenartlab` Modal workspace (env `main`)** — not in `aixander/gigabrain`
-— feeds it public input URLs, and gets outputs back as S3 keys in Eden's
-bucket. No local refactor can fix that; the deployment has to move first.
+Nothing in WZRD calls these any more (TextureFlow runs on our own
+`wzrd-textureflow`, see [reference/textureflow.md](../reference/textureflow.md)).
+On 2026-10-09 Xander chose to **keep the `edenartlab` apps unchanged for now**:
+`comfyui-wzrd-STAGE` (the Eden TextureFlow endpoint) and the stale `wzrd-mcp`
+app (see item 3). Don't stop them without a fresh OK; leave Eden's
+`comfy-downloads` volume alone regardless.
 
-Source material, both outside this repo:
-
-| What | Where |
-|---|---|
-| The workflow itself | `~/Documents/GitHub/Eden/workflows/workspaces/wzrd/workflows/texture_flow/` (`api.yaml`, `workflow_api.json`, `snapshot.json`, model-name swap script) |
-| The deploy machinery | `~/Documents/GitHub/Eden/comfyui.py` — ~1950 lines, heavily opinionated, assumes Eden's S3/`eve` conventions end to end |
-
-Work: extract a minimal ComfyUI-on-Modal deploy (no `eve` coupling), deploy to
-`aixander/gigabrain`, then in `tools.py` — point `MODAL_APP_NAME`/`MODAL_CLS_NAME`
-at it, give inputs the same just-in-time upload treatment FAL inputs get (the
-GPU worker can't read local disk either), and set an output sink it can read
-back. The download-into-project plumbing on the response side is already
-written and will work the moment `_tf_file_url` can resolve.
+Our own leftovers were stopped 2026-10-09: `aixander/main` `comfy-textureflow`
+and `aixander/wzrd` `wzrd-textureflow-dev`. The `aixander/main` volume
+`comfy-models-cache` (the dead app's model cache) was kept — remove it only with
+Xander's OK. Don't touch `stitchly-comfyui`.
 
 ### 2. Keys
 
@@ -41,7 +33,7 @@ container is ephemeral scratch nothing can read afterwards. Reviving it means
 giving it a durable sink — a Modal Volume mounted as `WZRD_PROJECTS_ROOT`, or
 `file_io.upload` against a self-owned bucket. Its secret name is now
 `WZRD_MODAL_SECRET` (default `wzrd-secrets`), no longer `eve-secrets-PROD`.
-A stale `wzrd-mcp` app is still deployed in edenartlab/main — tear it down.
+A stale `wzrd-mcp` app is still deployed in edenartlab/main — kept for now, see item 1.
 
 ### 4. Nice-to-haves
 
@@ -49,11 +41,15 @@ A stale `wzrd-mcp` app is still deployed in edenartlab/main — tear it down.
   `set_project`, plus the `WZRD_PROJECT` env var).
 - A `build_scene` step that writes `scene.json` next to a freshly built pack,
   so a project folder is engine-loadable without hand-authoring.
-- `wzrd_mcp/skills/*/skill.json` still say "URL" in their input descriptions
-  (harmless — paths chain fine — but stale), and three steps call tools that
-  are currently disabled: `texture_flow` in `island_animation` and
-  `surface_to_projection`, `kling_v3_image_to_video` in `fullframe_animation`
-  (v3 has been off in favour of v2.5 since before this sprint).
+- `fullframe_animation/skill.json` calls `kling_v3_image_to_video`, which is
+  disabled (v3 has been off in favour of v2.5 since before sprint 1).
+
+## Done — TextureFlow rehome (2026-10-09)
+
+The last hard Eden dependency is gone: `texture_flow` renders on our own
+`wzrd-textureflow` (Modal env `wzrd`), takes local paths or URLs and writes
+the mp4s into the project with no AWS env. Done — see
+[reference/textureflow.md](../reference/textureflow.md).
 
 ## Done — sprint 1 (2026-08-12)
 

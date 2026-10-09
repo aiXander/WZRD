@@ -1,0 +1,8 @@
+# Applied with -c to every pip step after the torch install, so no node
+# requirement can move the torch stack. Versions = what Eden's March 2026
+# wzrd deploy resolved its `>=` specs to (torch from the cu130 index).
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
+xformers==0.0.35
+sageattention==1.0.6

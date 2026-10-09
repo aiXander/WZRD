@@ -1,0 +1,19 @@
+{
+  "comfyui": "a7a6335be538f55faa2abf7404c9b8e970847d1f",
+  "comfyui_repo": "https://github.com/Comfy-Org/ComfyUI",
+  "custom_nodes": {
+    "https://github.com/Fannovel16/ComfyUI-Frame-Interpolation": "c336f7184cb1ac1243381e725fea1ad2c0a10c09",
+    "https://github.com/Fannovel16/comfyui_controlnet_aux": "83463c2e4b04e729268e57f638b4212e0da4badc",
+    "https://github.com/edenartlab/eden_comfy_pipelines": "17146e129dd49d701c0d4cb78eb663f132d30a50",
+    "https://github.com/cubiq/ComfyUI_IPAdapter_plus": "a0f451a5113cf9becb0847b92884cb10cbdec0ef",
+    "https://github.com/cubiq/ComfyUI_essentials": "33ff89fd354d8ec3ab6affb605a79a931b445d99",
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite": "0a3b1eb433a95d33e71bca634b8307a238d7e425",
+    "https://github.com/kijai/ComfyUI-KJNodes": "b3269479f2f188fd60bc1ce0c6d1740383b98857",
+    "https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved": "90fb1331201a4b29488089e4fbffc0d82cc6d0a9",
+    "https://github.com/crystian/ComfyUI-Crystools": "72e2e9af4a6b9a58ca5d753cacff37ba1ff9bfa8",
+    "https://github.com/rgthree/rgthree-comfy": "5dc53323e07a021038af9f2a4a06ebc071f7218c",
+    "https://github.com/Kosinkadink/ComfyUI-Advanced-ControlNet": "2bde95a468ce5fd3959f646258606ae221fa1e17",
+    "https://github.com/WASasquatch/was-node-suite-comfyui": "1014f8a1477b8ae0144e16ed4fd6476cd109fb23",
+    "https://github.com/drmbt/ControlFlowUtils": "45127f08ac627ca79242c800fdba945ae40f200c"
+  }
+}

@@ -16,6 +16,8 @@ WZRD is an additive projection-mapping system: only changing regions get project
 
 - `docs/reference/render-engine.md` — **primary engine context doc**: current system state, contracts (scene.json, layer pack, RPC/telemetry, WGSL), invariants from the 2026-07 performance pass, working agreements, rejected approaches. Read before touching `render-core/` or `wzrd-app/`.
 - `docs/reference/user_design_spec.md` — the product north star; every engine trade-off answers to it.
+- `docs/reference/textureflow.md` — the TextureFlow GPU endpoint on Modal (`deploy/textureflow/`, app `wzrd-textureflow`, env `wzrd`): render contract, pinned stack, weights volume, input traps, GPU-snapshot fast boot, the MCP client, timings. Open when touching `deploy/textureflow/` or the `texture_flow` / `textureflow_warm` MCP tools.
+- `docs/reference/resources.md` — running index of external links (repos, papers, tools) worth knowing about, each with a short "why we'd care" note. Nothing in it is a dependency; drop new links here.
 - `docs/TODO/render-engine-roadmap.md` — structural roadmap; the stable index of what's next (§5.11 post-swap probation → §5.5 WGSL `#import` → auto-pilot playlist / §5.7 layer object). Landed sections are drained to pointers into the reference doc. Other in-flight plans live alongside it in `docs/TODO/`; you'll be pointed at one by name.
 - Single-process collapse — **LANDED 2026-07-12** (Steps 2–3: in-process TauriHost + native lossless preview). Current-state residue: `docs/reference/render-engine.md` §1/§1b; the plan husk is retired in `docs/finished/`.
 - `docs/finished/` — retired plans (v1 build plan lives here). Write-only; never read from it.
@@ -43,6 +45,12 @@ python test.py subtract_frame darken
 python -m wzrd_mcp            # default: streamable-HTTP on 0.0.0.0:8787
 python -m wzrd_mcp --no-debug # disable verbose tool logging
 python -m wzrd_mcp --stdio    # stdio transport (Claude Desktop spawns this itself)
+
+# TextureFlow GPU endpoint on Modal (every call needs --env wzrd; see docs/reference/textureflow.md)
+uv run modal deploy --env wzrd deploy/textureflow/app.py
+uv run modal run --env wzrd deploy/textureflow/app.py::smoke    # one cheap render -> deploy/textureflow/test_results/smoke/
+# NEVER run the full ::matrix without Xander's explicit permission (57 GPU renders, real money); use ::smoke or a narrow --only subset.
+uv run modal run --env wzrd deploy/textureflow/app.py::warm --minutes 120   # show-day: keep one GPU warm (0 = cool down)
 
 # Realtime engine (headless agent path — no UI process)
 # NOTE: there is NO `render-core` on PATH. `cargo build` only writes the binary
@@ -94,6 +102,8 @@ No linting, formatting, or CI pipelines are configured. No pytest — tests use 
   - **Debug** — collapsible panels (connectivity, render stats, driver bus snapshot, hot-reload events history, log stream with level filter, raw pack/scene dump).
   Top status strip (OSC / Engine / FPS / Reload pills) is constant across all routes. All scene mutations (Monaco *and* structured editors) funnel through `src/state/sceneCommit.ts` (optimistic local state, engine push debounced 150 ms, disk write debounced 800 ms) — don't add a second commit path. Backend in `src-tauri/`: `engine.rs` (in-process TauriHost — engine window, render thread with `NSWindow.occlusionState` polling, telemetry fan-in, native preview child window + `preview_set_bounds`), `rpc.rs` (Tauri commands proxying every method — unchanged by the collapse), `lib.rs` (tee logger, App Nap opt-out, scene-path resolution; handles `cargo tauri dev`'s CWD switching; teardown centralized in `RunEvent::ExitRequested`). Scene path bound via `WZRD_SCENE` env or `--scene` arg.
 
+**One Modal deploy** at `deploy/textureflow/` — the TextureFlow ComfyUI GPU endpoint, self-contained (imports nothing from `wzrd/`/`wzrd_mcp/`). Every Modal CLI call for it needs `--env wzrd`; details in `docs/reference/textureflow.md`.
+
 ### wzrd/ package
 
 **Import strategy** (`__init__.py`): Eagerly imports `subtract_frame` and `utils`. All other modules (`darken`, `detect`, `align`, `islands`, `subtract_video`, `reproject`, `prepare_surface`) are lazy-imported via `__getattr__` to avoid loading heavy deps (scikit-learn, etc.) when not needed.
@@ -123,7 +133,7 @@ folder is directly loadable by the engine.
 - `server.py` — FastMCP instance, tool registry, config loading
 - `project.py` — Project folders under `projects/` (gitignored; `WZRD_PROJECTS_ROOT` moves the root, `WZRD_PROJECT` picks one). Reserve destinations with `output_path`/`output_dir` *before* running work so libraries write straight into the project (sidecar files like alignment-aid videos follow for free); `store`/`download_async` bring in files produced elsewhere. **The layout is a render-core scene directory on purpose** — `scene.json` + `effects/` + `packs/<pack>/` — which is why `build_layerpack` output loads as-is
 - `project_tools.py` — the `set_project` tool (session-level active project; step one of any content-pipeline session)
-- `tools.py` — Tool wrappers for core wzrd functions (subtract, detect, align, darken, prepare_surface, islands, reproject, layerpack, simulate_view, texture_flow)
+- `tools.py` — Tool wrappers for core wzrd functions (subtract, detect, align, darken, prepare_surface, islands, reproject, layerpack, simulate_view, texture_flow, textureflow_warm)
 - `fal_tools.py` — FAL API integrations (kling, nano_banana_pro). Results download into the project; **local inputs are uploaded to FAL's own CDN just in time** (`_to_fal_url`) since FAL's workers can't read this disk — the only outbound file copy left
 - `engine_tools.py` — §5.10 authoring tools against the realtime engine's WS (`ws://127.0.0.1:9123`); local-only (needs `.[engine]` → `websockets`, absent from the Modal image), default-off in `server.py`, on in local `tools_config.json`. Contract: `docs/reference/render-engine.md` §2.7
 - `file_io.py` — Input resolution (URL → download, base64 decode, local path). Its S3 upload half is **dormant** — no tool calls it, `boto3` is lazily imported behind the optional `s3` extra; kept for a future self-owned bucket
@@ -135,7 +145,7 @@ folder is directly loadable by the engine.
 
 **Flow:** local paths (or URLs) in → call wzrd function → write into the active project → return local paths.
 
-**`texture_flow` is disabled** — it's the one remaining Eden dependency (a ComfyUI deployment in the `edenartlab` Modal workspace). Don't re-enable it without reading `docs/TODO/eden-decoupling.md`.
+**`texture_flow` renders on our own Modal app** `wzrd-textureflow` (env `wzrd`): local paths are sent as bytes, URLs pass through, only caller-set args go over the wire (server owns the api.yaml defaults), mp4s land in the project's `generated/`. No Eden, no S3. A redeploy of `deploy/textureflow/` discards its GPU snapshot, so the next 1–2 cold starts take 2–3 min — prime it before a show (`textureflow_warm`). Contract: `docs/reference/textureflow.md`.
 
 **Environment variables (`.env` loaded automatically, see `.env.example`):**
 - `FAL_KEY` — Required for FAL tools (kling, nano_banana_pro). The only key a local session needs

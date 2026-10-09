@@ -1,0 +1,107 @@
+[
+  {
+    "path": "input/a_black_video.mp4",
+    "s3_key": "comfyui/models2/assets/a_black_video.mp4",
+    "bytes": 109046,
+    "sha256": "6cc54785f2f9ac2a9d20b2f556a34529cc0d54b4c1739351c953e852509d61e1",
+    "status": "copied"
+  },
+  {
+    "path": "input/a_white_image.jpg",
+    "s3_key": "comfyui/models2/assets/a_white_image.jpg",
+    "bytes": 3274,
+    "sha256": "a10709705f9fa25ea9908963fa5f1495ad8ab18a91b2f9986cfec1db78dfc1d6",
+    "status": "copied"
+  },
+  {
+    "path": "models/animatediff_models/AnimateLCM_sd15_t2v.ckpt",
+    "s3_key": "comfyui/models2/animatediff_models/AnimateLCM_sd15_t2v.ckpt",
+    "bytes": 1813041929,
+    "sha256": "b46c3de62e5696af72c4056e3cdcbea12fbc19581c0aad7b6f2b027851148f5f",
+    "status": "copied"
+  },
+  {
+    "path": "models/checkpoints/SD15/juggernaut_reborn.safetensors",
+    "s3_key": "comfyui/models2/checkpoints/juggernaut_reborn.safetensors",
+    "bytes": 2132653060,
+    "sha256": "338b85bc4f7628bc42cce336242e79154a57c2a4360531436e97f7793568f18c",
+    "status": "copied"
+  },
+  {
+    "path": "models/clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+    "s3_key": "comfyui/models2/clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+    "bytes": 2528373448,
+    "sha256": "6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030",
+    "status": "copied"
+  },
+  {
+    "path": "models/controlnet/control_v11f1p_sd15_depth.pth",
+    "s3_key": "comfyui/models2/controlnet/control_v11f1p_sd15_depth.pth",
+    "bytes": 1445235365,
+    "sha256": "761077ffe369fe8cf16ae353f8226bd4ca29805b161052f82c0170c7b50f1d99",
+    "status": "copied"
+  },
+  {
+    "path": "models/controlnet/control_v11p_sd15_canny.pth",
+    "s3_key": "comfyui/models2/controlnet/control_v11p_sd15_canny.pth",
+    "bytes": 1445234681,
+    "sha256": "f99cfe4c70910e38e3fece9918a4979ed7d3dcf9b81cee293e1755363af5406a",
+    "status": "copied"
+  },
+  {
+    "path": "models/controlnet/control_v11p_sd15_lineart.pth",
+    "s3_key": "comfyui/models2/controlnet/control_v11p_sd15_lineart.pth",
+    "bytes": 1445235365,
+    "sha256": "fb5fb912696830da948e5056b50adfa3fcc68ff760c43e4e7a8499853af43c61",
+    "status": "copied"
+  },
+  {
+    "path": "models/controlnet/control_v11p_sd15_openpose.pth",
+    "s3_key": "comfyui/models2/controlnet/control_v11p_sd15_openpose.pth",
+    "bytes": 1445235707,
+    "sha256": "db97becd92cd19aff71352a60e93c2508decba3dee64f01f686727b9b406a9dd",
+    "status": "copied"
+  },
+  {
+    "path": "models/controlnet/control_v11p_sd15_scribble.pth",
+    "s3_key": "comfyui/models2/controlnet/control_v11p_sd15_scribble.pth",
+    "bytes": 1445235707,
+    "sha256": "14d33e8bc14ba679595d976789e4eedc36a3d2d21866ab5896355a7e6677749f",
+    "status": "copied"
+  },
+  {
+    "path": "models/controlnet/controlnetQRPatternQR_v2Sd15.safetensors",
+    "s3_key": "comfyui/models2/controlnet/controlnetQRPatternQR_v2Sd15.safetensors",
+    "bytes": 1445154816,
+    "sha256": "f0648652d783aae9cba26193b598b47607e2cd48b8e63f994cdd2d8cfbc516bd",
+    "status": "copied"
+  },
+  {
+    "path": "models/embeddings/NEG_EMBED_STABLE_YOGI_V3.pt",
+    "s3_key": "comfyui/models2/embeddings/NEG_EMBED_STABLE_YOGI_V3.pt",
+    "bytes": 6916,
+    "sha256": "b81539d8303b0f090cd2f5d3af987fad4907cc640979cc9cd1555c602f693e0a",
+    "status": "copied"
+  },
+  {
+    "path": "models/ipadapter/ip-adapter-plus_sd15.safetensors",
+    "s3_key": "comfyui/models2/ipadapter/ip-adapter-plus_sd15.safetensors",
+    "bytes": 98183288,
+    "sha256": "a1c250be40455cc61a43da1201ec3f1edaea71214865fb47f57927e06cbe4996",
+    "status": "copied"
+  },
+  {
+    "path": "models/loras/AnimateLCM_sd15_t2v_lora.safetensors",
+    "s3_key": "comfyui/models2/loras/AnimateLCM_sd15_t2v_lora.safetensors",
+    "bytes": 134621556,
+    "sha256": "8f90d840e075ff588a58e22c6586e2ae9a6f7922996ee6649a7f01072333afe4",
+    "status": "copied"
+  },
+  {
+    "path": "models/upscale_models/RealESRGAN_x2plus.pth",
+    "s3_key": "comfyui/models2/upscale_models/RealESRGAN_x2plus.pth",
+    "bytes": 67061725,
+    "sha256": "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb",
+    "status": "copied"
+  }
+]

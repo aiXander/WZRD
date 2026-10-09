@@ -10,8 +10,8 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -589,91 +589,81 @@ async def reproject_video(
 # ---------------------------------------------------------------------------
 # Tool 9: texture_flow
 #
-# THE LAST EDEN DEPENDENCY — disabled in tools_config.json until it is rehomed.
-# It calls a ComfyUI deployment (`comfyui-wzrd-STAGE` / `ComfyUIPremium`) that
-# lives in the *edenartlab* Modal workspace, feeds it public input URLs, and
-# reads outputs back as S3 keys in Eden's bucket. Nothing here can be fixed by
-# a local refactor; the workflow + deploy script have to move first.
-# See docs/TODO/eden-decoupling.md.
+# Calls our own Modal deployment `wzrd-textureflow` (env `wzrd`, source in
+# deploy/textureflow/). Local files travel as bytes in `files`, URLs pass
+# through, and the returned mp4 bytes land in the project's generated/ folder.
+# Only caller-set args are sent: the server owns the defaults (api.yaml) and
+# all validation. Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
 
-# S3/CloudFront settings for downloading TextureFlow outputs. No Eden default:
-# a rehomed deployment must name its own bucket.
-_TF_BUCKET = os.getenv("AWS_BUCKET_NAME")
-_TF_REGION = os.getenv("AWS_REGION_NAME", "us-east-1")
-_TF_CLOUDFRONT = os.getenv("CLOUDFRONT_URL")
+_TF_MEDIA = ("images", "control_input", "diffusion_mask")
 
 
-def _tf_file_url(filename: str) -> str:
-    """Build a download URL for an S3 key from the TextureFlow result."""
-    if _TF_CLOUDFRONT:
-        return f"{_TF_CLOUDFRONT}/{filename}"
-    if not _TF_BUCKET:
-        raise ToolError(
-            "TextureFlow returned an S3 key but no bucket is configured. "
-            "Set AWS_BUCKET_NAME (or CLOUDFRONT_URL) for the deployment that "
-            "produced it — see docs/TODO/eden-decoupling.md."
-        )
-    return f"https://{_TF_BUCKET}.s3.{_TF_REGION}.amazonaws.com/{filename}"
+def _tf_pack_media(args: dict) -> dict[str, bytes]:
+    """Swap local paths in the media args for keys into a `files` dict.
 
+    URLs are left as-is (the server downloads them). Keys are basenames, made
+    unique, so the server sees the original file names and extensions.
+    """
+    files: dict[str, bytes] = {}
 
-def _tf_extract_urls(obj):
-    """Recursively extract download URLs from a ComfyUI upload_result structure."""
-    urls = []
-    if isinstance(obj, str) and obj.startswith("http"):
-        local_name = os.path.basename(urlparse(obj).path) or "output"
-        urls.append((obj, local_name))
-    elif isinstance(obj, dict):
-        if "filename" in obj and isinstance(obj["filename"], str):
-            s3_key = obj["filename"]
-            urls.append((_tf_file_url(s3_key), os.path.basename(s3_key)))
-        else:
-            for v in obj.values():
-                urls.extend(_tf_extract_urls(v))
-    elif isinstance(obj, (list, tuple)):
-        for item in obj:
-            urls.extend(_tf_extract_urls(item))
-    return urls
+    def pack(ref: str) -> str:
+        if ref.startswith(("http://", "https://")):
+            return ref
+        path = Path(ref).expanduser()
+        if not path.is_file():
+            raise ToolError(f"texture_flow: {ref!r} is neither an http(s) URL nor an existing local file")
+        key, n = path.name, 2
+        while key in files:
+            key, n = f"{path.stem}_{n}{path.suffix}", n + 1
+        files[key] = path.read_bytes()
+        return key
 
-
-def _tf_extract_first_url(obj) -> str | None:
-    """Extract the first download URL from a ComfyUI output node value."""
-    urls = _tf_extract_urls(obj)
-    return urls[0][0] if urls else None
+    for name in _TF_MEDIA:
+        if name in args:
+            v = args[name]
+            args[name] = [pack(x) for x in v] if isinstance(v, list) else pack(v)
+    return files
 
 
 @mcp.tool(timeout=get_timeout("texture_flow"))
 @logged_tool
 async def texture_flow(
     images: list[str],
-    n_seconds: float = 5.0,
-    width: int = 512,
-    height: int = 384,
-    base_model: str = "SD15/juggernaut_reborn.safetensors",
-    use_controlnet1: bool = False,
-    control_input: str = "",
-    diffusion_mask: str = "",
-    preprocessor1: str = "Scribble_XDoG_Preprocessor",
-    controlnet_strength1: float = 0.45,
-    denoise: float = 1.0,
-    control_input_fit_strategy: str = "fill / crop",
-    map_shape_input_to_ip_masks: bool = False,
-    mapping_mode: str = "concentric_circles_outwards",
-    n_steps: int = 6,
-    motion_scale: float = 1.15,
-    use_upscale: bool = False,
-    upscale_resolution: int = 1024,
-    upscale_esrgan: bool = False,
-    seed: int = -1,
+    n_seconds: Optional[float] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    base_model: Optional[str] = None,
+    use_controlnet1: Optional[bool] = None,
+    control_input: Optional[str] = None,
+    diffusion_mask: Optional[str] = None,
+    preprocessor1: Optional[str] = None,
+    controlnet_strength1: Optional[float] = None,
+    denoise: Optional[float] = None,
+    control_input_fit_strategy: Optional[str] = None,
+    map_shape_input_to_ip_masks: Optional[bool] = None,
+    mapping_mode: Optional[str] = None,
+    n_steps: Optional[int] = None,
+    motion_scale: Optional[float] = None,
+    use_upscale: Optional[bool] = None,
+    upscale_resolution: Optional[int] = None,
+    upscale_esrgan: Optional[bool] = None,
+    seed: Optional[int] = None,
+    output_codec: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Generate a smooth, morphing animation video from style images using the TextureFlow AI model (runs on a remote Modal GPU endpoint).
+    """Generate a smooth, morphing animation video from style images using the TextureFlow AI model (runs on WZRD's own Modal GPU endpoint).
 
     TextureFlow creates trippy, artistic, morphing animations from 1-6 style images based on AnimateDiff, SDv15 and IP-adapter and controlnet.
     Ideal for VJ loops, animated logos, abstract animations, and projection mapping content.
 
     The style images drive the textures, content, and colors of the output video, but style images will never appear in the generated video exactly as keyframes.
     Scale video length proportionally with number of style images (~3s per image is a good rule of thumb).
+
+    Every media argument (images, control_input, diffusion_mask) takes a local file path or an http(s) URL.
+    Leave an argument out to get the server default (listed per arg below). Note the defaults render a full-HD upscaled
+    video (use_upscale and upscale_esrgan on), which takes ~6 min warm; set use_upscale=false AND upscale_esrgan=false for fast tests (~30 s at 384x384).
+    A cold GPU start adds about a minute.
 
     Optional shape guidance (controlnet):
     - Set use_controlnet1=true and provide a control_input image/video to add shape guidance.
@@ -687,121 +677,96 @@ async def texture_flow(
     - Logo animation: logo as control_input + texture images as style
     - Motion-driven animation: simple motion video/GIF as control_input
     - Animated QR codes: QR code as control_input with preprocessor1="none"
+    - Island videos: a region mask as diffusion_mask, no control_input (white = animated, black = stays black)
 
     Args:
-        images: 1-6 style image URLs driving the content/textures/colors of the video. More images = more variety.
-        n_seconds: Video length in seconds (2.0-24.0). Scale with number of style images (~3s per image).
-        width: Video width in pixels (320-1280, step 32). High values may cause duplication artifacts and are very slow.
-        height: Video height in pixels (320-1280, step 32). High values may cause duplication artifacts and are very slow.
+        images: 1-6 style images (local paths or URLs) driving the content/textures/colors of the video. More images = more variety.
+        n_seconds: Video length in seconds (2.0-24.0, default 6). Scale with number of style images (~3s per image).
+        width: Video width in pixels (320-1280, step 32, default 640). High values may cause duplication artifacts and are very slow.
+        height: Video height in pixels (320-1280, step 32, default 640). High values may cause duplication artifacts and are very slow.
         base_model: SD1.5 checkpoint. Options: "SD15/juggernaut_reborn.safetensors" (realistic, best default), "SD15/darkSushiMixMix_225D.safetensors" (more creative/abstract, softer, pastel colors), "SD15/protogenV22Anime_protogenV22.safetensors" (anime/cartoon, flat colors).
-        use_controlnet1: Enable controlnet shape guidance. Requires control_input.
-        control_input: URL to an image/video for shape guidance. Used as controlnet input when use_controlnet1=true. Can be a logo, surface photo, motion video, or QR code.
-        diffusion_mask: Optional image/video mask URL controlling which regions are affected by diffusion. White regions will get animated, black regions remain black. Use this to generated island videos. Diffusion_mask can also be eg a shape filling video.
-        preprocessor1: Shape guidance type (only used when use_controlnet1=true). Options: "Scribble_XDoG_Preprocessor" (rough shape, good quality), "CannyEdgePreprocessor" (strong detailed edges), "DepthAnythingV2Preprocessor" (depth structure, ignores edges), "AnyLineArtPreprocessor_aux" (lineart), "DensePosePreprocessor" (human pose extraction), "none" (luminance/QR mode - maintains dark/bright regions).
-        controlnet_strength1: Shape guidance strength 0.0-1.0 (only when use_controlnet1=true). Default 0.45. Subtle: 0.35-0.45, strong: 0.45-0.65. Too high can look bad.
-        denoise: AI strength on top of shape input 0.1-1.0 (only when use_controlnet1=true). Lower values (0.8-0.9) preserve some of the control input's colors/shape. This can be used to provide eg a logo / rough color outline and then diffuse an animation on top of that. Can be used with or without controlnet_strength1.
-        control_input_fit_strategy: How to resize shape input to target dimensions. "fill / crop" (recommended), "stretch" (distorts), "pad" (can cause artifacts).
+        use_controlnet1: Enable controlnet shape guidance (default false). Requires control_input.
+        control_input: Local path or URL of an image/GIF/video for shape guidance. Used as controlnet input when use_controlnet1=true. Can be a logo, surface photo, motion video, or QR code. It is also the "shape input" in two places regardless of use_controlnet1: the img2img start when denoise < 1, and what shows in black diffusion_mask regions (see those args). Omitted = a black video.
+        diffusion_mask: Optional local path or URL of an image/video mask controlling which regions are affected by diffusion. White regions get animated; black regions keep the *shape input* untouched, i.e. they stay black only when no control_input is given (with a control_input, its own pixels show through there, even with use_controlnet1=false). Use this to generate island videos (omit control_input so the rest stays black). Can also be e.g. a shape-filling video. The mask edge is grown and blurred.
+        preprocessor1: Shape guidance type (only used when use_controlnet1=true). Options: "Scribble_XDoG_Preprocessor" (default; rough shape, good quality), "CannyEdgePreprocessor" (strong detailed edges), "DepthAnythingV2Preprocessor" (depth structure, ignores edges), "AnyLineArtPreprocessor_aux" (lineart), "OpenposePreprocessor" (human pose: extracts a body/hand/face stick-figure skeleton and the output follows that pose; needs a clearly visible person, ideally full-body; with no person the control signal is black, so shape guidance does nothing, no error), "none" (luminance/QR mode - maintains dark/bright regions). The server rejects anything else and lists the valid options.
+        controlnet_strength1: Shape guidance strength 0.0-1.0 (only when use_controlnet1=true, default 0.45). Subtle: 0.35-0.45, strong: 0.45-0.65. Too high can look bad.
+        denoise: AI strength on top of the shape input, 0.1-1.0 (default 1.0). Two different modes, not a smooth dial:
+            - 1.0 (default): fresh render from noise; the shape input only guides via controlnet.
+            - < 1.0: img2img that starts from control_input itself (fit to width/height), so its colors, darkness and layout carry over. This happens whenever control_input is set, even with use_controlnet1=false. Without a control_input the start is a black frame, so denoise < 1 gives a near-black video: never lower denoise without a control_input.
+            There is a big jump between 0.99 and 1.0. Below 1, the steps actually run are the last n_steps of int(n_steps / denoise), so the dial is coarse at low n_steps: at n_steps=4 every value in 0.81-0.99 renders identically, and finer control needs more steps.
+            Measured (n_steps=4): a flat black/white logo at 0.7 comes back almost unchanged; a photo at 0.7-0.95 is restyled progressively while its composition stays put. Use 0.7-0.9 to "AI-skin" a photo or projection surface; use 1.0 when the style images should dominate.
+        control_input_fit_strategy: How to resize shape input to target dimensions. "fill / crop" (default, recommended), "stretch" (distorts), "pad" (can cause artifacts).
         map_shape_input_to_ip_masks: Advanced: use color clusters from shape input to spatially map style images. Only enable when shape input has flat single-color regions. Overrides mapping_mode.
-        mapping_mode: Motion pattern for style image mapping. Options: "concentric_circles_inwards", "concentric_circles_outwards" (good default), "concentric_rectangles_inwards", "concentric_rectangles_outwards", "rotating_segments_clockwise", "rotating_segments_counter_clockwise" (avoid unless asked), "pushing_segments_clockwise", "pushing_segments_counter_clockwise", "vertical_stripes_left", "vertical_stripes_right", "horizontal_stripes_up" (good for demos), "horizontal_stripes_down".
-        n_steps: LCM denoising steps (4-14). Lower = faster/cheaper, higher = slightly better quality. Runtime scales linearly with n_steps.
-        motion_scale: Animation motion strength (0.7-1.4). Default 1.1 is good. 0.9 = subtle, 1.25 = more motion. Above 1.3 is rarely desirable.
-        use_upscale: Enable HD upscaling second pass. Disable for faster/cheaper experimentation, enable for HD videos.
-        upscale_resolution: Max dimension for latent upscale (1024-1536, step 64). Only used when use_upscale=true.
-        upscale_esrgan: Enable ESRGAN postprocessing for full HD (1080p). Great for sharp/realistic, less ideal for organic/stylistic. Only used when use_upscale=true.
-        seed: Random seed for reproducibility (0-2147483647). Leave as None for random, set manually when doing param gridsearches (rarely needed).
+        mapping_mode: Motion pattern for style image mapping. Options: "concentric_circles_inwards", "concentric_circles_outwards" (default), "concentric_rectangles_inwards", "concentric_rectangles_outwards", "rotating_segments_clockwise", "rotating_segments_counter_clockwise" (avoid unless asked), "pushing_segments_clockwise", "pushing_segments_counter_clockwise", "vertical_stripes_left", "vertical_stripes_right", "horizontal_stripes_up" (good for demos), "horizontal_stripes_down".
+        n_steps: LCM denoising steps (4-14, default 8). Lower = faster/cheaper, higher = slightly better quality. Runtime scales linearly with n_steps.
+        motion_scale: Animation motion strength (0.7-1.4, default 1.1). 0.9 = subtle, 1.25 = more motion. Above 1.3 is rarely desirable.
+        use_upscale: HD upscaling second pass (default true). Set false for faster/cheaper experimentation, true for HD videos.
+        upscale_resolution: Max dimension for latent upscale (1024-1536, step 64, default 1280). Only used when use_upscale=true.
+        upscale_esrgan: ESRGAN postprocessing to full HD (1920 px on the long side) (default true). Great for sharp/realistic, less ideal for organic/stylistic. Runs even when use_upscale=false, so turn both off for fast tests.
+        seed: Random seed (0-2147483647). Omit for random; the seed actually used is returned as `seed`, so pass it back to reproduce a render.
+        output_codec: "h264" (default, plays everywhere) or "hevc10" (HEVC 10-bit, smaller/higher fidelity, not decodable everywhere). Applies to output_video and first_pass_video.
+
+    Returns:
+        Local paths of output_video, first_pass_video, control_signal_preview and mapping_motion_preview
+        (each present if the graph produced it), plus seed, params (every resolved arg), request_id and timings.
     """
+    # First statement on purpose: locals() is exactly the tool's parameters here.
+    args = {k: v for k, v in locals().items() if k != "ctx" and v is not None}
     _name = "texture_flow"
     t0 = time.time()
     try:
         import modal
 
-        args = {
-            "images": images,
-            "n_seconds": n_seconds,
-            "width": width,
-            "height": height,
-            "base_model": base_model,
-            "use_controlnet1": use_controlnet1,
-            "preprocessor1": preprocessor1,
-            "controlnet_strength1": controlnet_strength1,
-            "denoise": denoise,
-            "control_input_fit_strategy": control_input_fit_strategy,
-            "map_shape_input_to_ip_masks": map_shape_input_to_ip_masks,
-            "mapping_mode": mapping_mode,
-            "n_steps": n_steps,
-            "motion_scale": motion_scale,
-            "use_upscale": use_upscale,
-            "upscale_resolution": upscale_resolution,
-            "upscale_esrgan": upscale_esrgan,
-        }
+        files = await asyncio.to_thread(_tf_pack_media, args)
 
-        if control_input != "":
-            args["control_input"] = control_input
-        if diffusion_mask != "":
-            args["diffusion_mask"] = diffusion_mask
-        if seed >= 0:
-            args["seed"] = seed
+        app_name = os.getenv("TEXTUREFLOW_APP", "wzrd-textureflow")
+        env = os.getenv("WZRD_MODAL_ENV", "wzrd")
+        mb = sum(len(b) for b in files.values()) / 1e6
+        log_progress(_name, f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
+        tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
+        res = await tf.render.remote.aio(args=args, files=files)
 
-        app_name = os.getenv("MODAL_APP_NAME", "comfyui-wzrd-STAGE")
-        cls_name = os.getenv("MODAL_CLS_NAME", "ComfyUIPremium")
-
-        log_progress(_name, f"Calling Modal endpoint ({app_name}/{cls_name})...")
-
-        cls = modal.Cls.from_name(app_name, cls_name)
-        instance = cls()
-        result = await instance.run.remote.aio(tool_key="texture_flow", args=args)
-
-        log_progress(_name, "Extracting output URLs...")
-
-        # Map ComfyUI intermediate output keys to descriptive names
-        _INTERMEDIATE_KEY_MAP = {
-            "pass_1": "first_pass_video",
-            "control_signal_1": "control_signal_preview",
-            "mapping_motion": "mapping_motion_preview",
-        }
-
-        # Extract main output video
         response: dict = {}
-        if isinstance(result, dict):
-            # Main output: top-level "output" key from ComfyUI handler
-            main_output = result.get("output")
-            if main_output:
-                url = _tf_extract_first_url(main_output)
-                if url:
-                    response["output_video"] = url
+        for key, out in res["outputs"].items():
+            path = project.output_path(f"{_name}_{key}", Path(out["filename"]).suffix or ".mp4",
+                                       kind=project.GENERATED)
+            await asyncio.to_thread(Path(path).write_bytes, out["bytes"])
+            response[key] = path
+        response.update(seed=res["params"].get("seed"), params=res["params"],
+                        request_id=res["request_id"], timings=res["timings"])
 
-            # Intermediate/debug outputs
-            intermediates = result.get("intermediate_outputs", {})
-            if isinstance(intermediates, dict):
-                for raw_key, named_key in _INTERMEDIATE_KEY_MAP.items():
-                    node_val = intermediates.get(raw_key)
-                    if node_val:
-                        url = _tf_extract_first_url(node_val)
-                        if url:
-                            response[named_key] = url
-
-        # Fallback: if we couldn't parse structured output, extract all URLs
-        if "output_video" not in response:
-            all_urls = _tf_extract_urls(result)
-            if all_urls:
-                response["output_video"] = all_urls[0][0]
-                # Assign remaining URLs to intermediate keys in order
-                fallback_keys = ["first_pass_video", "control_signal_preview", "mapping_motion_preview"]
-                for i, (url, _) in enumerate(all_urls[1:]):
-                    key = fallback_keys[i] if i < len(fallback_keys) else f"extra_output_{i}"
-                    response[key] = url
-
-        # Bring every remote result home before returning it.
-        log_progress(_name, f"Downloading {len(response)} output(s)...")
-        keys = list(response)
-        paths = await asyncio.gather(*(
-            project.download_async(response[k], tool=f"{_name}_{k}", kind=project.GENERATED)
-            for k in keys
-        ))
-        response = dict(zip(keys, paths))
-
-        log_done(_name, t0, response)
+        log_done(_name, t0, {k: v for k, v in response.items() if k != "params"})
         return response
+    except ToolError:
+        raise
+    except Exception as exc:
+        log_error(_name, exc, t0)
+        raise ToolError(str(exc))
+
+
+@mcp.tool(timeout=get_timeout("textureflow_warm"))
+@logged_tool
+async def textureflow_warm(minutes: float = 60, ctx: Optional[Context] = None) -> dict:
+    """Keep one TextureFlow GPU container running so renders skip the cold start (normally +15-20 s; the first cold starts after a redeploy take 2-3 min).
+
+    Use before a live session or show: textureflow_warm(minutes=180). Calling again moves the deadline;
+    minutes=0 cools down immediately. The timer runs on Modal, so the container scales back to zero by
+    itself even if this machine goes offline. An idle warm L40S costs roughly $2/hour — cool down when done.
+
+    Args:
+        minutes: How long to stay warm from now (0-720). 0 = scale back to zero now.
+    """
+    _name = "textureflow_warm"
+    t0 = time.time()
+    try:
+        import modal
+
+        app_name = os.getenv("TEXTUREFLOW_APP", "wzrd-textureflow")
+        env = os.getenv("WZRD_MODAL_ENV", "wzrd")
+        fn = modal.Function.from_name(app_name, "set_warm", environment_name=env)
+        result = await fn.remote.aio(minutes)
+        log_done(_name, t0, result)
+        return result
     except ToolError:
         raise
     except Exception as exc:

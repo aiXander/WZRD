@@ -10,7 +10,7 @@
     },
     "style_images": {
       "type": "array",
-      "description": "1-6 style image URLs for TextureFlow content generation per island.",
+      "description": "1-6 style images (local paths or URLs) for TextureFlow content generation per island.",
       "required": true
     },
     "max_colors": {
@@ -38,7 +38,9 @@
         "diffusion_mask": "{steps.regions.regions[i].region_mask}",
         "n_seconds": 5.0,
         "width": 512,
-        "height": 384
+        "height": 384,
+        "use_upscale": false,
+        "upscale_esrgan": false
       },
       "output_key": "island_videos",
       "loop_over": "steps.regions.regions"

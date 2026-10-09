@@ -15,7 +15,7 @@
     },
     "style_images": {
       "type": "array",
-      "description": "1-6 style image URLs for TextureFlow content generation.",
+      "description": "1-6 style images (local paths or URLs) for TextureFlow content generation.",
       "required": true
     },
     "prompt": {
@@ -56,7 +56,9 @@
         "use_controlnet1": true,
         "control_input": "{steps.masked_surface.output_images[0]}",
         "preprocessor1": "Scribble_XDoG_Preprocessor",
-        "controlnet_strength1": 0.45
+        "controlnet_strength1": 0.45,
+        "use_upscale": false,
+        "upscale_esrgan": false
       },
       "output_key": "generated"
     },

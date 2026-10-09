@@ -24,9 +24,10 @@ _DEFAULT_TOOLS = {
     "prepare_surface": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "extract_color_regions": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "reproject_video": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
-    # Off until it is rehomed out of Eden's Modal workspace — see
-    # docs/TODO/eden-decoupling.md.
-    "texture_flow": {"enabled": False, "timeout": 1500},
+    # Renders on our own Modal app `wzrd-textureflow` (env `wzrd`) — see
+    # docs/reference/textureflow.md.
+    "texture_flow": {"enabled": True, "timeout": 1500},
+    "textureflow_warm": {"enabled": True, "timeout": 120},
     "kling_v3_image_to_video": {"enabled": True, "timeout": 600},
     "nano_banana_pro": {"enabled": True, "timeout": _DEFAULT_TIMEOUT},
     "simulate_view": {"enabled": True, "timeout": 300},
