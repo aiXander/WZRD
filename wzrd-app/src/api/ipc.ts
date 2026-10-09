@@ -2,8 +2,8 @@
 // the surface small + typed means the rest of the front-end doesn't import
 // '@tauri-apps/api/core' directly — handy if we ever swap transport.
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import type { UnlistenFn } from '@tauri-apps/api/event';
+import { call as invoke, listenEvent } from './transport';
 
 export type PackLayer = {
   id: string;
@@ -133,8 +133,37 @@ export type ChangeEntry = {
 
 export const engineStatus = () => invoke<EngineStatus>('engine_status');
 export const packInfo = () => invoke<PackInfo>('pack_info');
-export const sceneGetState = () =>
-  invoke<{ json: string; leg: string; epoch: number; rev: number }>('scene_get_state');
+export const sceneGetState = (leg?: 'live' | 'design') =>
+  invoke<{ json: string; leg: string; epoch: number; rev: number }>('scene_get_state', {
+    leg: leg ?? null,
+  });
+/**
+ * Live tempo + downbeat. Tempo changes keep the beat grid continuous;
+ * `resync` puts a bar line at "now"; `sync` snaps design's clock onto live's.
+ * Omit `leg` to move both legs together.
+ */
+export const transportSet = (opts: { bpm?: number; resync?: boolean; sync?: boolean; leg?: LegName }) =>
+  invoke<unknown>('transport_set', {
+    bpm: opts.bpm ?? null,
+    resync: opts.resync ?? false,
+    sync: opts.sync ?? false,
+    leg: opts.leg ?? null,
+  });
+/** One leg's knob values + override table (incl. `@opacity`/`@mute`/`@solo`). */
+export const paramList = (leg: LegName) =>
+  invoke<{
+    sliders: Record<string, number>;
+    overrides: Record<string, Record<string, number>>;
+    leg: string;
+  }>('param_list', { leg });
+
+/** A saved look: a plain scene file in `<scene_dir>/looks/` + thumbnail. */
+export type LookEntry = { name: string; thumb_b64: string | null };
+export const looksList = () => invoke<LookEntry[]>('looks_list');
+export const lookRead = (name: string) => invoke<string>('look_read', { name });
+export const lookWrite = (name: string, scene: string, thumbB64: string | null) =>
+  invoke<void>('look_write', { name, scene, thumbB64 });
+export const lookDelete = (name: string) => invoke<void>('look_delete', { name });
 /**
  * §5.6 promote — crossfade the projector to the design composite, then adopt
  * design's plan into the live slot. quantize 'bar' (default) starts the fade
@@ -245,13 +274,11 @@ export type TelemetryFrame = {
 };
 
 export function onTelemetry(handler: (frame: TelemetryFrame) => void): Promise<UnlistenFn> {
-  return listen<TelemetryFrame>('engine:telemetry', (evt) => handler(evt.payload));
+  return listenEvent<TelemetryFrame>('engine:telemetry', handler);
 }
 
 export function onEngineStatus(
   handler: (s: { running: boolean; ws_addr?: string }) => void
 ): Promise<UnlistenFn> {
-  return listen<{ running: boolean; ws_addr?: string }>('engine:status', (evt) =>
-    handler(evt.payload)
-  );
+  return listenEvent<{ running: boolean; ws_addr?: string }>('engine:status', handler);
 }

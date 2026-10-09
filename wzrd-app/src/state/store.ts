@@ -13,6 +13,8 @@ import type {
   AlignmentDoc,
   ChangeEntry,
   DeckPayload,
+  LegName,
+  LookEntry,
   PackInfo,
   ProbeReport,
 } from '../api/ipc';
@@ -80,6 +82,29 @@ export type MastersState = {
   /** §5.4 crossfade-time master (seconds) — engine-wide, not per leg. */
   crossfade: number;
 };
+/** `transport` channel — both legs' tempo + musical position (beats). */
+export type TransportPayload = {
+  live: { bpm: number; beats: number };
+  design: { bpm: number; beats: number };
+};
+/** binding → param → value: a leg's §5.5 override table, incl. the reserved
+ *  layer-mixer keys `@opacity` / `@mute` / `@solo`. */
+export type OverrideTable = Record<string, Record<string, number>>;
+/** `effect.describe` input descriptor. */
+export type EffectInput = {
+  name: string;
+  type: 'float' | 'color' | string;
+  default?: any;
+  min?: number | null;
+  max?: number | null;
+  step?: number | null;
+  unit?: string | null;
+  widget?: string | null;
+};
+export type Catalog = Record<string, { kind: string; inputs: EffectInput[] }>;
+export type Toast = { id: number; text: string; tone: 'info' | 'warn' | 'bad' | 'ok' };
+export type Route = 'prepare' | 'align' | 'perform' | 'debug';
+
 export type LogLine = {
   level: string;
   target: string;
@@ -117,8 +142,40 @@ interface Store {
 
   // route. Align sits between Prepare and Perform because that's the order
   // of a load-in: build the look, land it on the wall, then play.
-  route: 'prepare' | 'align' | 'perform' | 'debug';
-  setRoute: (r: Store['route']) => void;
+  route: Route;
+  setRoute: (r: Route) => void;
+
+  // Live leg's scene text — compared against the design scene to light TAKE
+  // when design holds something the crowd hasn't seen.
+  liveSceneJson: string;
+  setLiveSceneJson: (s: string) => void;
+
+  transport: TransportPayload | null;
+  setTransport: (t: TransportPayload) => void;
+
+  // Per-leg override tables — an optimistic mirror of `param.list` (knob
+  // pins + the layer mixer). Writes land here first, the engine follows.
+  overrides: Record<LegName, OverrideTable>;
+  setOverrides: (leg: LegName, t: OverrideTable) => void;
+  patchOverride: (leg: LegName, binding: string, param: string, value: number | null) => void;
+
+  catalog: Catalog;
+  setCatalog: (c: Catalog) => void;
+
+  looks: LookEntry[];
+  setLooks: (l: LookEntry[]) => void;
+  /** Look last recalled into design (cued) / taken live. */
+  cuedLook: string | null;
+  liveLook: string | null;
+  setCuedLook: (n: string | null) => void;
+  setLiveLook: (n: string | null) => void;
+
+  toasts: Toast[];
+  toast: (text: string, tone?: Toast['tone']) => void;
+  dropToast: (id: number) => void;
+
+  showHelp: boolean;
+  setShowHelp: (v: boolean) => void;
 
   // telemetry — sticky/best-effort latest
   fps: FpsPayload | null;
@@ -198,6 +255,17 @@ interface Store {
 }
 
 const LOG_CAP = 2000;
+let toastSeq = 0;
+
+function initialRoute(): Route {
+  try {
+    const r = localStorage.getItem('wzrd.route');
+    if (r === 'prepare' || r === 'align' || r === 'perform' || r === 'debug') return r;
+  } catch {
+    /* ignore */
+  }
+  return 'perform';
+}
 const HOT_CAP = 200;
 
 export const useStore = create<Store>((set) => ({
@@ -218,8 +286,55 @@ export const useStore = create<Store>((set) => ({
   effects: [],
   setEffects: (e) => set({ effects: e }),
 
-  route: 'prepare',
-  setRoute: (r) => set({ route: r }),
+  route: initialRoute(),
+  setRoute: (r) => {
+    try {
+      localStorage.setItem('wzrd.route', r);
+    } catch {
+      /* private mode — fine */
+    }
+    set({ route: r });
+  },
+
+  liveSceneJson: '',
+  setLiveSceneJson: (s) => set({ liveSceneJson: s }),
+
+  transport: null,
+  setTransport: (t) => set({ transport: t }),
+
+  overrides: { live: {}, design: {} },
+  setOverrides: (leg, t) => set((s) => ({ overrides: { ...s.overrides, [leg]: t } })),
+  patchOverride: (leg, binding, param, value) =>
+    set((s) => {
+      const table = { ...s.overrides[leg] };
+      const row = { ...(table[binding] ?? {}) };
+      if (value == null) delete row[param];
+      else row[param] = value;
+      if (Object.keys(row).length) table[binding] = row;
+      else delete table[binding];
+      return { overrides: { ...s.overrides, [leg]: table } };
+    }),
+
+  catalog: {},
+  setCatalog: (c) => set({ catalog: c }),
+
+  looks: [],
+  setLooks: (l) => set({ looks: l }),
+  cuedLook: null,
+  liveLook: null,
+  setCuedLook: (n) => set({ cuedLook: n }),
+  setLiveLook: (n) => set({ liveLook: n }),
+
+  toasts: [],
+  toast: (text, tone = 'info') => {
+    const id = ++toastSeq;
+    set((s) => ({ toasts: [...s.toasts.slice(-3), { id, text, tone }] }));
+    window.setTimeout(() => useStore.getState().dropToast(id), tone === 'bad' ? 6000 : 3200);
+  },
+  dropToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+
+  showHelp: false,
+  setShowHelp: (v) => set({ showHelp: v }),
 
   fps: null,
   setFps: (v) => set({ fps: v }),

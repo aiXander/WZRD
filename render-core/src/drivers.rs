@@ -289,6 +289,11 @@ impl ParamOverrides {
 pub enum ScalarValue {
     Const(f32),
     Driver(DriverSpec),
+    /// A driver remapped onto the param's own range: `"range": [from, to]`
+    /// on the driver object makes the param sweep `from → to` as the driver
+    /// moves 0 → 1 (the modulation depth a VJ dials in: "bright 0.3 → 1.5 on
+    /// the kick"). Without `range` the raw driver value goes straight in.
+    Mapped { driver: DriverSpec, from: f32, to: f32 },
 }
 
 impl ScalarValue {
@@ -301,7 +306,26 @@ impl ScalarValue {
                     .ok_or_else(|| anyhow!("scalar must be finite, got {n}"))?
                     as f32,
             )),
-            Value::Object(_) => Ok(Self::Driver(DriverSpec::parse(v)?)),
+            Value::Object(_) => {
+                let driver = DriverSpec::parse(v)?;
+                match v.get("range") {
+                    None | Some(Value::Null) => Ok(Self::Driver(driver)),
+                    Some(r) => {
+                        let pair = r
+                            .as_array()
+                            .filter(|a| a.len() == 2)
+                            .and_then(|a| Some((a[0].as_f64()?, a[1].as_f64()?)))
+                            .ok_or_else(|| {
+                                anyhow!("driver `range` must be [from, to] numbers, got {r}")
+                            })?;
+                        Ok(Self::Mapped {
+                            driver,
+                            from: pair.0 as f32,
+                            to: pair.1 as f32,
+                        })
+                    }
+                }
+            }
             other => bail!("expected scalar or driver object, got {other}"),
         }
     }
@@ -310,6 +334,7 @@ impl ScalarValue {
         match self {
             ScalarValue::Const(v) => *v,
             ScalarValue::Driver(d) => d.eval(frame),
+            ScalarValue::Mapped { driver, from, to } => from + (to - from) * driver.eval(frame),
         }
     }
 
@@ -317,6 +342,9 @@ impl ScalarValue {
         match self {
             ScalarValue::Const(v) => format!("const({v})"),
             ScalarValue::Driver(d) => d.describe(),
+            ScalarValue::Mapped { driver, from, to } => {
+                format!("{} → {from}..{to}", driver.describe())
+            }
         }
     }
 }
@@ -519,6 +547,8 @@ fn phase(t: f32, period: f32) -> f32 {
 pub struct FrameContext<'a> {
     pub elapsed_sec: f32,
     pub bpm: f32,
+    /// See [`Transport`]'s `beat_offset`.
+    pub beat_offset: f32,
     pub audio: &'a AudioFeatures,
     pub sliders: &'a SliderBank,
     /// §5.4 audio-listen master — scales every `audio.*` read toward 0. Use
@@ -530,7 +560,7 @@ pub struct FrameContext<'a> {
 
 impl<'a> FrameContext<'a> {
     pub fn beat_time(&self) -> f32 {
-        self.elapsed_sec * self.bpm / 60.0
+        self.elapsed_sec * self.bpm / 60.0 + self.beat_offset
     }
     pub fn bar_time(&self) -> f32 {
         // 4 beats per bar, the assumption hard-coded in Phase 3. Time-signature
@@ -554,6 +584,10 @@ impl<'a> FrameContext<'a> {
 pub struct Transport {
     bpm: f32,
     time_sec: f64,
+    /// Beats added on top of `time·bpm/60`. Lets a tempo change or a
+    /// downbeat resync move the musical grid without jumping `time_sec`
+    /// (which also drives `clock.time`/`clock.phase`).
+    beat_offset: f64,
     last_step: Instant,
 }
 
@@ -562,12 +596,31 @@ impl Transport {
         Self {
             bpm: bpm.max(1.0),
             time_sec: 0.0,
+            beat_offset: 0.0,
             last_step: Instant::now(),
         }
     }
 
+    /// Change tempo with the beat position held continuous — a tap-tempo
+    /// nudge or a scene edit must not throw every bar-locked effect to a
+    /// random phase.
     pub fn set_bpm(&mut self, bpm: f32) {
-        self.bpm = bpm.max(1.0);
+        let bpm = bpm.max(1.0);
+        let beats = self.beats();
+        self.bpm = bpm;
+        self.beat_offset = beats - self.time_sec * bpm as f64 / 60.0;
+    }
+
+    /// Musical position in beats (4 per bar).
+    pub fn beats(&self) -> f64 {
+        self.time_sec * self.bpm as f64 / 60.0 + self.beat_offset
+    }
+
+    /// "This is the one": shift the grid so a bar starts right now, by the
+    /// smallest move (snaps to the nearer bar line).
+    pub fn resync(&mut self) {
+        let beats = self.beats();
+        self.beat_offset += (beats / 4.0).round() * 4.0 - beats;
     }
 
     /// Advance the clock by the wall time since the previous step, scaled by
@@ -600,6 +653,7 @@ impl Transport {
     pub fn sync_from(&mut self, other: &Transport) {
         self.bpm = other.bpm;
         self.time_sec = other.time_sec;
+        self.beat_offset = other.beat_offset;
         self.last_step = Instant::now();
     }
 
@@ -612,6 +666,7 @@ impl Transport {
         FrameContext {
             elapsed_sec: self.elapsed_sec(),
             bpm: self.bpm,
+            beat_offset: self.beat_offset as f32,
             audio,
             sliders,
             audio_listen,
@@ -737,6 +792,39 @@ mod tests {
         t.step_by(1.0, 0.5);
         t.step_by(1.0, 0.0);
         assert!((t.elapsed_sec() - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tempo_change_and_resync_keep_time_continuous() {
+        let mut t = Transport::new(120.0);
+        t.step_by(10.0, 1.0); // 20 beats
+        assert!((t.beats() - 20.0).abs() < 1e-9);
+        t.set_bpm(90.0);
+        assert!((t.beats() - 20.0).abs() < 1e-9, "tempo change must not jump the grid");
+        assert_eq!(t.elapsed_sec(), 10.0);
+        t.step_by(1.0, 1.0); // +1.5 beats at 90
+        assert!((t.beats() - 21.5).abs() < 1e-9);
+        t.resync(); // 21.5 beats = bar 5.375 → snaps back to bar 5
+        assert!((t.beats() - 20.0).abs() < 1e-9);
+        assert_eq!(t.elapsed_sec(), 11.0);
+    }
+
+    #[test]
+    fn range_maps_driver_onto_param_span() {
+        let v = ScalarValue::parse(&serde_json::json!({
+            "driver": "ui.slider", "name": "k", "default": 0.25, "range": [2.0, 10.0]
+        }))
+        .unwrap();
+        assert!(matches!(v, ScalarValue::Mapped { .. }));
+        let sliders = SliderBank::default();
+        let audio = AudioFeatures::new();
+        let t = Transport::new(120.0);
+        let ctx = t.frame_context(&audio, &sliders, 1.0);
+        assert!((v.eval(&ctx) - 4.0).abs() < 1e-5);
+        assert!(ScalarValue::parse(&serde_json::json!({
+            "driver": "clock.bars", "range": [1.0]
+        }))
+        .is_err());
     }
 
     #[test]

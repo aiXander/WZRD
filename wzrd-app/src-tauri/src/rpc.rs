@@ -26,11 +26,47 @@ pub fn pack_info(state: State<AppState>) -> Result<Value, String> {
         .map_err(|e| format!("{e:#}"))
 }
 
+/// `leg`: "design" (engine default) | "live" — the deck compares the two to
+/// light TAKE when design holds something the crowd hasn't seen.
 #[tauri::command]
-pub fn scene_get_state(state: State<AppState>) -> Result<Value, String> {
+pub fn scene_get_state(state: State<AppState>, leg: Option<String>) -> Result<Value, String> {
     state
         .engine
-        .request("scene.getState", json!({}), DEFAULT_TIMEOUT)
+        .request("scene.getState", json!({ "leg": leg }), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Live tempo / downbeat (`transport.set`). `leg: None` = both legs.
+#[tauri::command]
+pub fn transport_set(
+    state: State<AppState>,
+    bpm: Option<f64>,
+    resync: Option<bool>,
+    sync: Option<bool>,
+    leg: Option<String>,
+) -> Result<Value, String> {
+    state
+        .engine
+        .request(
+            "transport.set",
+            json!({
+                "bpm": bpm,
+                "resync": resync.unwrap_or(false),
+                "sync": sync.unwrap_or(false),
+                "leg": leg,
+            }),
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// `param.list` — one leg's knob values + override table (incl. the
+/// reserved `@opacity`/`@mute`/`@solo` layer-mixer entries).
+#[tauri::command]
+pub fn param_list(state: State<AppState>, leg: Option<String>) -> Result<Value, String> {
+    state
+        .engine
+        .request("param.list", json!({ "leg": leg }), DEFAULT_TIMEOUT)
         .map_err(|e| format!("{e:#}"))
 }
 
@@ -391,4 +427,97 @@ pub fn read_mask_png(state: State<AppState>, mask_path: String) -> Result<String
     let bytes = std::fs::read(&full).map_err(|e| format!("reading {}: {e}", full.display()))?;
     use base64::Engine;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+// ---------- looks: saved scenes, the clip bank ----------
+//
+// A look is a plain scene file in `<scene_dir>/looks/<name>.json` plus an
+// optional `<name>.jpg` thumbnail captured from the preview at save time.
+// Plain files on purpose (design spec §12): copy, version, share.
+
+fn looks_dir(state: &AppState) -> std::path::PathBuf {
+    state
+        .scene_path
+        .parent()
+        .map(|p| p.join("looks"))
+        .unwrap_or_else(|| std::path::PathBuf::from("looks"))
+}
+
+fn look_stem(name: &str) -> Result<String, String> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
+        && !name.starts_with('.');
+    if ok {
+        Ok(name.to_string())
+    } else {
+        Err(format!(
+            "look name {name:?} must be 1-64 chars of letters, digits, space, _ - ."
+        ))
+    }
+}
+
+#[tauri::command]
+pub fn looks_list(state: State<AppState>) -> Result<Vec<Value>, String> {
+    use base64::Engine;
+    let dir = looks_dir(&state);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(Vec::new()) };
+    let mut out: Vec<(std::time::SystemTime, Value)> = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+        let created = entry
+            .metadata()
+            .and_then(|m| m.created().or_else(|_| m.modified()))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let thumb = std::fs::read(p.with_extension("jpg"))
+            .ok()
+            .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+        out.push((created, json!({ "name": stem, "thumb_b64": thumb })));
+    }
+    // Bank order = creation order, so slots don't reshuffle on resave.
+    out.sort_by_key(|(t, _)| *t);
+    Ok(out.into_iter().map(|(_, v)| v).collect())
+}
+
+#[tauri::command]
+pub fn look_read(state: State<AppState>, name: String) -> Result<String, String> {
+    let stem = look_stem(&name)?;
+    std::fs::read_to_string(looks_dir(&state).join(format!("{stem}.json")))
+        .map_err(|e| format!("reading look {stem}: {e}"))
+}
+
+#[tauri::command]
+pub fn look_write(
+    state: State<AppState>,
+    name: String,
+    scene: String,
+    thumb_b64: Option<String>,
+) -> Result<(), String> {
+    use base64::Engine;
+    let stem = look_stem(&name)?;
+    serde_json::from_str::<Value>(&scene).map_err(|e| format!("look is not JSON: {e}"))?;
+    let dir = looks_dir(&state);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
+    std::fs::write(dir.join(format!("{stem}.json")), scene).map_err(|e| format!("{e}"))?;
+    if let Some(b64) = thumb_b64 {
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+            let _ = std::fs::write(dir.join(format!("{stem}.jpg")), bytes);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn look_delete(state: State<AppState>, name: String) -> Result<(), String> {
+    let stem = look_stem(&name)?;
+    let dir = looks_dir(&state);
+    std::fs::remove_file(dir.join(format!("{stem}.json"))).map_err(|e| format!("{e}"))?;
+    let _ = std::fs::remove_file(dir.join(format!("{stem}.jpg")));
+    Ok(())
 }

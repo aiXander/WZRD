@@ -1,11 +1,17 @@
 {
   "compilerOptions": {
     "composite": true,
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
-    "strict": true
+    "strict": true,
+    // Type-check only: an emitted vite.config.js would shadow vite.config.ts
+    // (Vite resolves .js first) and silently pin a stale config.
+    "outDir": "node_modules/.tmp/tsconfig-node"
   },
   "include": ["vite.config.ts"]
 }

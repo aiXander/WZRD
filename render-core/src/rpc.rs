@@ -157,6 +157,14 @@ pub enum EngineCommand {
         source: crate::gpu::Leg,
         reply: Sender<Result<Value, String>>,
     },
+    /// Live tempo / downbeat resync (`transport.set`). `leg: None` = both.
+    Transport {
+        bpm: Option<f32>,
+        resync: bool,
+        sync: bool,
+        leg: Option<crate::gpu::Leg>,
+        reply: Sender<Result<Value, String>>,
+    },
 }
 
 /// Bound bag of references used to answer the synchronous (read-only)
@@ -523,6 +531,47 @@ pub fn dispatch(
             cmd_tx
                 .send(EngineCommand::Pull {
                     actor: *actor,
+                    reply: reply_tx,
+                })
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
+        "transport.set" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct Params {
+                bpm: Option<f32>,
+                resync: bool,
+                sync: bool,
+                leg: Option<String>,
+            }
+            let p: Params = if req.params.is_null() {
+                Params::default()
+            } else {
+                serde_json::from_value(req.params.clone())
+                    .map_err(|e| RpcError::message(format!("params: {e}")))?
+            };
+            let leg = match p.leg.as_deref() {
+                None | Some("both") => None,
+                Some("live") => Some(crate::gpu::Leg::Live),
+                Some("design") => Some(crate::gpu::Leg::Design),
+                Some(other) => {
+                    return Err(RpcError::message(format!(
+                        "unknown leg {other:?} (\"live\" | \"design\" | \"both\")"
+                    )))
+                }
+            };
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::Transport {
+                    bpm: p.bpm,
+                    resync: p.resync,
+                    sync: p.sync,
+                    leg,
                     reply: reply_tx,
                 })
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
@@ -1007,6 +1056,15 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
         }
         EngineCommand::PreviewSource { source, reply } => {
             let _ = reply.send(core.cmd_preview_source(source));
+        }
+        EngineCommand::Transport {
+            bpm,
+            resync,
+            sync,
+            leg,
+            reply,
+        } => {
+            let _ = reply.send(core.cmd_transport(bpm, resync, sync, leg));
         }
     }
 }

@@ -127,7 +127,8 @@ pub struct LayerParamsGpu {
     pub layer_index: u32,
     pub layer_count: u32,
     pub layer_seed: f32,
-    pub _pad0: f32,
+    /// Operator layer fader — see `LayerOpacity` in the compositor.
+    pub opacity: f32,
     pub centroid_uv: [f32; 2],
     pub bbox_uv: [f32; 4],
     /// 8 scalar slots packed as two vec4 lanes.
@@ -157,7 +158,7 @@ impl LayerParamsGpu {
             layer_index: identity.layer_index,
             layer_count: identity.layer_count,
             layer_seed: identity.layer_seed,
-            _pad0: 0.0,
+            opacity: 1.0,
             centroid_uv: identity.centroid_uv,
             bbox_uv: identity.bbox_uv,
             params_f,

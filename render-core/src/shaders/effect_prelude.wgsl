@@ -38,7 +38,10 @@ struct LayerParams {
     layer_index: u32,
     layer_count: u32,
     layer_seed: f32,
-    _pad0: f32,
+    // Operator layer fader (0..1) — the `@opacity`/`@mute`/`@solo` override
+    // trio folded into one scalar by the compositor. Applied by `fs_main`
+    // after `effect()` returns, so user WGSL never has to honour it.
+    opacity: f32,
     centroid_uv: vec2<f32>,
     bbox_uv: vec4<f32>,      // (min_x, min_y, max_x, max_y), uv space
     // 8 scalar slots packed into two vec4s (std140 16-byte alignment).

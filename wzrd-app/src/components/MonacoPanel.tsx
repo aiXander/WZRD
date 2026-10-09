@@ -9,6 +9,7 @@
 // `wgsl.validate` runs debounced on the active editor's source for any
 // .wgsl tab, returning naga diagnostics into Monaco's marker system.
 
+import './monacoSetup';
 import { Editor, type Monaco } from '@monaco-editor/react';
 import type { editor as mEditor, languages as mLanguages } from 'monaco-editor';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -192,7 +193,7 @@ export function MonacoPanel() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="flex items-center gap-1 px-2 py-1 bg-ink-800 border-b border-ink-700 overflow-x-auto">
+      <div className="flex items-center gap-1 px-2 h-9 bg-panel border-b border-line overflow-x-auto shrink-0">
         {tabs.map((t) => {
           const active =
             (activeTab.kind === 'scene' && t.kind === 'scene') ||
@@ -204,8 +205,8 @@ export function MonacoPanel() {
               key={t.kind === 'scene' ? 'scene' : `effect:${t.name}`}
               onClick={() => setActiveTab(t)}
               className={
-                'px-2 py-1 text-xs rounded ' +
-                (active ? 'bg-ink-600 text-zinc-100' : 'text-zinc-400 hover:bg-ink-700')
+                'h-6 px-2 text-[11px] rounded-md font-mono ' +
+                (active ? 'bg-raised text-fg' : 'text-fg3 hover:text-fg hover:bg-raised/60')
               }
             >
               {tabLabel(t, isDirty(t))}
@@ -213,7 +214,7 @@ export function MonacoPanel() {
           );
         })}
         <button
-          className="ml-auto text-xs text-zinc-400 hover:text-zinc-100"
+          className="ml-auto text-xs text-fg3 hover:text-fg px-1"
           onClick={() => listEffects().then(setEffects)}
           title="Re-scan effects directory"
         >
@@ -222,14 +223,15 @@ export function MonacoPanel() {
       </div>
       <div className="flex-1 min-h-0">
         <Editor
-          theme="vs-dark"
+          theme="wzrd"
           language={language}
           value={currentValue}
           onChange={onChange}
           onMount={onMount}
           options={{
             minimap: { enabled: false },
-            fontSize: 13,
+            fontSize: 12.5,
+            padding: { top: 8 },
             fontFamily:
               'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
             renderLineHighlight: 'gutter',

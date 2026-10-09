@@ -34,6 +34,7 @@ pub const ALL_CHANNELS: &[&str] = &[
     "frame_stats",
     "drivers",
     "audio",
+    "transport",
     "connectivity",
     "masters",
     "deck",

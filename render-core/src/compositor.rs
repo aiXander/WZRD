@@ -52,6 +52,9 @@ pub struct LayerPass {
     /// Whether this pass draws this frame. Always `true` for un-picked
     /// passes; toggled by the pick machinery in [`PassPlan::tick`].
     pub active: bool,
+    /// Operator layer fader for this frame, folded from the `@opacity` /
+    /// `@mute` / `@solo` overrides in [`PassPlan::tick`]. `0` skips the draw.
+    pub opacity: f32,
 
     pub layer_buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
@@ -219,6 +222,7 @@ impl PassPlan {
                     pick_group,
                     // Picked passes start dark until the first tick() picks.
                     active: pick_group.is_none(),
+                    opacity: 1.0,
                     layer_buffer,
                     bind_group,
                 });
@@ -303,6 +307,16 @@ impl PassPlan {
         gpu.queue
             .write_buffer(&self.frame_state, 0, bytemuck::bytes_of(&frame));
 
+        // Operator layer faders. Solo is plan-wide: any soloed binding
+        // silences every binding that isn't.
+        let any_solo = self
+            .layer_passes
+            .iter()
+            .any(|p| layer_flag(overrides, &p.binding_id, LAYER_SOLO));
+        for pass in &mut self.layer_passes {
+            pass.opacity = layer_opacity(overrides, &pass.binding_id, any_solo);
+        }
+
         // Per-pass params. Driver evaluation is cheap (a few muls + a few
         // atomic loads); we don't bother with dirty tracking. Inactive
         // (picked-out) passes skip the write — they don't draw this frame,
@@ -322,13 +336,14 @@ impl PassPlan {
                         .unwrap_or_else(|| s.eval(ctx))
                 })
                 .collect();
-            let params = LayerParamsGpu::build(
+            let mut params = LayerParamsGpu::build(
                 pass.slice,
                 pass.effect_id,
                 &pass.identity,
                 &scalars,
                 &pass.colors,
             );
+            params.opacity = pass.opacity;
             gpu.queue
                 .write_buffer(&pass.layer_buffer, 0, bytemuck::bytes_of(&params));
         }
@@ -361,9 +376,10 @@ impl PassPlan {
         // Avoid redundant pipeline switches when consecutive layers share one.
         let mut bound: Option<&str> = None;
         for layer in &self.layer_passes {
-            if !layer.active {
+            if !layer.active || layer.opacity <= 0.0 {
                 // Picked out this cycle (§5.2) — the pass stays in the plan
-                // so re-picking is a flag flip, but it draws nothing.
+                // so re-picking is a flag flip, but it draws nothing. A
+                // faded-out/muted layer likewise costs no GPU work.
                 continue;
             }
             let pipeline = match gpu.pipeline_cache.get(&layer.pipeline_key) {
@@ -422,6 +438,32 @@ impl PassPlan {
         }
         rows
     }
+}
+
+/// Reserved override params (the `@` prefix can't collide with a WGSL input
+/// name) carrying the operator's per-layer mixer state. They ride the §5.5
+/// override table, so they are per leg, zero-rebuild, copied by
+/// promote/pull and persisted in the session sidecar for free.
+pub const LAYER_OPACITY: &str = "@opacity";
+pub const LAYER_MUTE: &str = "@mute";
+pub const LAYER_SOLO: &str = "@solo";
+
+fn layer_flag(overrides: &ParamOverrides, binding: &str, key: &str) -> bool {
+    overrides.get(binding, key).is_some_and(|v| v > 0.5)
+}
+
+/// Effective fader for one binding: `@opacity` (default 1, clamped 0..1),
+/// zeroed by `@mute`, or by another binding's `@solo` when this one isn't.
+pub(crate) fn layer_opacity(overrides: &ParamOverrides, binding: &str, any_solo: bool) -> f32 {
+    if layer_flag(overrides, binding, LAYER_MUTE)
+        || (any_solo && !layer_flag(overrides, binding, LAYER_SOLO))
+    {
+        return 0.0;
+    }
+    overrides
+        .get(binding, LAYER_OPACITY)
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(1.0)
 }
 
 /// Shared by plan build and the §5.6 probe pre-analysis (which needs to know
@@ -512,6 +554,23 @@ fn pick_choice(binding_seed: u32, cycle: u64, member_count: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_opacity_folds_mute_and_solo() {
+        let o = crate::drivers::ParamOverrides::new();
+        assert_eq!(layer_opacity(&o, "a", false), 1.0);
+        o.set("a", LAYER_OPACITY, 0.4);
+        assert!((layer_opacity(&o, "a", false) - 0.4).abs() < 1e-6);
+        o.set("a", LAYER_OPACITY, 3.0);
+        assert_eq!(layer_opacity(&o, "a", false), 1.0);
+        o.set("a", LAYER_MUTE, 1.0);
+        assert_eq!(layer_opacity(&o, "a", false), 0.0);
+        o.clear("a", LAYER_MUTE);
+        // Another binding soloed silences this one; soloing it restores it.
+        assert_eq!(layer_opacity(&o, "a", true), 0.0);
+        o.set("a", LAYER_SOLO, 1.0);
+        assert_eq!(layer_opacity(&o, "a", true), 1.0);
+    }
 
     #[test]
     fn fnv1a_is_stable() {

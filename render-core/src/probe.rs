@@ -527,6 +527,8 @@ pub fn pessimistic_scalar(
     }
     match value {
         ScalarValue::Const(v) => *v,
+        // Worst case for a remapped driver is whichever end is larger.
+        ScalarValue::Mapped { from, to, .. } => from.max(*to),
         ScalarValue::Driver(d) => match d {
             DriverSpec::Const(v) => *v,
             DriverSpec::ClockBars { .. }

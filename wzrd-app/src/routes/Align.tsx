@@ -10,6 +10,7 @@
 import { useEffect } from 'react';
 import { useStore } from '../state/store';
 import { WarpCanvas } from '../components/WarpCanvas';
+import { Btn, Panel, Seg } from '../ui/primitives';
 import {
   ingestAlignment,
   resetAlignment,
@@ -53,101 +54,110 @@ export function Align() {
   const backgroundLit = !!doc && doc.background.toLowerCase() !== '#000000';
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex flex-wrap items-center gap-3 border-b border-ink-700 px-3 py-2 text-xs">
-        <label className="flex items-center gap-2 text-zinc-300">
-          <input
-            type="checkbox"
-            checked={doc?.enabled ?? false}
-            disabled={!doc}
-            onChange={(e) => setAlignmentEnabled(e.target.checked)}
-          />
-          Warp enabled
-        </label>
+    <div className="flex h-full min-h-0 gap-2 p-2">
+      <Panel className="flex-1 overflow-hidden" bodyClassName="min-h-0 flex flex-col">
+        {error && (
+          <div className="flex items-start gap-2 border-b border-bad/40 bg-bad/10 px-3 py-1.5 text-[11px] text-fg">
+            {/* The engine rejected the edit and kept rendering the previous
+                alignment — nothing on the wall moved. */}
+            <span className="flex-1">{error}</span>
+            <button className="underline text-fg2 hover:text-fg" onClick={() => setError(null)}>
+              dismiss
+            </button>
+          </div>
+        )}
+        <div className="min-h-0 flex-1">
+          <WarpCanvas />
+        </div>
+      </Panel>
 
-        <span className="text-ink-600">|</span>
+      <div className="w-[280px] shrink-0 flex flex-col gap-2">
+        <Panel title="Projector bumped?">
+          <div className="p-3 text-[12px] leading-relaxed text-fg2">
+            Drag the four corners until the light lands back on the surface — no re-segmenting. Turn on the{' '}
+            <b className="text-fg">Grid</b> to see the warp on the wall. Arrows nudge 1&nbsp;px, ⇧ 10.
+          </div>
+        </Panel>
 
-        <div className="flex items-center gap-1">
-          <span className="text-zinc-500">Test pattern</span>
-          {PATTERNS.map((p) => (
-            <button
-              key={p.id}
-              title={p.hint}
+        <Panel title="Warp">
+          <div className="p-3 flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[12px] text-fg2">Output warp</span>
+              <Seg
+                value={doc?.enabled ? 'on' : 'off'}
+                onChange={(v) => doc && setAlignmentEnabled(v === 'on')}
+                options={[
+                  { id: 'off', label: 'Off', title: 'Bypass — content goes out unwarped' },
+                  { id: 'on', label: 'On' },
+                ]}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[12px] text-fg2">Extra handles</span>
+              <span className="num text-[12px] text-fg">
+                {doc ? `${doc.points.length} / ${doc.points_max}` : '–'}
+              </span>
+            </div>
+            <Btn
+              size="sm"
               disabled={!doc}
-              onClick={() => void setTestPattern(p.id).catch((e) => setError(String(e)))}
-              className={
-                'rounded px-2 py-1 ' +
-                (doc?.test_pattern === p.id
-                  ? 'bg-ink-600 text-zinc-100'
-                  : 'text-zinc-400 hover:bg-ink-700 hover:text-zinc-100')
-              }
+              onClick={() => void resetAlignment().catch((e) => setError(String(e)))}
+              title="Identity corners, no handles, black background. Leaves the on/off switch alone."
             >
-              {p.label}
-            </button>
-          ))}
-        </div>
+              Reset to identity
+            </Btn>
+          </div>
+        </Panel>
 
-        <span className="text-ink-600">|</span>
+        <Panel title="Test pattern">
+          <div className="p-3 grid grid-cols-2 gap-1.5">
+            {PATTERNS.map((p) => (
+              <Btn
+                key={p.id}
+                size="sm"
+                tone="deck"
+                active={doc?.test_pattern === p.id}
+                disabled={!doc}
+                title={p.hint}
+                onClick={() => void setTestPattern(p.id).catch((e) => setError(String(e)))}
+              >
+                {p.label}
+              </Btn>
+            ))}
+          </div>
+        </Panel>
 
-        <label className="flex items-center gap-2 text-zinc-300">
-          <span className="text-zinc-500">Background</span>
-          <input
-            type="color"
-            className="h-6 w-8 bg-transparent"
-            value={doc?.background ?? '#000000'}
-            disabled={!doc}
-            onChange={(e) => setAlignmentBackground(e.target.value)}
-          />
-        </label>
-        {backgroundLit && (
-          // A non-black background paints every dest pixel whose source falls
-          // outside the composite — i.e. it floods the physical surface with
-          // light and breaks the additive thesis. It persists, so the warning
-          // has to be visible for as long as it is set.
-          <span
-            className="rounded border border-amber-700 bg-amber-900/60 px-2 py-1 text-[11px] text-amber-200"
-            title="Non-black background lights up the whole surface. Alignment aid only — set it back to #000000 before the show."
-          >
-            ⚠ BACKGROUND IS LIT
-            <button
-              className="ml-2 underline hover:text-amber-100"
-              onClick={() => setAlignmentBackground('#000000')}
-            >
-              black
-            </button>
-          </span>
-        )}
-
+        <Panel title="Background">
+          <div className="p-3 flex flex-col gap-2">
+            <label className="relative flex items-center gap-2 h-7 rounded-md border border-line bg-panel2 px-2 cursor-pointer hover:border-line2">
+              <span className="text-[11px] text-fg2 flex-1">Fill outside the content</span>
+              <span className="num text-[10px] text-fg3">{doc?.background ?? '#000000'}</span>
+              <span className="w-6 h-4 rounded-sm border border-line2" style={{ background: doc?.background ?? '#000' }} />
+              <input
+                type="color"
+                className="absolute inset-0 opacity-0 cursor-pointer"
+                value={doc?.background ?? '#000000'}
+                disabled={!doc}
+                onChange={(e) => setAlignmentBackground(e.target.value)}
+              />
+            </label>
+            {backgroundLit && (
+              // A non-black background floods the physical surface with light
+              // and breaks the additive thesis. It persists, so the warning
+              // stays visible for as long as it is set.
+              <div className="rounded-md border border-amber/60 bg-amber/10 px-2 py-1.5 text-[11px] text-amber leading-snug">
+                ⚠ The background is lit — the whole surface glows. Alignment aid only.
+                <button className="ml-1 underline hover:text-fg" onClick={() => setAlignmentBackground('#000000')}>
+                  Back to black
+                </button>
+              </div>
+            )}
+          </div>
+        </Panel>
         <div className="flex-1" />
-
-        {doc && (
-          <span className="text-zinc-500">
-            {doc.points.length}/{doc.points_max} handles
-          </span>
-        )}
-        <button
-          disabled={!doc}
-          onClick={() => void resetAlignment().catch((e) => setError(String(e)))}
-          className="rounded px-2 py-1 text-zinc-400 hover:bg-ink-700 hover:text-zinc-100"
-          title="Identity corners, no handles, black background. Leaves the enabled flag alone."
-        >
-          Reset
-        </button>
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-2 border-b border-red-900/60 bg-red-950/40 px-3 py-1.5 text-[11px] text-red-300">
-          {/* The engine rejected the edit and kept rendering the previous
-              alignment — nothing on the wall moved. */}
-          <span className="flex-1">{error}</span>
-          <button className="underline hover:text-red-100" onClick={() => setError(null)}>
-            dismiss
-          </button>
+        <div className="px-1 text-[10px] text-fg4 leading-snug">
+          Alignment is venue state (alignment.json), not scene content — it never changes with TAKE or looks.
         </div>
-      )}
-
-      <div className="min-h-0 flex-1">
-        <WarpCanvas />
       </div>
     </div>
   );

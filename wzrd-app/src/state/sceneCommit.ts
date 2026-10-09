@@ -53,6 +53,24 @@ export function commitSceneText(text: string) {
   }, PUSH_DEBOUNCE_MS);
 }
 
+/** Push immediately (no debounce) and resolve once the engine accepted it —
+ *  for actions that must sequence after the apply (recall-then-TAKE). */
+export async function commitSceneNow(text: string): Promise<void> {
+  const st = useStore.getState();
+  if (pushTimer != null) window.clearTimeout(pushTimer);
+  pushTimer = null;
+  st.setSceneJson(text);
+  st.setSceneDirty(true);
+  pending = text;
+  try {
+    await sceneLoad(text);
+    schedulePersist(text);
+  } catch (e) {
+    useStore.getState().setHotReload({ target: 'scene', ok: false, elapsed_ms: 0, message: String(e) });
+    throw e;
+  }
+}
+
 /** Persist an engine-accepted scene text to disk, debounced. Skipped when a
  *  newer edit superseded it — that edit's own push cycle persists (or holds
  *  back) the newer text. */
@@ -101,4 +119,10 @@ export function commitSceneMutation(mutator: (scene: any) => any) {
   }
   const next = mutator(structuredClone(scene)) ?? scene;
   commitSceneText(JSON.stringify(next, null, 2));
+}
+
+/** Push + persist the current design scene now (⌘S). */
+export function flushScene(): void {
+  const text = useStore.getState().sceneJson;
+  commitSceneNow(text).catch((e) => console.error('scene flush:', e));
 }

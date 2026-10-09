@@ -21,13 +21,13 @@ function Panel({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="border border-ink-700 rounded">
+    <div className="border border-line rounded-lg bg-panel overflow-hidden">
       <button
-        className="w-full px-3 py-1.5 text-xs text-left bg-ink-800 border-b border-ink-700 flex items-center gap-2"
+        className="w-full h-8 px-3 text-left border-b border-line flex items-center gap-2 label hover:text-fg"
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="text-zinc-400">{open ? '▾' : '▸'}</span>
-        <span className="text-zinc-200">{title}</span>
+        <span className="text-fg2">{open ? '▾' : '▸'}</span>
+        <span>{title}</span>
       </button>
       {open && <div className="p-3">{children}</div>}
     </div>
@@ -64,13 +64,13 @@ export function DebugRoute() {
   );
 
   return (
-    <div className="p-4 space-y-3 overflow-auto h-full">
+    <div className="p-2 space-y-2 overflow-auto h-full">
       <Panel title="Connectivity" defaultOpen>
         <div className="grid grid-cols-2 gap-3 text-xs">
           <div className="flex items-center gap-2">
             <span className={`dot w-2 h-2 rounded-full ${statusDot(audioFresh?.state)}`} />
-            <span className="text-zinc-300">OSC audio feed</span>
-            <span className="text-zinc-500">
+            <span className="text-fg2">OSC audio feed</span>
+            <span className="text-fg3">
               {audioFresh?.state ?? '—'}
               {audioFresh?.last_packet_ms
                 ? ` · last ${(audioFresh.last_packet_ms / 1000).toFixed(1)}s`
@@ -83,15 +83,15 @@ export function DebugRoute() {
                 connectivity?.file_watcher.status
               )}`}
             />
-            <span className="text-zinc-300">file watcher</span>
-            <span className="text-zinc-500">
+            <span className="text-fg2">file watcher</span>
+            <span className="text-fg3">
               {connectivity?.file_watcher.detail ?? '—'}
             </span>
           </div>
           <div className="flex items-center gap-2">
             <span className={`dot w-2 h-2 rounded-full ${statusDot(connectivity?.ws.status)}`} />
-            <span className="text-zinc-300">WS IPC</span>
-            <span className="text-zinc-500">
+            <span className="text-fg2">WS IPC</span>
+            <span className="text-fg3">
               {connectivity?.ws.detail ?? 'tauri ↔ render-core'}
             </span>
           </div>
@@ -123,7 +123,7 @@ export function DebugRoute() {
       <Panel title="Driver bus snapshot" defaultOpen>
         <table className="w-full text-xs">
           <thead>
-            <tr className="text-zinc-500 text-left">
+            <tr className="text-fg3 text-left">
               <th>binding</th>
               <th>param</th>
               <th>source</th>
@@ -132,16 +132,16 @@ export function DebugRoute() {
           </thead>
           <tbody>
             {drivers.map((d) => (
-              <tr key={`${d.binding_id}::${d.param_name}`} className="border-t border-ink-700">
+              <tr key={`${d.binding_id}::${d.param_name}`} className="border-t border-line">
                 <td>{d.binding_id}</td>
                 <td>{d.param_name}</td>
-                <td className="text-zinc-400">{d.source}</td>
+                <td className="text-fg2">{d.source}</td>
                 <td className="text-right font-mono">{d.value.toFixed(3)}</td>
               </tr>
             ))}
             {drivers.length === 0 && (
               <tr>
-                <td colSpan={4} className="text-zinc-500 py-2">
+                <td colSpan={4} className="text-fg3 py-2">
                   no live drivers — wait for the engine to emit `drivers` events
                 </td>
               </tr>
@@ -151,7 +151,7 @@ export function DebugRoute() {
       </Panel>
 
       <Panel title="Hot-reload events" defaultOpen>
-        <div className="text-xs flex flex-col divide-y divide-ink-700">
+        <div className="text-xs flex flex-col divide-y divide-line">
           {hotHistory.map((h, i) => (
             <div key={i} className="py-1 flex items-center gap-2">
               <span
@@ -161,7 +161,7 @@ export function DebugRoute() {
                 }
               />
               <span className="font-mono">{h.target}</span>
-              <span className="text-zinc-500">{h.elapsed_ms.toFixed(0)}ms</span>
+              <span className="text-fg3">{h.elapsed_ms.toFixed(0)}ms</span>
               {h.probe && (
                 <span
                   className={
@@ -187,7 +187,7 @@ export function DebugRoute() {
             </div>
           ))}
           {hotHistory.length === 0 && (
-            <div className="text-zinc-500">no events yet</div>
+            <div className="text-fg3">no events yet</div>
           )}
         </div>
       </Panel>
@@ -198,13 +198,13 @@ export function DebugRoute() {
 
       <Panel title="Log stream">
         <div className="flex items-center gap-2 mb-2 text-xs">
-          <span className="text-zinc-500">filter</span>
+          <span className="text-fg3">filter</span>
           {(['all', 'warn', 'error'] as const).map((lvl) => (
             <button
               key={lvl}
               className={
                 'px-2 py-0.5 rounded ' +
-                (logLevel === lvl ? 'bg-ink-600 text-zinc-100' : 'text-zinc-400')
+                (logLevel === lvl ? 'bg-line2 text-fg' : 'text-fg2')
               }
               onClick={() => setLogLevel(lvl)}
             >
@@ -212,13 +212,13 @@ export function DebugRoute() {
             </button>
           ))}
         </div>
-        <div className="font-mono text-[11px] h-64 overflow-auto bg-ink-900 p-2 rounded">
+        <div className="font-mono text-[11px] h-64 overflow-auto bg-bg p-2 rounded">
           {filteredLog.length === 0 && (
-            <div className="text-zinc-500">no log lines</div>
+            <div className="text-fg3">no log lines</div>
           )}
           {filteredLog.map((l, i) => (
             <div key={i} className="flex gap-2">
-              <span className="text-zinc-500">
+              <span className="text-fg3">
                 {new Date(l.ts_ms).toISOString().slice(11, 19)}
               </span>
               <span
@@ -227,13 +227,13 @@ export function DebugRoute() {
                     ? 'text-accent-red'
                     : l.level === 'warn'
                     ? 'text-accent-amber'
-                    : 'text-zinc-300'
+                    : 'text-fg2'
                 }
               >
                 {l.level}
               </span>
-              <span className="text-zinc-500">{l.target}</span>
-              <span className="text-zinc-200 flex-1 truncate">{l.message}</span>
+              <span className="text-fg3">{l.target}</span>
+              <span className="text-fg flex-1 truncate">{l.message}</span>
             </div>
           ))}
         </div>
@@ -242,14 +242,14 @@ export function DebugRoute() {
       <Panel title="Pack & scene state">
         <div className="grid grid-cols-2 gap-3 text-xs">
           <div>
-            <div className="text-zinc-500 mb-1">pack.json</div>
-            <pre className="bg-ink-900 p-2 rounded overflow-auto max-h-96 text-[11px]">
+            <div className="text-fg3 mb-1">pack.json</div>
+            <pre className="bg-bg p-2 rounded overflow-auto max-h-96 text-[11px]">
               {pack ? JSON.stringify(pack, null, 2) : '—'}
             </pre>
           </div>
           <div>
-            <div className="text-zinc-500 mb-1">scene.json (live)</div>
-            <pre className="bg-ink-900 p-2 rounded overflow-auto max-h-96 text-[11px]">
+            <div className="text-fg3 mb-1">scene.json (live)</div>
+            <pre className="bg-bg p-2 rounded overflow-auto max-h-96 text-[11px]">
               {sceneJson}
             </pre>
           </div>
@@ -296,33 +296,33 @@ function ProbeThresholdsPanel() {
   return (
     <div className="flex items-center gap-3 text-xs">
       <label className="flex items-center gap-1.5">
-        <span className="text-zinc-500">A (green below)</span>
+        <span className="text-fg3">A (green below)</span>
         <input
-          className="w-16 bg-ink-900 border border-ink-600 rounded px-1.5 py-0.5 font-mono"
+          className="w-16 bg-bg border border-line2 rounded px-1.5 py-0.5 font-mono"
           value={a}
           onChange={(e) => setA(e.target.value)}
         />
-        <span className="text-zinc-500">ms</span>
+        <span className="text-fg3">ms</span>
       </label>
       <label className="flex items-center gap-1.5">
-        <span className="text-zinc-500">B (red above)</span>
+        <span className="text-fg3">B (red above)</span>
         <input
-          className="w-16 bg-ink-900 border border-ink-600 rounded px-1.5 py-0.5 font-mono"
+          className="w-16 bg-bg border border-line2 rounded px-1.5 py-0.5 font-mono"
           value={b}
           onChange={(e) => setB(e.target.value)}
         />
-        <span className="text-zinc-500">ms</span>
+        <span className="text-fg3">ms</span>
       </label>
       <button
-        className="px-2.5 py-0.5 rounded border border-ink-600 text-zinc-300 hover:bg-ink-700"
+        className="px-2.5 py-0.5 rounded border border-line2 text-fg2 hover:bg-raised"
         onClick={save}
       >
         save
       </button>
-      <span className="text-zinc-500">
+      <span className="text-fg3">
         budget 16.6 ms @ 60 Hz · yellow enters design flagged · red is refused
       </span>
-      {status && <span className="text-zinc-400">{status}</span>}
+      {status && <span className="text-fg2">{status}</span>}
     </div>
   );
 }
@@ -330,7 +330,7 @@ function ProbeThresholdsPanel() {
 function Stat({ label, value }: { label: string; value: any }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <div className="text-[10px] text-zinc-500">{label}</div>
+      <div className="text-[10px] text-fg3">{label}</div>
       <div className="font-mono">{value}</div>
     </div>
   );

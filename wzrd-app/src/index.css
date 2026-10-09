@@ -2,36 +2,117 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root {
+/* ---------- tokens ----------
+ * RGB triplets so Tailwind's `/alpha` modifiers work (tailwind.config.ts).
+ * `--deck` follows the deck toggle: the room is cool cyan while your hands
+ * are on DESIGN and armed red while they're on LIVE (design spec: "the room
+ * should look different in each mode so I can't confuse them mid-set").
+ */
+:root {
+  --bg: 6 7 9;
+  --panel: 13 14 18;
+  --panel-2: 18 20 25;
+  --raised: 25 28 35;
+  --line: 31 34 42;
+  --line-2: 44 48 59;
+  --fg: 236 238 243;
+  --fg-2: 168 174 189;
+  --fg-3: 112 119 136;
+  --fg-4: 70 76 90;
+
+  --design: 60 200 255;
+  --live: 255 59 71;
+  --amber: 255 176 46;
+  --mod: 232 107 255;
+  --ok: 62 224 143;
+  --bad: 255 74 82;
+  --low: 255 122 69;
+  --mid: 255 212 71;
+  --high: 155 225 93;
+
+  --deck: var(--design);
+  color-scheme: dark;
+}
+:root[data-deck='live'] {
+  --deck: var(--live);
+}
+
+html,
+body,
+#root {
   height: 100%;
   overflow: hidden;
+  background: rgb(var(--bg));
+  color: rgb(var(--fg));
+  font-family: theme('fontFamily.sans');
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-/* Make Monaco play nice inside a Tailwind flex container. */
-.monaco-editor, .monaco-editor .overflow-guard {
-  border-radius: 4px;
+/* Text fields and code stay selectable. */
+input,
+textarea,
+.selectable,
+.monaco-editor {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-/* Hide focus-rings inside Monaco — we have our own visual language. */
+.num {
+  font-family: theme('fontFamily.mono');
+  font-variant-numeric: tabular-nums;
+}
+
+/* Section label: the small caps used on every panel header and control. */
+.label {
+  font-size: 10px;
+  line-height: 12px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: rgb(var(--fg-3));
+}
+
+/* Thin, quiet scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--line-2)) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--line-2));
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+button {
+  cursor: default;
+}
+button:focus-visible,
+[tabindex]:focus-visible {
+  outline: 1px solid rgb(var(--deck) / 0.8);
+  outline-offset: 1px;
+}
+
+/* Hide focus-rings inside Monaco — it has its own. */
 .monaco-editor textarea:focus {
   outline: none !important;
 }
 
-/* Bar charts for audio bands. */
-.bar-stack {
-  display: flex;
-  gap: 4px;
-  align-items: flex-end;
-  height: 100%;
-}
-.bar-stack > .bar {
-  width: 32px;
-  background: linear-gradient(180deg, #b78cff 0%, #73b6ff 100%);
-  border-radius: 2px;
-  transition: height 60ms linear;
+/* Checkerboard behind transparent thumbnails. */
+.dim-grid {
+  background-color: rgb(var(--bg));
+  background-image: linear-gradient(rgb(255 255 255 / 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 0.025) 1px, transparent 1px);
+  background-size: 16px 16px;
 }
 
-/* Pill base. */
+/* Legacy pill (Align/Debug internals). */
 .pill {
   display: inline-flex;
   align-items: center;
@@ -40,11 +121,20 @@ html, body, #root {
   border-radius: 999px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  background: #161922;
-  border: 1px solid #2a2f3e;
+  background: rgb(var(--panel-2));
+  border: 1px solid rgb(var(--line-2));
 }
 .pill .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+}
+
+select {
+  background: rgb(var(--panel-2));
+  border: 1px solid rgb(var(--line-2));
+  border-radius: 6px;
+  color: rgb(var(--fg));
+  padding: 3px 6px;
+  font-size: 12px;
 }

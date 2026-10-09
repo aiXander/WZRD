@@ -1,17 +1,20 @@
 // Application root.
-//   - Sets up the engine wire (telemetry → store; status → store).
-//   - Hydrates the pack + scene + effect list on first mount.
-//   - Renders the top status strip + the active route (Phase 4.2 navigation).
+//   - Wires the engine (telemetry → store; status → store).
+//   - Hydrates pack, both legs' scenes, override tables, effect catalog and
+//     looks on first mount (and again whenever the engine comes back).
+//   - Renders the top bar + the active room, the keyboard map, toasts.
 //
-// Single-window UI per the Phase 4 design principle: nothing modal, errors
-// surface inline. Routes share the top status strip so it's always glanceable.
+// Nothing modal mid-set: errors surface inline or as a toast.
 
-import { useEffect } from 'react';
-import { useStore, type MastersState } from './state/store';
+import { useEffect, useRef } from 'react';
+import { useStore, type Catalog, type MastersState } from './state/store';
 import {
+  effectDescribe,
   engineStatus,
   lastPayload,
   listEffects,
+  masterSet,
+  transportSet,
   onEngineStatus,
   onTelemetry,
   packInfo,
@@ -22,71 +25,120 @@ import {
   type DeckPayload,
 } from './api/ipc';
 import { ingestAlignment } from './state/alignment';
-import { StatusStrip } from './components/StatusStrip';
-import { TopBar } from './components/TopBar';
+import { hydrateOverrides, loadLooks, refreshLiveScene } from './state/actions';
+import { ensureMasks } from './state/masks';
+import { useShortcuts } from './state/shortcuts';
+import { useAutopilotDriver } from './state/autopilot';
+import { HelpOverlay, Toasts, TopBar } from './components/TopBar';
 import { Prepare } from './routes/Prepare';
 import { Align } from './routes/Align';
 import { Perform } from './routes/Perform';
 import { DebugRoute } from './routes/Debug';
 
+async function loadCatalog() {
+  try {
+    const res: any = await effectDescribe();
+    const next: Catalog = {};
+    for (const e of res?.effects ?? []) next[e.name] = { kind: e.kind, inputs: e.inputs ?? [] };
+    useStore.getState().setCatalog(next);
+  } catch (e) {
+    console.warn('effect.describe', e);
+  }
+}
+
+async function hydrate() {
+  const st = useStore.getState();
+  try {
+    st.setEngineRunning((await engineStatus()).running);
+  } catch (e) {
+    console.warn('engine_status:', e);
+  }
+  try {
+    st.setPack(await packInfo());
+  } catch (e) {
+    console.warn('pack_info:', e);
+  }
+  // Design truth is the engine's design leg (it may hold a restored draft
+  // that differs from scene.json); fall back to the file.
+  try {
+    const d = await sceneGetState('design');
+    st.setSceneJson(d.json);
+  } catch {
+    try {
+      st.setSceneJson(await readSceneFile());
+    } catch (e) {
+      console.warn('read_scene_file:', e);
+    }
+  }
+  refreshLiveScene();
+  try {
+    st.setEffects(await listEffects());
+  } catch (e) {
+    console.warn('list_effects:', e);
+  }
+  loadCatalog();
+  loadLooks();
+  // Sticky channels emitted before the webview mounted.
+  try {
+    const m = await lastPayload<MastersState>('masters');
+    if (m) st.setMasters(m);
+  } catch (e) {
+    console.warn('last_payload(masters):', e);
+  }
+  try {
+    const d = await lastPayload<DeckPayload>('deck');
+    if (d) st.setDeck(d);
+  } catch (e) {
+    console.warn('last_payload(deck):', e);
+  }
+  try {
+    const a = await lastPayload<AlignmentDoc>('alignment');
+    if (a) st.setAlignment(a);
+  } catch (e) {
+    console.warn('last_payload(alignment):', e);
+  }
+  hydrateOverrides('design');
+  hydrateOverrides('live');
+  lockLegs();
+}
+
+/** Masters are the room, not a leg (actions.setMaster writes both). Older
+ *  sessions may have left the legs apart: copy live's masters onto design
+ *  and snap design's clock to live's, so they tick in lockstep from here
+ *  and a TAKE never jumps the wall's speed, brightness or bar grid. */
+function lockLegs() {
+  const st = useStore.getState();
+  const m = st.masters;
+  if (!st.deck?.two_leg || !m) return;
+  (Object.keys(m.live) as (keyof typeof m.live)[]).forEach((k) => {
+    if (m.design[k] !== m.live[k]) masterSet(k, m.live[k], 'design').catch(() => {});
+  });
+  st.setMasters({ ...m, design: { ...m.live } });
+  transportSet({ sync: true }).catch((e) => console.warn('transport sync', e));
+}
+
 export default function App() {
   const route = useStore((s) => s.route);
-  const setRoute = useStore((s) => s.setRoute);
+  const leg = useStore((s) => s.deck?.preview_source ?? 'design');
+  const pack = useStore((s) => s.pack);
+  const lastPromote = useRef<string>('idle');
+  useShortcuts();
+  useAutopilotDriver();
+
+  // The whole room re-tints with the deck (see index.css `--deck`).
+  useEffect(() => {
+    document.documentElement.dataset.deck = leg;
+  }, [leg]);
+
+  useEffect(() => {
+    ensureMasks(pack);
+  }, [pack]);
 
   useEffect(() => {
     let unlistenT: (() => void) | undefined;
     let unlistenS: (() => void) | undefined;
     (async () => {
-      const tStore = useStore.getState();
-      // Initial hydration. If the engine is still booting these will throw;
-      // the status event will fire it again shortly.
-      try {
-        const s = await engineStatus();
-        tStore.setEngineRunning(s.running);
-      } catch (e) {
-        console.warn('engine_status:', e);
-      }
-      try {
-        const pack = await packInfo();
-        tStore.setPack(pack);
-      } catch (e) {
-        console.warn('pack_info:', e);
-      }
-      try {
-        const scene = await readSceneFile();
-        tStore.setSceneJson(scene);
-      } catch (e) {
-        console.warn('read_scene_file:', e);
-      }
-      try {
-        tStore.setEffects(await listEffects());
-      } catch (e) {
-        console.warn('list_effects:', e);
-      }
-      try {
-        // Masters are sticky — the engine emitted them before the webview
-        // mounted, so hydrate from the shell's last-payload snapshot.
-        const m = await lastPayload<MastersState>('masters');
-        if (m) tStore.setMasters(m);
-      } catch (e) {
-        console.warn('last_payload(masters):', e);
-      }
-      try {
-        // §5.6 deck state is sticky too (emitted at design-leg boot).
-        const d = await lastPayload<DeckPayload>('deck');
-        if (d) tStore.setDeck(d);
-      } catch (e) {
-        console.warn('last_payload(deck):', e);
-      }
-      try {
-        // §5.14 alignment is sticky too (emitted at boot, before the webview
-        // exists) — so the Align tab hydrates without an extra round trip.
-        const a = await lastPayload<AlignmentDoc>('alignment');
-        if (a) tStore.setAlignment(a);
-      } catch (e) {
-        console.warn('last_payload(alignment):', e);
-      }
-
+      await hydrate();
       unlistenT = await onTelemetry((frame) => {
         const st = useStore.getState();
         switch (frame.channel) {
@@ -103,6 +155,9 @@ export default function App() {
           case 'audio':
             st.setAudio(frame.payload);
             break;
+          case 'transport':
+            st.setTransport(frame.payload);
+            break;
           case 'frame_stats':
             st.setFrameStats(frame.payload);
             break;
@@ -115,14 +170,20 @@ export default function App() {
           case 'masters':
             st.setMasters(frame.payload);
             break;
-          case 'deck':
-            st.setDeck(frame.payload);
+          case 'deck': {
+            const d = frame.payload as DeckPayload;
+            st.setDeck(d);
+            // A take just landed: live now holds design's scene + controls.
+            if (lastPromote.current !== 'idle' && d.promote === 'idle') {
+              refreshLiveScene();
+              hydrateOverrides('live');
+            }
+            lastPromote.current = d.promote;
             break;
+          }
           case 'alignment':
-            // §5.14 — the engine is the authority (a headless camera script is
-            // as legitimate a writer as this UI). `ingestAlignment` takes it
-            // wholesale except for facets with an unacknowledged local drag,
-            // where the echo is the older view.
+            // The engine is the authority; `ingestAlignment` keeps facets
+            // with an unacknowledged local drag.
             ingestAlignment(frame.payload);
             break;
           case 'preview':
@@ -132,11 +193,9 @@ export default function App() {
             st.appendLog(frame.payload);
             break;
           case 'changes': {
-            // §5.10 reverse-sync: the store assumes it's the only writer, so
-            // any non-UI design mutation (agent over WS, watcher file edit)
-            // re-pulls the affected facet from the engine. Store only —
-            // never into sceneCommit's disk debounce; persisting an
-            // agent-authored scene is the operator's explicit "Adopt".
+            // §5.10 reverse-sync: re-pull the facet any non-UI writer touched.
+            // Store only — persisting an agent-authored scene is the
+            // operator's explicit "Adopt".
             const entry = frame.payload as ChangeEntry;
             if (entry.actor === 'ui') break;
             if (entry.facet === 'layers') {
@@ -151,57 +210,39 @@ export default function App() {
                 listEffects()
                   .then((eff) => useStore.getState().setEffects(eff))
                   .catch((e) => console.warn('changes re-sync effects:', e));
+                loadCatalog();
               }
             }
             if (entry.actor === 'agent') st.setAgentEdit(entry);
             break;
           }
           default:
-            // Unknown channels are silently dropped — agent-driven additions
-            // shouldn't need a UI patch to coexist.
             break;
         }
       });
       unlistenS = await onEngineStatus((s) => {
+        const was = useStore.getState().engineRunning;
         useStore.getState().setEngineRunning(!!s.running);
+        if (s.running && !was) hydrate();
       });
     })();
-
     return () => {
       unlistenT?.();
       unlistenS?.();
     };
   }, []);
 
-  // ⌘1..⌘4 (and Ctrl on non-mac) switch routes, in load-in order.
-  useEffect(() => {
-    const KEYS: Record<string, ReturnType<typeof useStore.getState>['route']> = {
-      '1': 'prepare',
-      '2': 'align',
-      '3': 'perform',
-      '4': 'debug',
-    };
-    function onKey(e: KeyboardEvent) {
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const target = KEYS[e.key];
-      if (!target) return;
-      e.preventDefault();
-      setRoute(target);
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [setRoute]);
-
   return (
     <div className="flex flex-col h-full">
       <TopBar />
-      <StatusStrip />
       <main className="flex-1 min-h-0 overflow-hidden">
         {route === 'prepare' && <Prepare />}
         {route === 'align' && <Align />}
         {route === 'perform' && <Perform />}
         {route === 'debug' && <DebugRoute />}
       </main>
+      <HelpOverlay />
+      <Toasts />
     </div>
   );
 }

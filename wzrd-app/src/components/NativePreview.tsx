@@ -1,38 +1,35 @@
-// Native preview slot (app-collapse Step 3). Renders an empty, measured
-// placeholder div; the Rust side positions a borderless native child window
-// over it that blits the engine's composite texture directly — lossless,
-// full-resolution, full-rate, unlike the ~15 fps JPEG thumbnail path
-// (which survives for the Prepare canvas underlay + remote WS clients).
+// The monitor. Measures the largest pack-aspect rect that fits its slot and
+// positions the native preview child window exactly over it (lossless,
+// full-rate blit of the engine composite — `preview_set_bounds`). HTML can't
+// draw over that rect (the native window covers it), so all chrome lives
+// around it, never on it.
 //
-// Position sync: rect pushed via `preview_set_bounds` on mount, resize
-// (ResizeObserver + window resize) and scroll (capture phase). Window
-// drags need no re-push — the preview is a macOS child window of the main
-// window and moves with it.
+// In a plain browser (dev bridge, no native window) the slot shows the JPEG
+// `preview` channel instead — the design composite.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { previewSetBounds } from '../api/ipc';
+import { IN_TAURI } from '../api/transport';
 import { useStore } from '../state/store';
+import { useAspectFit } from '../ui/useAspectFit';
 
-export function NativePreview() {
-  const ref = useRef<HTMLDivElement | null>(null);
+export function NativePreview({ className = '' }: { className?: string }) {
+  const [outer, setOuter] = useState<HTMLDivElement | null>(null);
+  const inner = useRef<HTMLDivElement | null>(null);
   const pack = useStore((s) => s.pack);
-  const aspect = pack ? `${pack.width} / ${pack.height}` : '16 / 9';
+  // The largest aspect-correct rect inside the slot, either dimension.
+  const box = useAspectFit(outer, pack ? pack.width / pack.height : 16 / 9);
 
   useEffect(() => {
-    const el = ref.current;
+    if (!IN_TAURI) return;
+    const el = inner.current;
     if (!el) return;
     let raf = 0;
     const push = () => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
         const r = el.getBoundingClientRect();
-        previewSetBounds(
-          r.left,
-          r.top,
-          r.width,
-          r.height,
-          r.width > 4 && r.height > 4
-        ).catch(() => {});
+        previewSetBounds(r.left, r.top, r.width, r.height, r.width > 4 && r.height > 4).catch(() => {});
       });
     };
     push();
@@ -51,17 +48,35 @@ export function NativePreview() {
       window.removeEventListener('focus', push);
       previewSetBounds(0, 0, 0, 0, false).catch(() => {});
     };
-  }, []);
+  }, [box.w, box.h]);
 
   return (
-    <div className="w-full h-full flex items-center justify-center min-h-0">
+    <div ref={setOuter} className={'relative w-full h-full min-h-0 flex items-center justify-center ' + className}>
       <div
-        ref={ref}
-        className="max-w-full max-h-full h-full rounded border border-ink-600 bg-ink-900 flex items-center justify-center text-xs text-zinc-500"
-        style={{ aspectRatio: aspect }}
+        ref={inner}
+        className="relative bg-black flex items-center justify-center"
+        style={{ width: box.w, height: box.h }}
       >
-        native preview attaching…
+        {IN_TAURI ? (
+          <span className="text-2xs text-fg4">attaching preview…</span>
+        ) : (
+          <JpegFeed />
+        )}
       </div>
     </div>
+  );
+}
+
+/** The ~15 fps JPEG `preview` channel (always the design composite). */
+export function JpegFeed({ className = '' }: { className?: string }) {
+  const preview = useStore((s) => s.preview);
+  if (!preview) return <span className="text-2xs text-fg4">no preview frames</span>;
+  return (
+    <img
+      alt=""
+      draggable={false}
+      className={'w-full h-full object-contain ' + className}
+      src={`data:image/jpeg;base64,${preview.data_b64}`}
+    />
   );
 }

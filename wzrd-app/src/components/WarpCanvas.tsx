@@ -210,11 +210,11 @@ function HandleMenu({
   doc: AlignmentDoc;
   onClose: () => void;
 }) {
-  const cls = 'block w-full px-3 py-1.5 text-left text-zinc-200 hover:bg-ink-700';
+  const cls = 'block w-full px-3 py-1.5 text-left text-fg hover:bg-raised';
   const t = menu.target;
   return (
     <div
-      className="absolute z-10 min-w-[13rem] rounded border border-ink-600 bg-ink-800 py-1 text-xs shadow-lg"
+      className="absolute z-10 min-w-[13rem] rounded-lg border border-line2 bg-raised py-1 text-xs shadow-2xl"
       style={{ left: menu.x, top: menu.y }}
       onPointerDown={(e) => e.stopPropagation()}
     >
@@ -240,8 +240,8 @@ function HandleMenu({
           >
             Remove point
           </button>
-          <div className="mt-1 border-t border-ink-700 px-3 pb-1 pt-2">
-            <label className="block text-[10px] uppercase tracking-wide text-zinc-500">
+          <div className="mt-1 border-t border-line px-3 pb-1 pt-2">
+            <label className="block text-[10px] uppercase tracking-wide text-fg3">
               Radius — how far this correction reaches
             </label>
             <input
@@ -462,7 +462,7 @@ export function WarpCanvas() {
 
   if (!doc) {
     return (
-      <div className="h-full grid place-items-center text-xs text-zinc-500">
+      <div className="h-full grid place-items-center text-xs text-fg3">
         waiting for the engine's alignment document…
       </div>
     );
@@ -509,7 +509,7 @@ export function WarpCanvas() {
   const selectedPoint = doc.points.find((p) => p.id === selected) ?? null;
 
   return (
-    <div ref={hostRef} className="relative h-full w-full overflow-hidden bg-ink-900">
+    <div ref={hostRef} className="relative h-full w-full overflow-hidden dim-grid">
       {underlay && preview && (
         <img
           alt=""
@@ -661,7 +661,7 @@ export function WarpCanvas() {
         <HandleMenu menu={menu} doc={doc} onClose={() => setMenu(null)} />
       )}
 
-      <div className="pointer-events-none absolute bottom-2 left-3 text-[10px] leading-4 text-zinc-500">
+      <div className="pointer-events-none absolute bottom-2 left-3 text-[10px] leading-4 text-fg3">
         <div>
           drag handles · click the outline to add one on the edge · drag inside to move
           the whole quad · right-click to add/remove · arrows nudge 1 px, ⇧ 10 (nothing

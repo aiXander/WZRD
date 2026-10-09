@@ -21,5 +21,6 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let mask = sample_mask(in.uv);
-    return effect(in.uv, mask);
+    // Premultiplied + additive, so scaling all four lanes is a true fade.
+    return effect(in.uv, mask) * layer.opacity;
 }

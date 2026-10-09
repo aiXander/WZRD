@@ -117,7 +117,10 @@ cross-leg GC, pre-flight probe, design autosave, preview source toggle) and
   pre-two-deck engine.
 
 **Still open (deferred out of §5.6 scope by design, 2026-07-12): the
-auto-pilot playlist** (spec §13) — a thin scheduler composing existing
+engine-side auto-pilot playlist** (spec §13). A UI-driven stopgap landed
+2026-10-09 (looks bank + AUTO every N bars in Perform — see
+[../reference/operator-ui.md](../reference/operator-ui.md)); it dies with
+the app window, which is why the engine version below still matters — a thin scheduler composing existing
 verbs, no new engine code: `scene.load` → design, wait for build/probe OK
 (the `scene.load` reply already carries the probe verdict), `promote
 {quantize:"bar"}`, dwell, repeat, skip entries that fail. Ship it once
@@ -126,6 +129,12 @@ master** — "promote fade default" as an operator master — landed separately
 on 2026-07-22; see §5.4.)
 
 ### 5.7 Layer object + intensity (carried over from v1 review #2/#9)
+
+**Runtime half LANDED 2026-10-09:** per-binding opacity / mute / solo as
+reserved `@opacity`/`@mute`/`@solo` overrides folded into `layer.opacity`
+(reference §2.5), driven by the Perform layer mixer. **Still open:** the
+scene.json `layers:` block (authored intensity that survives into looks and
+headless runs), z-override, and per-*region* (vs per-binding) addressing.
 
 Introduce an explicit `Layer` concept between scene and bindings: per-region
 **intensity** (how hard its bindings light it), **mute**, and z-override,
@@ -242,8 +251,11 @@ when the projector/surface is bumped, run the offline `align` step on a new
 capture against the original reference photo and push the resulting corners
 through `alignment.set`, no re-segmentation. That is now an external script
 against the existing WS surface, not engine work.
-Layer deck panel in Perform (per §5.7); virtualized log list; driver-rack
-grouping/filter chips; scene save-as + scene chooser grid; region renaming +
+Layer deck panel in Perform — **landed 2026-10-09** with the UI redesign
+(see [../reference/operator-ui.md](../reference/operator-ui.md)), as did a
+looks bank (saved scenes) standing in for "scene save-as + chooser".
+Still open: MIDI controller mapping (WKWebView has no Web MIDI — needs a
+Rust-side bridge); virtualized log list; region renaming +
 `identity.json` editing in Prepare (→ §5.13); AI co-author chat panel (with §5.10).
 
 ### 5.13 Identity sidecar: group authoring + region renaming — ENGINE SLICE LANDED (2026-07-22)

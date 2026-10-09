@@ -182,16 +182,12 @@ not "fix" it to alpha blending.
 **`wzrd-app/`** — `src-tauri/src/{lib,engine,rpc}.rs` (in-process TauriHost —
 see §1b: engine window + render thread + telemetry fan-in + preview child
 window; `rpc.rs` command wrappers are unchanged from the subprocess era) and
-`src/` (React: Zustand store, `state/sceneCommit.ts` debounced commit path,
-`SurfaceCanvas` (still consumes the JPEG `preview` channel as its canvas
-underlay), `NativePreview` (Step-3 native hero on Perform), `MonacoPanel`,
-`BindingInspector`, `DriverRack`, `MastersRow`, `AudioStrip`, `StatusStrip`,
-`WarpCanvas` + `state/alignment.ts` (§2.8 — its own commit path, deliberately
-not `sceneCommit`) + `state/warpMath.ts` (the §2.8 model on the CPU, fed by the
-engine's solved coefficients, for drawing the field and snapping edge clicks),
-four routes). Numeric const rows in the driver rack tune through the §5.5
-override path (amber = overridden, ↺ clears back to the scene value);
-colours still go through the debounced scene commit. §2.7 reverse-sync:
+`src/` (React + Zustand; `state/sceneCommit.ts` debounced commit path,
+`state/actions.ts` every operator action, `WarpCanvas` + `state/alignment.ts`
+(§2.8 — its own commit path, deliberately not `sceneCommit`) +
+`state/warpMath.ts`). **The UI's structure, rules and traps are mapped in
+[operator-ui.md](operator-ui.md)** (rooms, deck/masters/structure rules,
+layer mixer, modulation, looks, auto-pilot, browser bridge). §2.7 reverse-sync:
 `App.tsx` handles the `changes` channel (non-`ui` actor → re-pull the
 affected facet into the store only), and the TopBar's **ADOPT AGENT SCENE**
 button (`sceneCommit.adoptAgentScene`) is the one path that persists
@@ -230,12 +226,18 @@ boot as a migration source, warned about, and ignored thereafter.
 
 Drivers: `const(value)`, `clock.bars(n)`, `clock.beats(n)`, `clock.phase(rate)`,
 `clock.time`, `audio.band(low|mid|high)`, `audio.onset(band, decay)`,
-`ui.slider(name, default)`. No `audio.rms`/`audio.fft` scene drivers in v1
+`ui.slider(name, default)`. Any driver object may add **`"range": [from,
+to]`** (2026-10-09): the param then sweeps `from → to` as the driver moves
+0 → 1 (`ScalarValue::Mapped` in `drivers.rs`) — the modulation depth the
+operator UI's MOD routing writes ("bright 0.3 → 1.5 on the kick"); without
+it the raw driver value goes straight in. The probe treats a mapped param
+pessimistically as `max(from, to)`. No `audio.rms`/`audio.fft` scene drivers in v1
 (the server emits `/audio/fft` but the engine doesn't consume it; rms doesn't
 exist). The server also streams `/audio/bpm` — **deliberately ignored**
 (live BPM tracking dropped 2026-07-11, roadmap §5.1): `transport.bpm` is a
 static scene value, and live musical energy reaches scenes through
-`audio.onset`/`audio.band`, not tempo. Duplicate/empty binding ids are load
+`audio.onset`/`audio.band`, not tempo — but the tempo itself is live-tunable
+via `transport.set` (tap tempo, below). Duplicate/empty binding ids are load
 errors.
 
 **`pick` selectors (§5.2, landed 2026-07-11).** Any selector may add
@@ -312,6 +314,7 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `param.set {name, value, leg?}` | **inline** | Writes the target leg's `SliderBank` (§2.6 — `leg` default `"design"`; the UI passes the deck toggle's leg); bound `ui.slider` params update next frame. **No rebuild, no disk write — this is the live knob path.** |
 | `param.set {binding, param, value, leg?}` | **inline** | §5.5 override form — pins any *scalar* param on a binding (const or driver output alike) in the target leg's override table; `value: null` clears. Same zero-rebuild property; survives plan rebuilds as long as a scalar param with that name exists (the carry-forward rule). |
 | `param.list {leg?}` | inline | `{ sliders, overrides, leg }` — the target leg's knob values + override table (design default). |
+| `transport.set {bpm?, resync?, sync?, leg?}` | queued | Live tempo (20–400) with the beat grid held continuous (`Transport::beat_offset` — a tempo change never jumps bar phase); `resync` puts a bar line at "now" (nearest bar); `sync` snaps the design clock onto live's. `leg` omitted = both legs. Not persisted — scene.json's `transport.bpm` stays the cold-boot truth (the UI writes the tapped tempo there too). |
 | `master.set {name, value, leg?}` | **inline** | §5.4 — `brightness` \| `speed` \| `saturation` \| `audioListen`, per leg since §2.6 (design default); plus `crossfade` (engine-wide crossfade-time master in seconds, 0–30 — `leg` ignored). Clamped, applied next frame, echoed on the sticky `masters` channel. Not reachable from scene.json by design. |
 | `master.list` | inline | Both legs' masters: `{ live: {...}, design: {...} }`. |
 | `session.save` | queued | §5.3 — write the session sidecar now (also happens debounced after master/knob changes and on SIGTERM/SIGINT/window close). |
@@ -330,6 +333,7 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 | `frame_stats` | 2 Hz | p50/p95/p99 + mask-slice / pipeline / pass counts (counts follow the **design** plan in two-leg mode — §2.6). |
 | `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). Rows come from the **design** plan in two-leg mode. |
 | `audio` | 30 Hz | L/M/H bands + onset envelopes. |
+| `transport` | 30 Hz | `{live: {bpm, beats}, design: {bpm, beats}}` — musical position for the UI's beat lamps and the auto-pilot's bar boundaries. Not sticky. |
 | `audio_freshness` | 1 Hz + edges | fresh/stale/down (sticky). |
 | `connectivity` | 1 Hz | osc / file_watcher / ws status cells (sticky). |
 | `hot_reload` | on event | target, ok, elapsed, message, **`probe`** (§2.6 — `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts[]}` when a pre-flight probe ran; sticky), plus the §2.7 correlation stamp `{epoch, rev, actor}` (for push consumers — author verdicts arrive in the RPC reply, never via sticky replay). |
@@ -344,7 +348,9 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 User code implements `fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32>`
 (premultiplied RGBA, additive) with access to `state.*` (time, bar/beat
 phase, bpm, audio bands/onsets, resolution), `f_param(N)` / `c_param(N)`
-(8 scalar + 4 colour slots), and `sample_mask(uv)`. The engine composes
+(8 scalar + 4 colour slots), and `sample_mask(uv)`. `fs_main` multiplies the
+effect's output by `layer.opacity` (the operator layer fader, §2.5) — user
+code never has to honour it. The engine composes
 `shaders/effect_prelude.wgsl + body + shaders/effect_main.wgsl` and
 naga-validates before pipeline creation; a bad save never blanks the
 projector.
@@ -418,7 +424,16 @@ and every scene played from that directory shares the physical setup):
   (0 = CUT); a `promote` with no explicit `fade_ms` falls back to it. Set
   via `master.set {name:"crossfade"}` (the `leg` arg is ignored), persisted
   in the sidecar, carried on the `masters` channel's top-level `crossfade`.
-  The DeckBar's FADE fader (logarithmic, CUT at the bottom) drives it.
+  The deck panel's FADE fader (logarithmic, CUT at the bottom) drives it.
+- **Layer mixer (2026-10-09):** the reserved override params `@opacity`
+  (0–1), `@mute` and `@solo` (> 0.5 = on) on a binding are folded by
+  `PassPlan::tick` into one per-pass `opacity` (`compositor.rs
+  ::layer_opacity`; any soloed binding silences the un-soloed ones) and
+  written into `LayerParams.opacity` (the old `_pad0` slot); 0 skips the
+  draw. Riding the override table makes them per leg, zero-rebuild,
+  sidecar-persisted and promote/pull-copied with no new RPC. The `@` prefix
+  can't collide with a WGSL input name. This is the runtime half of roadmap
+  §5.7 (no scene.json `layers:` block yet).
 - The eventual "show file" (playlist + scenes + session) composes these;
   don't build the umbrella before the §5.6 auto-pilot playlist exists.
 
@@ -817,14 +832,15 @@ webview main thread. Hit-testing was bbox-based (wrong for overlapping
 regions), labels were unreadably small, and clicking wrote a *layer* id into
 the *binding* selection field, so selection never reached the inspector.
 
-Now: per-layer tinted overlays are composited **once** into offscreen
+Now (code: `state/masks.ts` + `components/SurfaceMap.tsx` since the
+2026-10-09 redesign): per-layer tinted overlays are composited **once** into offscreen
 canvases and blitted per repaint; picking samples a 256px-wide per-layer
-alpha map; region names live in the status line under the canvas, not
-painted at centroids (centroid labels landed outside thin/concave regions);
+alpha map; region names show in a floating hover label, not painted at
+centroids (centroid labels landed outside thin/concave regions);
 and the store has distinct `selectedLayerId` / `selectedBindingId`.
 
 The canvas↔inspector link runs **both ways**, on the same client-side
-selector resolution (`selectorCovers` in `SurfaceCanvas.tsx`, mirroring
+selector resolution (`selectorCovers` in `state/scene.ts`, mirroring
 `scene.rs::resolve_selector`; `pick` is ignored on purpose — it toggles
 which member *draws*, it does not narrow the member set):
 
@@ -841,16 +857,8 @@ overlapping neighbour's wash.
 
 ### 3.7 Perform route
 
-The driver rack is now playable: `ui.slider` rows are real sliders through
-`param.set`; literal numbers got an adaptive-range slider + numeric field
-through the debounced scene commit (since re-routed onto the §5.5 live
-override path, 2026-07-11 — scene.json is no longer written implicitly);
-colours get a picker; clock/audio-driven rows show live read-only bars (bar
-only rendered for values in [0,1]). The preview hero fills available
-height, with the §5.4 masters row always visible beneath it. The rack rows
-highlight when their binding is selected.
-
-Smaller fixes riding along: `read_mask_png` no longer pays a `pack.info`
+Superseded by the 2026-10-09 redesign — see [operator-ui.md](operator-ui.md).
+Fixes from this pass that still hold: `read_mask_png` no longer pays a `pack.info`
 RPC per mask (cached in Tauri state); redundant `request_redraw` removed;
 preview JPEG decode moved off the paint path.
 
@@ -869,7 +877,7 @@ declared defaults (same-named params carry over), add-param offers only
 declared-but-unset inputs, param type dropdowns are bounded by the
 declared input type, and `select.pick` survives kind changes. Keep any
 future structured editor on this rule; grep `catalog` in
-`BindingInspector.tsx`.
+`routes/Prepare.tsx` (`switchEffect`, `defaultsFor`).
 
 Second invariant, in `sceneCommit.ts`: **disk only ever receives
 engine-accepted scenes.** A rejected push stays optimistic in webview

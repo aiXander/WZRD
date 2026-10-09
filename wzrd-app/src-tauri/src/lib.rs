@@ -277,6 +277,12 @@ pub fn run() {
             rpc::read_scene_file,
             rpc::write_scene_file,
             rpc::read_mask_png,
+            rpc::transport_set,
+            rpc::param_list,
+            rpc::looks_list,
+            rpc::look_read,
+            rpc::look_write,
+            rpc::look_delete,
         ])
         .on_window_event(|window, event| {
             // The engine window has its own handler (engine.rs); closing the

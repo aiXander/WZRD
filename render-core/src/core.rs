@@ -1408,7 +1408,7 @@ impl Core {
     /// Current **live** transport bar time (4 beats/bar, matching
     /// `FrameContext`) — promote quantizes to the crowd's musical time.
     fn bar_time(&self) -> f32 {
-        self.transport.elapsed_sec() * self.transport.bpm().max(1.0) / 60.0 / 4.0
+        (self.transport.beats() / 4.0) as f32
     }
 
     /// `promote {fade_ms, quantize}` — crossfade the projector to the design
@@ -1511,6 +1511,51 @@ impl Core {
         log::info!("pull: design leg reset to the live scene (content + controls)");
         self.emit_deck();
         Ok(serde_json::json!({ "ok": true, "epoch": self.changes.epoch(), "rev": rev }))
+    }
+
+    /// `transport.set {bpm?, resync?, leg?}` — live tempo + downbeat. Tempo
+    /// changes keep the beat grid continuous; `resync` puts a bar line at
+    /// "now". `leg: None` hits both legs (the default — one room, one tempo),
+    /// so a later promote doesn't snap the crowd's grid to a stale design
+    /// clock. Not persisted: scene.json's `transport.bpm` stays the truth a
+    /// cold boot reads, so the UI also writes the tapped tempo there.
+    ///
+    /// `sync` snaps the design clock onto live's (tempo + position). With
+    /// both legs on the same speed master their clocks then stay identical,
+    /// so a promote's clock adoption no longer jumps the wall's bar grid.
+    pub fn cmd_transport(
+        &mut self,
+        bpm: Option<f32>,
+        resync: bool,
+        sync: bool,
+        leg: Option<Leg>,
+    ) -> Result<serde_json::Value, String> {
+        if let Some(b) = bpm {
+            if !b.is_finite() || !(20.0..=400.0).contains(&b) {
+                return Err(format!("bpm must be within 20..400, got {b}"));
+            }
+        }
+        let live = leg != Some(Leg::Design);
+        let design = leg != Some(Leg::Live) && self.two_leg;
+        for (on, t) in [(live, &mut self.transport), (design, &mut self.design_transport)] {
+            if !on {
+                continue;
+            }
+            if let Some(b) = bpm {
+                t.set_bpm(b);
+            }
+            if resync {
+                t.resync();
+            }
+        }
+        if sync && self.two_leg {
+            self.design_transport.sync_from(&self.transport);
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "live": { "bpm": self.transport.bpm(), "beats": self.transport.beats() },
+            "design": { "bpm": self.design_transport.bpm(), "beats": self.design_transport.beats() },
+        }))
     }
 
     /// `preview.setSource` — flip which composite the native preview blits.
@@ -2025,6 +2070,18 @@ impl Core {
                     .audio_state
                     .onset_envelope(crate::osc::AudioBand::High, 0.10),
             });
+            // Musical clock for the UI's beat lamps + BPM readout, both legs
+            // (their grids can drift while design speed differs).
+            self.bus.emit(
+                "transport",
+                serde_json::json!({
+                    "live": { "bpm": self.transport.bpm(), "beats": self.transport.beats() },
+                    "design": {
+                        "bpm": self.design_transport.bpm(),
+                        "beats": self.design_transport.beats(),
+                    },
+                }),
+            );
             self.last_audio_emit = Instant::now();
         }
 

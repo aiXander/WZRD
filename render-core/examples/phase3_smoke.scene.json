@@ -2,19 +2,19 @@
   "version": 1,
   "pack": "../../test_results/layerpack/pack",
   "transport": {
-    "bpm": 90
+    "bpm": 123
   },
   "bindings": [
     {
       "select": {
-        "id": "main_facade"
+        "tag": "background"
       },
-      "effect": "flow_noise",
+      "effect": "bloom",
       "params": {
-        "scale": 50,
-        "speed": 1,
-        "bright": 1.2999999523162842,
-        "tint": "#ffffff"
+        "rate": 0.06986788617886179,
+        "glow": 0.6009432164634146,
+        "core": "#ffd48a",
+        "edge": "#cc66e5"
       },
       "id": "facade_noise"
     },
@@ -35,12 +35,13 @@
       "select": {
         "id": "right_wing"
       },
-      "effect": "vbars",
+      "effect": "hueCycle",
       "params": {
-        "speed": -1.7,
-        "count": 30,
-        "duty": 0.5,
-        "color": "#ff4dd2"
+        "phase": 0,
+        "color0": "#1ab24d",
+        "color1": "#4de566",
+        "color2": "#e5b233",
+        "color3": "#c4bc00"
       },
       "id": "right_wing_bars"
     },
@@ -56,6 +57,19 @@
         "tint": "#ffffff"
       },
       "id": "base_wall_noise"
+    },
+    {
+      "id": "main_facade",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "flow_noise",
+      "params": {
+        "scale": 3,
+        "speed": 1,
+        "bright": 1.2999999523162842,
+        "tint": "#ffffff"
+      }
     }
   ],
   "post": []
