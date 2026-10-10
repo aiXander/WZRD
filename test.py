@@ -198,6 +198,21 @@ def test_concat():
     assert os.path.isfile(os.path.join(out_dir, "story.mp4"))
 
 
+def test_check_frames():
+    """A 5 Hz full-frame strobe fails the flash check; a 1 Hz pulse passes it."""
+    import numpy as np
+    from wzrd.check_frames import check_frames
+    from wzrd.utils import VideoWriter
+    out_dir = _result_dir("check_frames")
+    for hz, want in ((5, "fail"), (1, "pass")):
+        path = os.path.join(out_dir, f"strobe_{hz}hz.mp4")
+        with VideoWriter(path, 160, 90, 30) as w:
+            for i in range(90):
+                w.write(np.full((90, 160, 3), 230 if int(i * 2 * hz / 30) % 2 == 0 else 0, np.uint8))
+        flash = check_frames(path)["checks"]["flash"]
+        assert flash["status"] == want, (hz, flash)
+
+
 def test_mcp():
     """The MCP server boots, serves skills three ways, and ships text-only results."""
     import asyncio
@@ -208,7 +223,7 @@ def test_mcp():
     async def run():
         async with Client(mcp) as c:
             tools = {t.name: t for t in await c.list_tools()}
-            assert "load_skill" in tools and "view_media" in tools
+            assert "load_skill" in tools and "view_media" in tools and "check_frames" in tools
             assert all(t.output_schema is None for t in tools.values()), "a tool advertises an output schema"
             for name in skill_catalog.catalog():
                 assert name in mcp.instructions, f"skill {name} missing from the instructions index"
@@ -237,6 +252,7 @@ TESTS = {
     "layerpack": test_layerpack,
     "reproject": test_reproject,
     "concat": test_concat,
+    "check_frames": test_check_frames,
     "mcp": test_mcp,
 }
 

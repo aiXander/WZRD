@@ -28,5 +28,6 @@
   "set_labels": {"enabled": true, "timeout": 30},
   "set_scene": {"enabled": true, "timeout": 30},
   "validate_wgsl": {"enabled": true, "timeout": 30},
-  "get_preview": {"enabled": true, "timeout": 30}
+  "get_preview": {"enabled": true, "timeout": 30},
+  "check_frames": {"enabled": true, "timeout": 120}
 }

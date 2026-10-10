@@ -177,15 +177,16 @@ and Kling run it automatically after download (`hap=True` default).
 **Gate:** one TextureFlow render arrives as mp4 + HAP `.mov` + both
 sidecars + thumb; the `.mov` loops in `ffplay` without a seam jump.
 
-### P6 — `check_frames`
+### P6 — `check_frames` — done 2026-10-10
 
-PY · needs nothing · new numeric module in `wzrd/`, thin wrapper in
-`wzrd_mcp/media_tools.py`. Video/projector checks only: loop-seam score
-(last → first), **photosensitive flash rate** (> 3 large flashes/s = fail; the
-audience lies staring at the ceiling), dark-floor haze, lit fraction, and the
-still-vs-surface shift check gated at ≈ 0.1 %. Compact JSON, no pixels to
-the LLM. **Gate:** a synthetic 5 Hz strobe fails, a TextureFlow loop passes,
-a keyframe shifted 3 px fails the shift check.
+`wzrd/check_frames.py` + the `check_frames` MCP tool: flash rate (> 3 large
+flashes/s fails), loop seam, dark-floor haze, lit share, and with
+`surface=` the residual shift (fails above 0.1 % of the long side). Gate:
+synthetic strobes 1/3 Hz pass, 4/5 Hz fail; four real TextureFlow loops
+pass (seam 0.73–1.27× a frame step); a kasbah keyframe 0.19 px passes, the
+same shifted 3 px measures 4.35 px and fails. F1's per-effect flash gate
+runs it on a recorded clip of each effect. Done — see
+[mcp-server.md](../reference/mcp-server.md) file map.
 
 ### E1 — Engine video: HAP clips as an effect `image` input — DONE (2026-10-10)
 

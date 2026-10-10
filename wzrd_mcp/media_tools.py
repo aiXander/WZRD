@@ -154,3 +154,35 @@ async def concat_videos(
         drop_boundary_frames=drop_boundary_frames, seamless_loop=seamless_loop, crf=crf, codec=codec,
     )
     return {"output_video": out_path, "info": info}
+
+
+@tool(title="Check frames", tags={"preview", "qc"}, read_only=True, idempotent=True)
+async def check_frames(
+    media: str,
+    surface: Optional[str] = None,
+    max_flashes_per_s: float = 3.0,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Numeric QC of a clip or still before it goes on the wall — compact JSON, no pixels.
+
+    Video: `flash` (photosensitive: > max_flashes_per_s large flashes in any
+    second fails — the audience lies staring at the ceiling), `loop_seam`
+    (last → first jump vs a normal frame step; ~1 = clean loop), `haze`
+    (lifted black floor washes the whole surface), `lit` (share of frame
+    lit). Still: haze + lit. With `surface`: the media is a render OF that
+    surface (keyframe, keyframe video) and `shift` measures its residual
+    misalignment in px (fails above 0.1 % of the long side). `verdict` is the
+    worst status (pass < warn < fail). Run it on every new clip; never put a
+    flash fail on the wall.
+
+    Args:
+        media: Path or URL of a video or image.
+        surface: Path or URL of the surface the media was made on (enables the shift check).
+        max_flashes_per_s: Flash limit (default 3, the photosensitive standard). Lower it for a quieter set; never raise it for a live audience.
+    """
+    from wzrd.check_frames import check_frames as _check
+
+    media_path = await resolve_input_async(media)
+    surface_path = await resolve_input_async(surface) if surface else None
+    result = await asyncio.to_thread(_check, media_path, surface_path, max_flashes_per_s=max_flashes_per_s)
+    return {"media": media_path, **result}

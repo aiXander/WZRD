@@ -194,7 +194,7 @@ container seconds × $1.95/h L40S). Prices: [hosted-models.md](hosted-models.md)
 | `server.py` | FastMCP instance + instructions, `tool()` stack, config gate, module imports |
 | `skill_catalog.py` / `skill_tools.py` | skills scan + index / `load_skill`, resources provider, prompts |
 | `tools.py` | wzrd wrappers: subtraction, surface prep, regions, `texture_flow`/`textureflow_warm`, `build_layerpack`, `simulate_view` |
-| `media_tools.py` | `view_media` (downscaled images; one contact sheet per video) and `concat_videos` (→ `wzrd/concat.py`) |
+| `media_tools.py` | `view_media` (downscaled images; one contact sheet per video), `concat_videos` (→ `wzrd/concat.py`), `check_frames` (→ `wzrd/check_frames.py`: numeric clip QC — flash rate, loop seam, haze, lit share, still-vs-surface shift; thresholds and their reasons in the module docstring) |
 | `google_tools.py`, `fal_tools.py` | hosted models — [hosted-models.md](hosted-models.md) |
 | `engine_tools.py` | engine authoring slice — [render-engine.md](render-engine.md) §2.7 |
 | `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, `set_project` |
