@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import io
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -186,3 +186,108 @@ async def check_frames(
     surface_path = await resolve_input_async(surface) if surface else None
     result = await asyncio.to_thread(_check, media_path, surface_path, max_flashes_per_s=max_flashes_per_s)
     return {"media": media_path, **result}
+
+
+# ---------------------------------------------------------------------------
+# Playable clips (gig contract C3): <stem>.mp4 -> <stem>.mov (HAP) + <stem>.thumb.jpg
+# ---------------------------------------------------------------------------
+def make_clip(video: str, codec: str = "hap") -> dict:
+    """Transcode *video* to the project's HAP clip + thumbnail (blocking).
+
+    A source already in `generated/` gets its `.mov` beside it (same stem —
+    the app pairs them by name); any other source lands in `generated/`.
+    """
+    from wzrd.clips import thumbnail, to_hap
+
+    src = Path(video).resolve()
+    gen = project.kind_dir(project.GENERATED).resolve()
+    mov = src.with_suffix(".mov") if src.parent == gen else Path(
+        project.output_path("to_hap", ".mov", name=src.stem))
+    info = to_hap(src, mov, codec)
+    thumb = thumbnail(src, mov.with_suffix(".thumb.jpg"))
+    return {"clip": str(mov), "thumb": thumb,
+            "hap": {k: info[k] for k in ("codec", "size", "padded", "mb")}}
+
+
+async def attach_clip(result: dict, video_key: str, hap: Union[bool, str]) -> dict:
+    """After a render tool downloads its mp4: add the HAP clip (C3) to *result*
+    and make the `.mov` sidecar's parent the mp4. `hap` = False, True ("hap")
+    or a codec name."""
+    if not hap or not result.get(video_key):
+        return result
+    codec = hap if isinstance(hap, str) else "hap"
+    clip = await asyncio.to_thread(make_clip, result[video_key], codec)
+    result.update(clip)
+    prov = result.setdefault("_provenance", {})
+    parents = prov.get("parent") if isinstance(prov.get("parent"), dict) else {}
+    parents[clip["clip"]] = str(Path(result[video_key]).resolve())
+    prov["parent"] = parents
+    return result
+
+
+def _source_region(video: str) -> dict:
+    """region/source_box from a video's own sidecar, for its clip's sidecar."""
+    import json
+
+    from .provenance import sidecar_path
+
+    try:
+        meta = json.loads(sidecar_path(Path(video).resolve()).read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: meta.get(k) for k in ("region", "source_box")}
+
+
+@tool(title="Video to HAP clip", tags={"content", "engine"}, idempotent=True)
+async def to_hap(video: str, codec: str = "hap", ctx: Optional[Context] = None) -> dict:
+    """Make a video playable by the engine: a HAP .mov + 320 px thumbnail in the project's generated/ (the clip grid picks it up).
+
+    texture_flow and kling_* already do this for their own renders
+    (hap=True); use this for any other video. Dimensions are padded to
+    multiples of 4, fps kept. HAP is 5-10x bigger than H.264 — keep sources
+    as mp4 for transfer. The clip's sidecar inherits the source's region.
+
+    Args:
+        video: Path or URL of the source video.
+        codec: "hap" (default, smallest), "hap_q" (better colour, ~2x size) or "hap_alpha".
+    """
+    path = await resolve_input_async(video, suffix=".mp4")
+    result = await asyncio.to_thread(make_clip, path, codec)
+    result["_provenance"] = _source_region(path)
+    return {"video": path, **result}
+
+
+@tool(title="Extract frames", tags={"content"})
+async def extract_frames(
+    video: str,
+    at: Optional[list[Union[float, str]]] = None,
+    count: Optional[int] = None,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Pull stills out of a video into the project — e.g. a clip's last frame as the next keyframe or start frame.
+
+    Default: the first and last frame. Stills are PNG in generated/.
+
+    Args:
+        video: Path or URL of the video.
+        at: Which frames: seconds (e.g. 2.5) and/or "first" / "last".
+        count: Instead of `at`: N evenly spaced frames from first to last (2-24).
+    """
+    from wzrd.clips import _duration, extract_frame
+
+    path = await resolve_input_async(video, suffix=".mp4")
+    if count is not None:
+        if not 2 <= count <= 24:
+            raise ToolError("count must be 2-24")
+        dur = await asyncio.to_thread(_duration, path)
+        at = ["first", *[round(dur * i / (count - 1), 3) for i in range(1, count - 1)], "last"]
+    at = at or ["first", "last"]
+    stem = Path(path).stem
+
+    def one(t: Union[float, str]) -> dict:
+        label = t if isinstance(t, str) else f"{float(t):.2f}s".replace(".", "_")
+        out = project.output_path("extract_frames", ".png", name=f"{stem}_{label}")
+        return {"at": t, "path": extract_frame(path, t, out)}
+
+    frames = [await asyncio.to_thread(one, t) for t in at]
+    return {"video": path, "frames": frames}

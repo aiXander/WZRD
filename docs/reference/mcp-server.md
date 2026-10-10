@@ -197,6 +197,29 @@ images (recorded: from token usage), Kling list price × seconds (recorded:
 the same), TextureFlow $0.20 / $0.03 without upscales (recorded: billed
 container seconds × $1.95/h L40S). Prices: [hosted-models.md](hosted-models.md).
 
+## Playable clips (gig contract C3)
+
+The engine plays HAP only, so a render that should reach the wall becomes a
+clip in `generated/`, all sharing the source's stem (the app pairs them by
+name — `wzrd-app/src-tauri/src/clips.rs`):
+
+| File | Written by | Notes |
+|---|---|---|
+| `<stem>.mp4` + `.mp4.meta.json` | the render tool | carries the cost (`est_usd`) and the prompt/args |
+| `<stem>.mov` + `.mov.meta.json` | `media_tools.make_clip` | HAP (`Hap1` default, `hap_q` / `hap_alpha` by arg); `parent` = the mp4, `region`/`source_box` copied, `est_usd` 0 |
+| `<stem>.thumb.jpg` | same | 320 px wide, middle frame; no sidecar (`provenance.THUMB_SUFFIX`) — the app has no MCP client, so it never makes one |
+
+`texture_flow` and `kling_*` run it on their main output after download
+(`hap=True`; `attach_clip` adds `clip`/`thumb` to the result and the parent
+link); `to_hap` does it for any other video (a source outside `generated/`
+gets a fresh stem there). The ffmpeg side is `wzrd/clips.py`: sides padded
+(centred, black) to multiples of 4 — BC works in 4×4 blocks and the encoder
+refuses otherwise — fps and frame count kept, audio dropped; codec is a
+parameter (no platform encoder). `extract_frames` pulls stills (`"first"`,
+`"last"` — exact, from the final second — or seconds, or `count` evenly
+spaced) into `generated/`. HAP is 5–10× an H.264's size: move mp4s, make
+HAP where it plays.
+
 ## File map
 
 | File | Role |
@@ -204,7 +227,7 @@ container seconds × $1.95/h L40S). Prices: [hosted-models.md](hosted-models.md)
 | `server.py` | FastMCP instance + instructions, `tool()` stack, config gate, module imports |
 | `skill_catalog.py` / `skill_tools.py` | skills scan + index / `load_skill`, resources provider, prompts |
 | `tools.py` | wzrd wrappers: subtraction, surface prep, regions, `texture_flow`/`textureflow_warm`, `build_layerpack`, `simulate_view` |
-| `media_tools.py` | `view_media` (downscaled images; one contact sheet per video), `concat_videos` (→ `wzrd/concat.py`), `check_frames` (→ `wzrd/check_frames.py`: numeric clip QC — flash rate, loop seam, haze, lit share, still-vs-surface shift; thresholds and their reasons in the module docstring) |
+| `media_tools.py` | `view_media` (downscaled images; one contact sheet per video), `concat_videos` (→ `wzrd/concat.py`), `to_hap` / `extract_frames` + the C3 clip helpers (→ `wzrd/clips.py`), `check_frames` (→ `wzrd/check_frames.py`: numeric clip QC — flash rate, loop seam, haze, lit share, still-vs-surface shift; thresholds and their reasons in the module docstring) |
 | `google_tools.py`, `fal_tools.py` | hosted models — [hosted-models.md](hosted-models.md) |
 | `engine_tools.py` | engine authoring slice — [render-engine.md](render-engine.md) §2.7 |
 | `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, `set_project`, `import_photos` |

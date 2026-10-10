@@ -31,6 +31,7 @@ from fastmcp.exceptions import ToolError
 from . import project
 
 SIDECAR_SUFFIX = ".meta.json"
+THUMB_SUFFIX = ".thumb.jpg"  # a clip's preview (C3) — derived, no sidecar of its own
 SIDECAR_SCHEMA = 1
 WARN_AT = 0.8
 _MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm"}
@@ -75,7 +76,7 @@ def _outputs(result: dict, since: float, inputs: list[str]) -> list[str]:
     root = project.project_dir().resolve()
     found: list[str] = []
     for s in _strings(result):
-        if not s.startswith("/") or s.endswith(SIDECAR_SUFFIX):
+        if not s.startswith("/") or s.endswith((SIDECAR_SUFFIX, THUMB_SUFFIX)):
             continue
         p = Path(s)
         if p.suffix.lower() not in _MEDIA_EXTS or not p.is_file():
@@ -99,14 +100,15 @@ def write_sidecars(tool: str, client_args: dict, result: dict, since: float,
     local_inputs = [i for i in inputs if i.startswith("/")]
     created = datetime.now(timezone.utc).isoformat(timespec="seconds")
     written = []
-    parents = prov.get("parent", local_inputs[0] if local_inputs else None)
+    default_parent = local_inputs[0] if local_inputs else None
+    parents = prov.get("parent", default_parent)
     for out in outputs:
         meta = {
             "schema": SIDECAR_SCHEMA,
             "tool": tool,
             "args": {k: v for k, v in {**client_args, **(prov.get("args") or {})}.items() if v is not None},
             "inputs": inputs,
-            "parent": parents.get(out) if isinstance(parents, dict) else parents,
+            "parent": parents.get(out, default_parent) if isinstance(parents, dict) else parents,
             "created": created,
             "est_usd": round(float(est.get(out, 0.0)), 4),
             "region": prov.get("region"),

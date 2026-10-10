@@ -27,6 +27,7 @@ from fastmcp.exceptions import ToolError
 from . import project, provenance
 from ._keepalive import with_keepalive
 from .file_io import resolve_input_async
+from .media_tools import attach_clip
 from ._log import log_progress
 from .server import tool
 
@@ -258,6 +259,7 @@ async def kling_v25_image_to_video(
     cfg_scale: float = 0.5,
     region: Optional[str] = None,
     allow_over_cap: bool = False,
+    hap: bool = True,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Animate a start frame (optionally into an end frame) as a 5 or 10 s video with Kling v2.5 Turbo Pro via FAL.
@@ -274,6 +276,7 @@ async def kling_v25_image_to_video(
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
         region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
+        hap: Also write the engine-playable HAP clip + thumbnail (`clip`, `thumb` in the result) — default true.
     """
     region_info = provenance.region_meta(region) if region else {}
     usd = _KLING_V25_5S + _KLING_V25_PER_EXTRA_S * max(0, int(duration) - 5)
@@ -295,7 +298,7 @@ async def kling_v25_image_to_video(
         "kling_v25_image_to_video", endpoint, fal_args, output_type="video",
         response_info={"duration": duration}, ctx=ctx,
     )
-    return _with_cost(result, usd, endpoint, region_info)
+    return await attach_clip(_with_cost(result, usd, endpoint, region_info), "output_video", hap)
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +316,7 @@ async def kling_v3_image_to_video(
     aspect_ratio: Optional[str] = None,
     region: Optional[str] = None,
     allow_over_cap: bool = False,
+    hap: bool = True,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Generate a 3-15 second video from a starting image using Kling v3.0 Standard via FAL.
@@ -331,6 +335,7 @@ async def kling_v3_image_to_video(
         aspect_ratio: "16:9", "9:16" or "1:1". Default: the one nearest the start image's aspect.
         region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
+        hap: Also write the engine-playable HAP clip + thumbnail (`clip`, `thumb` in the result) — default true.
     """
     region_info = provenance.region_meta(region) if region else {}
     usd = int(duration) * (_KLING_V3_PER_S_AUDIO if generate_audio else _KLING_V3_PER_S)
@@ -355,4 +360,4 @@ async def kling_v3_image_to_video(
         "kling_v3_image_to_video", endpoint, fal_args, output_type="video",
         response_info={"duration": duration, "aspect_ratio": aspect_ratio}, ctx=ctx,
     )
-    return _with_cost(result, usd, endpoint, region_info)
+    return await attach_clip(_with_cost(result, usd, endpoint, region_info), "output_video", hap)

@@ -24,6 +24,7 @@ from pydantic import Field
 from . import project, provenance
 from ._log import log_progress
 from .file_io import resolve_input_async
+from .media_tools import attach_clip
 from .server import tool
 
 
@@ -456,7 +457,7 @@ async def reproject_video(
 # all validation. Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
-_TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap")  # never sent to the server
+_TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap", "hap")  # never sent to the server
 _TF_USD_PER_S = 1.95 / 3600  # Modal L40S list price
 _TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~6 min warm)
 _TF_EST_QUICK_USD = 0.03  # pre-call guess, no upscale passes
@@ -522,6 +523,7 @@ async def texture_flow(
     output_codec: Optional[str] = None,
     region: Optional[str] = None,
     allow_over_cap: bool = False,
+    hap: bool = True,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Render an abstract, morphing, seamlessly flowing animation from 1-6 style images (TextureFlow: SD1.5 + AnimateDiff + IP-Adapter + ControlNet, on WZRD's own Modal GPU).
@@ -559,6 +561,7 @@ async def texture_flow(
         output_codec: "h264" (default) or "hevc10" (smaller, higher fidelity, not decodable everywhere).
         region: Optional pack layer id this render is for (e.g. "fabric_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
+        hap: Also write the engine-playable HAP clip + thumbnail (`clip`, `thumb` in the result) — default true.
     """
     # First statement on purpose: locals() is exactly the tool's parameters here.
     args = {k: v for k, v in locals().items() if k not in _TF_LOCAL_ARGS and v is not None}
@@ -593,7 +596,7 @@ async def texture_flow(
         "args": {"seed": res["params"].get("seed"), "model": f"{app_name} (TextureFlow)"},
         **region_info,
     }
-    return response
+    return await attach_clip(response, "output_video", hap)
 
 
 @tool(title="Keep TextureFlow GPU warm", tags={"generate", "textureflow"}, idempotent=True, open_world=True)

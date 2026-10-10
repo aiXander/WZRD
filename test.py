@@ -213,6 +213,28 @@ def test_check_frames():
         assert flash["status"] == want, (hz, flash)
 
 
+def test_clips():
+    """mp4 → HAP .mov the engine accepts (Hap1, sides padded to multiples of 4) + thumb + stills."""
+    import subprocess
+    import numpy as np
+    from wzrd.clips import extract_frame, thumbnail, to_hap
+    from wzrd.utils import VideoWriter
+    out_dir = _result_dir("clips")
+    src = os.path.join(out_dir, "clip.mp4")
+    with VideoWriter(src, 202, 114, 24) as w:  # 202x114: not multiples of 4
+        for i in range(24):
+            w.write(np.full((114, 202, 3), i * 10, np.uint8))
+    info = to_hap(src)
+    assert info["size"] == [204, 116] and info["padded"], info
+    tag = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "stream=codec_tag_string", "-of", "csv=p=0", info["path"]],
+                         capture_output=True, text=True).stdout.strip()
+    assert tag == "Hap1", tag
+    assert os.path.isfile(thumbnail(src, os.path.join(out_dir, "clip.thumb.jpg")))
+    for at in ("first", "last", 0.5):
+        assert os.path.isfile(extract_frame(src, at, os.path.join(out_dir, f"f_{at}.png")))
+
+
 def test_mcp():
     """The MCP server boots, serves skills three ways, and ships text-only results."""
     import asyncio
@@ -253,6 +275,7 @@ TESTS = {
     "reproject": test_reproject,
     "concat": test_concat,
     "check_frames": test_check_frames,
+    "clips": test_clips,
     "mcp": test_mcp,
 }
 

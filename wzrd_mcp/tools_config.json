@@ -30,5 +30,7 @@
   "validate_wgsl": {"enabled": true, "timeout": 30},
   "get_preview": {"enabled": true, "timeout": 30},
   "check_frames": {"enabled": true, "timeout": 120},
-  "import_photos": {"enabled": true, "timeout": 120}
+  "import_photos": {"enabled": true, "timeout": 120},
+  "to_hap": {"enabled": true, "timeout": 300},
+  "extract_frames": {"enabled": true, "timeout": 120}
 }

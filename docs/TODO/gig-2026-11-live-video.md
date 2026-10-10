@@ -79,13 +79,10 @@ every media file a tool writes (`tool`, `args`, `inputs`, `parent`,
 in [mcp-server.md](../reference/mcp-server.md) "Provenance sidecars and the
 spend cap".
 
-**C3 — clip files** (owner P5): a playable clip is a HAP `.mov` under the
-project's `generated/`, stem shared with its source: `<stem>.mp4` (source),
-`<stem>.mov` (HAP), `<stem>.mov.meta.json` (its own sidecar, `parent` = the
-mp4, `region`/`source_box` copied, `est_usd` 0), `<stem>.thumb.jpg` (320 px
-wide, middle frame). **The MCP writes the thumbnail at transcode time** — the
-app has no MCP client before the toolbox, so it never generates one; a clip
-without a thumb shows a placeholder.
+**C3 — clip files** — landed with P5: `generated/<stem>.mp4` → `<stem>.mov`
+(HAP) + `<stem>.mov.meta.json` (`parent` = the mp4) + `<stem>.thumb.jpg`
+(written by the MCP). Contract now in [mcp-server.md](../reference/mcp-server.md)
+"Playable clips".
 
 **C4 — `source_box` in `pack.json`** — landed with P4: optional per-layer
 `[x0, y0, x1, y1]`, pack pixels, max-exclusive like `bbox`, may extend past
@@ -168,16 +165,16 @@ all four boxes equal `islands.json`; the HEAD engine boots it (`4 layers @
 1376x768`, 0 passes). Done — see [mcp-server.md](../reference/mcp-server.md)
 "The project folder and its locked canvas".
 
-### P5 — Clip pipeline: `to_hap`, thumbnails, `extract_frames`
+### P5 — Clip pipeline: `to_hap`, thumbnails, `extract_frames` — done 2026-10-10
 
-PY · needs P3 (sidecar inheritance) · `wzrd_mcp/media_tools.py`,
-`texture_flow` / `kling_*` download path. `to_hap(video, codec="hap"|"hap_q")`
-via local ffmpeg → C3 files; pad dimensions to multiples of 4 (BC works in
-4×4 blocks; ffmpeg's `hap` encoder refuses otherwise), keep fps. TextureFlow
-and Kling run it automatically after download (`hap=True` default).
-`extract_frames(video, at=[…|"first"|"last"], count=None)` → stills.
-**Gate:** one TextureFlow render arrives as mp4 + HAP `.mov` + both
-sidecars + thumb; the `.mov` loops in `ffplay` without a seam jump.
+`texture_flow` / `kling_*` write the C3 clip set after download
+(`hap=True`); `to_hap` and `extract_frames` tools; ffmpeg side in
+`wzrd/clips.py`. Gate: a `texture_flow(region="region_1")` render arrived as
+mp4 + `Hap1` `.mov` (90/90 frames, 24 fps) + both sidecars (region + box on
+the `.mov`) + thumb; `check_frames` scores its loop seam 1.61× a frame step
+(pass) and the HEAD engine opened it (`384×672 Bc1, 90 frames`). Not done:
+an eyes-on loop in `ffplay`. Done — see [mcp-server.md](../reference/mcp-server.md)
+"Playable clips".
 
 ### P6 — `check_frames` — done 2026-10-10
 
@@ -245,7 +242,7 @@ click + T. See [../reference/operator-ui.md](../reference/operator-ui.md)
 < 2 min, hands on design only. HAP decode (E1b) landed after the grid
 (`d03e78e`); run the gate once **E1c** (region placement from
 `source_box`; in progress on 2026-10-10) and **P5** (`to_hap` +
-thumbnails written by the MCP) land: one `texture_flow(region=…)` render
+thumbnails written by the MCP — landed 2026-10-10) land: one `texture_flow(region=…)` render
 from an external Claude session, then click + T. Fixtures:
 `uv run python wzrd-app/scripts/fixture_projects.py`.
 
