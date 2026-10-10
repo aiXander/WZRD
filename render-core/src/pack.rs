@@ -47,6 +47,12 @@ pub struct LayerEntry {
     pub tags: Vec<String>,
     #[serde(default)]
     pub bbox: Option<[i32; 4]>,
+    /// Gig plan C4: the padded box `extract_color_regions` grows around the
+    /// region to a generation-native aspect — where a clip bound with
+    /// `placement: "region"` is stretched into. Same convention as `bbox`
+    /// (mask pixel space, max-exclusive); may reach past the canvas edge.
+    #[serde(default)]
+    pub source_box: Option<[i32; 4]>,
     #[serde(default)]
     pub centroid: Option<[f32; 2]>,
     #[serde(default)]
@@ -108,6 +114,16 @@ pub struct LayerGeom {
     /// (min_x, min_y, max_x, max_y), uv space, max-exclusive like the
     /// manifest's pixel bbox.
     pub bbox_uv: [f32; 4],
+    /// C4 `source_box` in uv, when the manifest carries a valid one.
+    pub source_box_uv: Option<[f32; 4]>,
+}
+
+impl LayerGeom {
+    /// Where a `placement: "region"` image lands: the padded source box,
+    /// else the tight bbox.
+    pub fn region_box_uv(&self) -> [f32; 4] {
+        self.source_box_uv.unwrap_or(self.bbox_uv)
+    }
 }
 
 /// In-memory layer pack ready for upload to the GPU.
@@ -229,18 +245,28 @@ impl LoadedPack {
             let offset = idx * slice_pixels;
             atlas[offset..offset + slice_pixels].copy_from_slice(img.as_raw());
 
-            geoms.push(match (layer.bbox, layer.centroid) {
+            let mut geom = match (layer.bbox, layer.centroid) {
                 (Some(b), Some(c)) => LayerGeom {
                     centroid_uv: [c[0] / pw as f32, c[1] / ph as f32],
-                    bbox_uv: [
-                        b[0] as f32 / pw as f32,
-                        b[1] as f32 / ph as f32,
-                        b[2] as f32 / pw as f32,
-                        b[3] as f32 / ph as f32,
-                    ],
+                    bbox_uv: box_uv(b, pw, ph),
+                    source_box_uv: None,
                 },
                 _ => geom_from_mask(&atlas[offset..offset + slice_pixels], pw, ph),
-            });
+            };
+            geom.source_box_uv = match layer.source_box {
+                Some(b) if b[2] > b[0] && b[3] > b[1] => Some(box_uv(b, pw, ph)),
+                // Lenient: a malformed box is an authoring bug, but not one
+                // worth refusing a show over — region clips fall back to bbox.
+                Some(b) => {
+                    log::warn!(
+                        "layer {:?}: source_box {b:?} is empty or inverted — region clips use its bbox",
+                        layer.id
+                    );
+                    None
+                }
+                None => None,
+            };
+            geoms.push(geom);
 
             id_to_slice.insert(layer.id.clone(), idx as u32);
             for tag in &layer.tags {
@@ -457,6 +483,16 @@ fn load_identity(path: &Path) -> Result<IdentityFile> {
     Ok(file)
 }
 
+/// Pixel-space `[x0, y0, x1, y1]` → uv.
+fn box_uv(b: [i32; 4], pw: u32, ph: u32) -> [f32; 4] {
+    [
+        b[0] as f32 / pw as f32,
+        b[1] as f32 / ph as f32,
+        b[2] as f32 / pw as f32,
+        b[3] as f32 / ph as f32,
+    ]
+}
+
 /// Mirror of `wzrd.layerpack._bbox_and_centroid`: bbox on the thresholded
 /// binary mask (>=128), centroid weighted by pixel value (stabler for soft
 /// masks). Empty mask falls back to full-frame bbox + center, like Python.
@@ -485,6 +521,7 @@ fn geom_from_mask(mask: &[u8], width: u32, height: u32) -> LayerGeom {
         return LayerGeom {
             centroid_uv: [0.5, 0.5],
             bbox_uv: [0.0, 0.0, 1.0, 1.0],
+            source_box_uv: None,
         };
     }
     LayerGeom {
@@ -498,12 +535,44 @@ fn geom_from_mask(mask: &[u8], width: u32, height: u32) -> LayerGeom {
             x1 as f32 / width as f32,
             y1 as f32 / height as f32,
         ],
+        source_box_uv: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C4: a valid `source_box` becomes the region placement rect; an
+    /// inverted one is dropped (warned) and region clips fall back to bbox.
+    #[test]
+    fn source_box_loads_as_region_box_with_bbox_fallback() {
+        let dir = std::env::temp_dir().join(format!("wzrd-pack-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("masks")).unwrap();
+        for name in ["a", "b", "c"] {
+            image::GrayImage::from_pixel(8, 4, image::Luma([255]))
+                .save(dir.join(format!("masks/{name}.png")))
+                .unwrap();
+        }
+        let manifest = serde_json::json!({
+            "version": 1,
+            "projector_resolution": [8, 4],
+            "layers": [
+                { "id": "a", "mask": "masks/a.png", "bbox": [2, 1, 4, 3], "centroid": [3, 2],
+                  "source_box": [0, 0, 6, 4] },
+                { "id": "b", "mask": "masks/b.png", "bbox": [2, 1, 4, 3], "centroid": [3, 2],
+                  "source_box": [6, 0, 2, 4] },
+                { "id": "c", "mask": "masks/c.png", "bbox": [2, 1, 4, 3], "centroid": [3, 2] }
+            ]
+        });
+        std::fs::write(dir.join("pack.json"), manifest.to_string()).unwrap();
+        let pack = LoadedPack::load(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(pack.geoms[0].region_box_uv(), [0.0, 0.0, 0.75, 1.0]);
+        assert_eq!(pack.geoms[1].source_box_uv, None);
+        assert_eq!(pack.geoms[1].region_box_uv(), [0.25, 0.25, 0.5, 0.75]);
+        assert_eq!(pack.geoms[2].region_box_uv(), [0.25, 0.25, 0.5, 0.75]);
+    }
 
     #[test]
     fn geom_from_mask_finds_bbox_and_centroid() {
@@ -537,6 +606,7 @@ mod tests {
                     label: Some("packlabel-a".into()),
                     tags: vec![],
                     bbox: None,
+                    source_box: None,
                     centroid: None,
                     area_px: None,
                     parent: None,
@@ -548,6 +618,7 @@ mod tests {
                     label: None,
                     tags: vec![],
                     bbox: None,
+                    source_box: None,
                     centroid: None,
                     area_px: None,
                     parent: None,

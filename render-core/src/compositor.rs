@@ -171,12 +171,13 @@ impl PassPlan {
                 match ImageSource::open(gpu, &path) {
                     Ok(source) => {
                         let encoding = source.encoding();
+                        let size = source.size();
                         images.push(BindingImage {
                             binding_id: binding.id.clone(),
                             source,
                             rate: param.rate,
                         });
-                        Some((images.len() - 1, param.placement, encoding))
+                        Some((images.len() - 1, param.placement, encoding, size))
                     }
                     Err(e) => {
                         warnings.push(format!(
@@ -226,8 +227,9 @@ impl PassPlan {
                     centroid_uv: geom.centroid_uv,
                     bbox_uv: geom.bbox_uv,
                 };
-                let pass_image = image.map(|(i, placement, encoding)| {
-                    (i, image_box(placement, &identity), encoding)
+                let canvas = (gpu.composite_width, gpu.composite_height);
+                let pass_image = image.map(|(i, placement, encoding, size)| {
+                    (i, image_box(placement, &geom, size, canvas), encoding)
                 });
                 let mut initial = LayerParamsGpu::build(
                     slice,
@@ -254,7 +256,7 @@ impl PassPlan {
                     &format!("layer bg [{} slice {}]", binding.id, slice),
                     &frame_state,
                     &layer_buffer,
-                    image.map(|(i, _, _)| images[i].source.view()),
+                    image.map(|(i, ..)| images[i].source.view()),
                 );
 
                 passes.push(LayerPass {
@@ -564,13 +566,40 @@ pub(crate) fn layer_opacity(overrides: &ParamOverrides, binding: &str, any_solo:
         .unwrap_or(1.0)
 }
 
-/// C5 placement rect (uv) for one pass: the whole canvas, or the layer's
-/// own box so one clip fits whichever region it is bound to.
-fn image_box(placement: ImagePlacement, identity: &LayerIdentity) -> [f32; 4] {
-    match placement {
+/// C5 placement rect (uv) for one pass. The target box is the whole canvas,
+/// or the layer's own padded `source_box` (C4; `bbox` when the pack has
+/// none) so one clip fits whichever region it is bound to. The image is
+/// then fit into the box uniformly and centred — "contain", never stretched
+/// (the D8 rule: a clip rendered at a model's native aspect is close to, not
+/// exactly, its box; contain is the exact inverse of the model's
+/// cover-crop). Outside the fitted rect `sample_image` is transparent.
+fn image_box(
+    placement: ImagePlacement,
+    geom: &crate::pack::LayerGeom,
+    image_px: (u32, u32),
+    canvas_px: (u32, u32),
+) -> [f32; 4] {
+    let target = match placement {
         ImagePlacement::Canvas => [0.0, 0.0, 1.0, 1.0],
-        ImagePlacement::Region => identity.bbox_uv,
+        ImagePlacement::Region => geom.region_box_uv(),
+    };
+    contain_uv(target, image_px, canvas_px)
+}
+
+/// Fit an `image_px`-sized image uniformly into `target` (uv on a
+/// `canvas_px` canvas), centred. Aspects compare in pixels, not uv.
+fn contain_uv(target: [f32; 4], image_px: (u32, u32), canvas_px: (u32, u32)) -> [f32; 4] {
+    let [x0, y0, x1, y1] = target;
+    let box_w = (x1 - x0) * canvas_px.0 as f32;
+    let box_h = (y1 - y0) * canvas_px.1 as f32;
+    let (iw, ih) = (image_px.0.max(1) as f32, image_px.1.max(1) as f32);
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return target;
     }
+    let scale = (box_w / iw).min(box_h / ih);
+    let (fw, fh) = (iw * scale / canvas_px.0 as f32, ih * scale / canvas_px.1 as f32);
+    let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    [cx - fw * 0.5, cy - fh * 0.5, cx + fw * 0.5, cy + fh * 0.5]
 }
 
 /// Shared by plan build and the §5.6 probe pre-analysis (which needs to know
@@ -661,6 +690,32 @@ fn pick_choice(binding_seed: u32, cycle: u64, member_count: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contain_fits_by_pixel_aspect_and_centres() {
+        let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        // 16:9 clip on a 16:9 canvas fills it exactly.
+        assert!(close(contain_uv([0.0, 0.0, 1.0, 1.0], (1920, 1080), (1920, 1080)), [0.0, 0.0, 1.0, 1.0]));
+        // Square clip on a 2:1 canvas → pillarboxed, centred.
+        assert!(close(contain_uv([0.0, 0.0, 1.0, 1.0], (100, 100), (200, 100)), [0.25, 0.0, 0.75, 1.0]));
+        // 9:16 clip into a 200×400 px box (on a 400×400 canvas): the box
+        // (1:2) is narrower than the clip (0.5625) → full width, height
+        // 200 / 0.5625 = 355.6 px, centred.
+        let h = 200.0 / 0.5625 / 400.0;
+        let b = contain_uv([0.25, 0.0, 0.75, 1.0], (9, 16), (400, 400));
+        assert!(close(b, [0.25, 0.5 - h / 2.0, 0.75, 0.5 + h / 2.0]), "{b:?}");
+        // A 100×400 box (1:4) is narrower still → full width, centred.
+        let b = contain_uv([0.0, 0.0, 0.25, 1.0], (9, 16), (400, 400));
+        let h = 100.0 / 0.5625 / 400.0;
+        assert!(close(b, [0.0, 0.5 - h / 2.0, 0.25, 0.5 + h / 2.0]), "{b:?}");
+        // 9:16 clip into a wide 400×200 box → full height, width 112.5 px.
+        let b = contain_uv([0.0, 0.25, 1.0, 0.75], (9, 16), (400, 400));
+        let w = 200.0 * 0.5625 / 400.0;
+        assert!(close(b, [0.5 - w / 2.0, 0.25, 0.5 + w / 2.0, 0.75]), "{b:?}");
+        // Wide clip into a tall box → letterboxed vertically.
+        let b = contain_uv([0.0, 0.0, 0.5, 1.0], (16, 9), (400, 400));
+        assert!(close(b, [0.0, 0.5 - 56.25 / 400.0, 0.5, 0.5 + 56.25 / 400.0]), "{b:?}");
+    }
 
     #[test]
     fn layer_opacity_folds_mute_and_solo() {

@@ -42,6 +42,8 @@ pub struct ImageSource {
     kind: SourceKind,
     view: wgpu::TextureView,
     encoding: ImageEncoding,
+    /// Pixel size — C5 places the image by its aspect ("contain").
+    size: (u32, u32),
 }
 
 enum SourceKind {
@@ -76,6 +78,10 @@ impl ImageSource {
 
     pub fn encoding(&self) -> ImageEncoding {
         self.encoding
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size
     }
 
     /// Whether the texture holds real content yet. A clip's texture starts
@@ -145,6 +151,7 @@ fn open_still(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
         kind: SourceKind::Still { _texture: texture },
         view,
         encoding: ImageEncoding::Rgba,
+        size: (w, h),
     })
 }
 
@@ -769,6 +776,7 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
         })),
         view,
         encoding: format.encoding(),
+        size: (w, h),
     })
 }
 

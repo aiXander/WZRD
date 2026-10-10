@@ -237,6 +237,10 @@ pub struct LayerInfo {
     pub label: Option<String>,
     pub tags: Vec<String>,
     pub bbox: Option<[i32; 4]>,
+    /// Gig plan C4 — the padded box region clips are placed in (absent →
+    /// clips use `bbox`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_box: Option<[i32; 4]>,
     pub centroid: Option<[f32; 2]>,
     pub z: i32,
 }
@@ -262,6 +266,7 @@ impl PackInfo {
                 label: pack.merged_label(i),
                 tags: l.tags.clone(),
                 bbox: l.bbox,
+                source_box: l.source_box,
                 centroid: l.centroid,
                 z: l.z,
             })

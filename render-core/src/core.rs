@@ -1061,6 +1061,7 @@ impl Core {
                 .unwrap_or(crate::pack::LayerGeom {
                     centroid_uv: [0.5, 0.5],
                     bbox_uv: [0.0, 0.0, 1.0, 1.0],
+                    source_box_uv: None,
                 });
             let identity = LayerIdentity {
                 layer_seed: 0.5,
