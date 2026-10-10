@@ -47,6 +47,24 @@ kasbah case (share of wall pixels changed: FAL 0.12, Google 0.12–0.16).
   `usage_metadata` at list price ($1.50/M input, $7.50/M text+thought, $30/M
   image out) — Vertex is priced the same here, unverified.
 
+**Output size (measured 2026-10-10)** — the geometry every WZRD surface
+pipeline depends on:
+- An **explicit `aspect_ratio`** returns that aspect's native size: 1K =
+  1:1 1024×1024 · 2:3 848×1264 · 3:2 1264×848 · 3:4 896×1200 · 4:3 1200×896
+  · 4:5 928×1152 · 5:4 1152×928 · 9:16 768×1376 · **16:9 1376×768** · 21:9
+  1584×672; 2K/4K are exactly ×2/×4. A reference of another aspect is
+  **cover-cropped** to it — a 16:9 surface loses ≈3 px top and bottom
+  (1.792 vs 1.778). The table is `wzrd.utils.NANO_BANANA_SIZES`.
+- **`"auto"` follows image_1's own aspect**, not the nearest native one: a
+  600×1064 region crop came back 768×1362. That is why the tool defaults to
+  `"auto"` whenever refs are given (a canvas surface stays the canvas, a
+  region crop stays its box) and to the project canvas's aspect for
+  text-to-image.
+- Either way, a result that doesn't match its reference's size is mapped
+  back with `wzrd.utils.uncrop_to_size` (uniform scale + centred bands) —
+  **never stretched**: stretching 1376×768 onto 1920×1080 was a constant
+  0.78 % vertical drift (≈ 4 px at the frame edges) in every surface edit.
+
 **Traps (from the probe):**
 - **Vertex returns draft images** at `medium`: an extra image flagged
   `thought=True` before the final, sometimes of a different scene. Gemini
@@ -93,6 +111,10 @@ wired up. Search grounding (`enable_web_search`) works with image output.
   one go.
 
 ## Video: Kling on FAL
+
+`kling_v3_image_to_video` only knows 16:9 / 9:16 / 1:1; its `aspect_ratio`
+defaults to the one nearest the start frame (a tall region keyframe stays
+tall) instead of a fixed 16:9.
 
 `fal_tools.py` plumbing: `_fal_subscribe` (retry/backoff + keepalive),
 `_to_fal_url` (uploads local inputs to FAL's CDN just in time — FAL's workers

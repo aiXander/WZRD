@@ -169,6 +169,29 @@ async def _to_fal_urls(values: list[Optional[str]]) -> list[Optional[str]]:
     return list(await asyncio.gather(*(_to_fal_url(v) for v in values)))
 
 
+def _nearest_aspect(image: str, choices: tuple[str, ...]) -> str:
+    """The choice nearest a local image's aspect (log-ratio); first choice for URLs.
+
+    A video model forced to a far-off aspect crops or squashes its start frame;
+    the nearest one keeps a tall region's keyframe tall.
+    """
+    import math
+
+    from PIL import Image
+
+    path = os.path.expanduser(image)
+    if not os.path.isfile(path):
+        return choices[0]
+    with Image.open(path) as im:
+        w, h = im.size
+
+    def ratio(c: str) -> float:
+        a, b = c.split(":")
+        return float(a) / float(b)
+
+    return min(choices, key=lambda c: abs(math.log((w / h) / ratio(c))))
+
+
 # ---------------------------------------------------------------------------
 # Common FAL tool pipeline
 # ---------------------------------------------------------------------------
@@ -267,7 +290,7 @@ async def kling_v3_image_to_video(
     end_image_url: Optional[str] = None,
     negative_prompt: str = "blur, distort, and low quality",
     cfg_scale: float = 0.5,
-    aspect_ratio: str = "16:9",
+    aspect_ratio: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Generate a 3-15 second video from a starting image using Kling v3.0 Standard via FAL.
@@ -283,8 +306,9 @@ async def kling_v3_image_to_video(
         end_image_url: Optional URL or local path of an image for the last frame (start→end transition).
         negative_prompt: Things to avoid in the generation.
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
-        aspect_ratio: Output aspect ratio. Choices: "16:9", "9:16", "1:1".
+        aspect_ratio: "16:9", "9:16" or "1:1". Default: the one nearest the start image's aspect.
     """
+    aspect_ratio = aspect_ratio or _nearest_aspect(start_image_url, ("16:9", "9:16", "1:1"))
     start_image_url, end_image_url = await _to_fal_urls([start_image_url, end_image_url])
 
     fal_args = {

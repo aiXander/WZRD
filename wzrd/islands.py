@@ -10,22 +10,24 @@ import numpy as np
 import json
 from pathlib import Path
 from typing import Union, Optional, List, Dict, Tuple, Literal
+
+from .utils import NANO_BANANA_SIZES, uncrop_array_to_size
+
 Connectivity = Literal[4, 8]
 
-# Supported aspect ratios for standardized output (e.g. nano_banana).
-# Each entry is (width, height).  Edit this list to add/remove ratios.
-STANDARD_ASPECT_RATIOS: List[Tuple[int, int]] = [
-    (1, 1),
-    (2, 3),
-    (3, 2),
-    (3, 4),
-    (4, 3),
-    (4, 5),
-    (5, 4),
-    (9, 16),
-    (16, 9),
-    (21, 9),
-]
+# Aspect ratios crops (and their source_box) are padded to: Nano Banana's
+# native sizes, as exact pixel ratios, so a keyframe rendered from a region's
+# surface crop comes back at (nearly) the box's own aspect. Each entry is
+# (width, height); `aspect_name` maps one back to "9:16" etc.
+STANDARD_ASPECT_RATIOS: List[Tuple[int, int]] = list(NANO_BANANA_SIZES.values())
+
+
+def aspect_name(aw: int, ah: int) -> str:
+    """The "W:H" name of a STANDARD_ASPECT_RATIOS entry."""
+    for name, size in NANO_BANANA_SIZES.items():
+        if size == (aw, ah):
+            return name
+    return f"{aw}:{ah}"
 
 
 def _closest_standard_aspect(w: int, h: int) -> Tuple[int, int]:
@@ -430,6 +432,7 @@ def extract_color_regions(
     background_threshold: float = 15.0,
     merge_same_color: bool = True,
     standardize_output_aspect: bool = True,
+    frame_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[List[Dict], Path]:
     """
     Extract color regions from a color-segmented image.
@@ -470,6 +473,9 @@ def extract_color_regions(
                           Masks are padded with black; surface crops are
                           extended from source pixels (reflection-padded at
                           image boundaries).  source_box is updated to match.
+        frame_size: (width, height) of the project canvas when no *surface*
+                    is given: the input is uncropped into it (same rule as
+                    for a surface of another size).
 
     Returns:
         Tuple of (list of region info dicts, output directory path)
@@ -497,13 +503,21 @@ def extract_color_regions(
         else:
             surface_img = surface.copy()
 
-        # Check if surface resolution matches input; resize input to match surface
+        # Bring the segmentation map into the surface's frame. The map is a
+        # model's re-render of the surface at its native size, so its crop is
+        # undone exactly (uniform scale + black bands), never stretched (D8).
         surface_h, surface_w = surface_img.shape[:2]
         input_h, input_w = original_shape
         if (surface_w, surface_h) != (input_w, input_h):
-            print(f"Resizing input image from {input_w}x{input_h} to {surface_w}x{surface_h} (matching surface)")
-            img = cv2.resize(img, (surface_w, surface_h), interpolation=cv2.INTER_LINEAR)
+            print(f"Uncropping input image from {input_w}x{input_h} to {surface_w}x{surface_h} (matching surface)")
+            img = uncrop_array_to_size(img, (surface_w, surface_h))
             original_shape = img.shape[:2]
+
+    elif frame_size is not None and (original_shape[1], original_shape[0]) != tuple(frame_size):
+        print(f"Uncropping input image from {original_shape[1]}x{original_shape[0]} "
+              f"to {frame_size[0]}x{frame_size[1]} (project canvas)")
+        img = uncrop_array_to_size(img, tuple(frame_size))
+        original_shape = img.shape[:2]
 
     total_pixels = original_shape[0] * original_shape[1]
     min_area_pixels = int(total_pixels * min_area_fraction)
@@ -636,7 +650,7 @@ def extract_color_regions(
                 cv2.imwrite(str(output_dir / crop_filename), crop, [cv2.IMWRITE_WEBP_QUALITY, 90])
                 region_info['crop_filename'] = crop_filename
                 if standardize_output_aspect and (std_w, std_h) != (out_w, out_h):
-                    region_info['standard_aspect'] = f"{aw}:{ah}"
+                    region_info['standard_aspect'] = aspect_name(aw, ah)
 
                 # Surface crop (same bbox / scale as the mask crop)
                 if surface_img is not None:

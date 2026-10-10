@@ -25,7 +25,7 @@ Example usage:
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 from PIL import Image
 
 from .detect import detect_projection_area
@@ -54,6 +54,7 @@ def prepare_surface(
     min_projection_fraction: float = 0.10,
     detect_aspect_ratio: Optional[str] = None,
     detect_resolution: Optional[int] = None,
+    detect_output_size: Optional[Tuple[int, int]] = None,
     # darken params
     max_brightness: float = MAX_BRIGHTNESS,
     detail_boost: float = DETAIL_BOOST,
@@ -76,6 +77,9 @@ def prepare_surface(
     Otherwise runs darken-only on the supplied image (treated as
     an already-cropped surface photo).
 
+    *detect_output_size* rectifies the detected quad straight to an exact
+    (width, height) — a locked project canvas.
+
     Returns:
         Dict with 'image' (PIL Image) and 'video' (str path or None).
     """
@@ -90,6 +94,7 @@ def prepare_surface(
             min_projection_fraction=min_projection_fraction,
             target_aspect_ratio=detect_aspect_ratio,
             output_resolution=detect_resolution,
+            output_size=detect_output_size,
         )
 
         day_bgr = cv2.imread(str(day_image_path))

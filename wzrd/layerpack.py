@@ -61,6 +61,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 
+from .utils import uncrop_array_to_size
+
 PathLike = Union[str, Path]
 
 LAYERPACK_VERSION = 1
@@ -129,13 +131,22 @@ def _normalise_mask(
     target_w: int,
     target_h: int,
     feather_px: int = 0,
+    surface_size: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
-    """Resize to projector resolution, optionally feather edges.
+    """Bring a mask to projector resolution, optionally feather edges.
+
+    A mask at another size than the surface came from a model's re-render
+    of it (a segmentation map at the model's native aspect), so it is first
+    uncropped into the surface's frame — uniform scale, black bands, never a
+    stretch (D8). Surface → projector resolution is then a plain resize, the
+    same canvas → raster scale the engine applies.
 
     Result is uint8 grayscale.  The masks are *soft-edged* by design — the
     renderer wants antialiased boundaries to avoid pixel-grid seams between
     adjacent semantic regions.
     """
+    if surface_size is not None and (mask.shape[1], mask.shape[0]) != surface_size:
+        mask = uncrop_array_to_size(mask, surface_size)
     if mask.shape[:2] != (target_h, target_w):
         mask = cv2.resize(
             mask, (target_w, target_h), interpolation=cv2.INTER_LINEAR
@@ -234,6 +245,7 @@ def build_layerpack(
     canny: Optional[PathLike] = None,
     feather_px: int = 1,
     include_background: bool = False,
+    mask_frame: Optional[Tuple[int, int]] = None,
 ) -> Dict[str, Any]:
     """Emit a layer pack from masks + surface + tags.
 
@@ -256,6 +268,9 @@ def build_layerpack(
             Set to 0 to keep hard edges.
         include_background: If true, generates ``000_background.png`` as the
             complement of the union of all input masks.
+        mask_frame: (width, height) masks of another size are uncropped
+            into before scaling to projector resolution. Defaults to the
+            surface's size; pass the project canvas when there is no surface.
 
     Returns:
         The serialised ``pack.json`` manifest content as a dict.
@@ -300,10 +315,12 @@ def build_layerpack(
 
     # Surface
     surface_rel: Optional[str] = None
+    surface_size: Optional[Tuple[int, int]] = None
     if surface is not None:
         surf_arr = cv2.imread(str(surface), cv2.IMREAD_COLOR)
         if surf_arr is None:
             raise FileNotFoundError(f"could not read surface {surface}")
+        surface_size = (surf_arr.shape[1], surf_arr.shape[0])
         if (surf_arr.shape[1], surf_arr.shape[0]) != (pw, ph):
             surf_arr = cv2.resize(surf_arr, (pw, ph), interpolation=cv2.INTER_AREA)
         surface_rel = "surface.png"
@@ -348,7 +365,7 @@ def build_layerpack(
             )
 
         raw = _load_grayscale(mask_path)
-        mask = _normalise_mask(raw, pw, ph, feather_px=feather_px)
+        mask = _normalise_mask(raw, pw, ph, feather_px=feather_px, surface_size=mask_frame or surface_size)
         bbox, centroid, area_px = _bbox_and_centroid(mask)
 
         meta = _resolve_layer_meta(mask_path, z_default=slice_index, tags_layers=tags_layers)

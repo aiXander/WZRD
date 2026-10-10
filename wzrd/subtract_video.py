@@ -18,7 +18,7 @@ from queue import Queue
 from threading import Thread
 
 from .utils import (
-    get_aspect_ratio, aspect_ratios_match,
+    get_aspect_ratio, aspect_ratios_match, conform_to_size,
     extract_creature,
     downscale_arr, upscale_arr,
     frac_to_px, VideoWriter,
@@ -289,11 +289,13 @@ def subtract_background_video(
     output_height = height - (height % 2)
     output_size = (output_width, output_height)
 
-    # Load background and resize to match video dimensions
+    # Bring the background into the video's frame. A generated video shows
+    # the model's own centre crop of the surface (its native aspect), so the
+    # surface is cropped to that aspect exactly — never stretched (D8).
     background = Image.open(background_path).convert('RGB')
     bg_orig_size = background.size
     if background.size != output_size:
-        background = background.resize(output_size, Image.Resampling.LANCZOS)
+        background = conform_to_size(background, output_size)
 
     bg_arr = np.array(background, dtype=np.float32)
 

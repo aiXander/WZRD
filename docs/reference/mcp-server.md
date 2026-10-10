@@ -91,6 +91,51 @@ register when `websockets` is installed (`.[engine]` extra), so a cloud image
 never carries them. The parked Modal image mounts `tools_config.json` and
 `skills/` explicitly — `add_local_python_source` ships `.py` files only.
 
+## The project folder and its locked canvas
+
+`project.py` keeps every output of a session in one folder under
+`projects/` that doubles as a render-core scene directory (`scene.json`,
+`effects/`, `packs/<pack>/`, plus `surfaces/`, `generated/`, `regions/`,
+`video/`, `captures/`). Tools reserve their destination first
+(`output_path`/`output_dir`) so libraries write straight into it.
+
+**`project.json`** (gig contract C1, written by the MCP, read by the app):
+`{ "schema": 1, "canvas": [w, h], "spend_cap_usd": 20 }`. Absent = a
+**legacy project**: tools size outputs from their own args as before.
+
+- **The canvas** is the one pixel frame every surface, segmentation map, mask
+  and pack in the project is authored in. `set_project(canvas=…)` sets it
+  once — an aspect name (→ its 1K size) or an exact Nano Banana native size
+  (`project.native_canvases()`; 2K/4K allowed). Same value again is a no-op;
+  a different one, or a canvas for a folder that already holds files, is an
+  error. Why Nano Banana's sizes: its surface edits then come back at
+  exactly the canvas, so nothing is ever cropped or rescaled ("no drift by
+  construction"). The engine scales canvas → projector raster and the
+  4-corner alignment absorbs the residual (1.792 vs 1.778 for 16:9).
+- **With a canvas**, the sizing args of `detect_projection_surface`,
+  `darken_surface`, `prepare_surface`, `reproject_video` and
+  `build_layerpack` are refused (`_canvas()` in `tools.py` names the
+  offending args); outputs are the canvas exactly. Detection rectifies the
+  whole lit quad to the canvas (`detect(output_size=…)`, corners untouched —
+  the quad *is* the projector raster). `extract_color_regions` /
+  `build_layerpack` refuse a `surface_image` that isn't canvas-sized.
+  `nano_banana` takes its default resolution tier and t2i aspect from it.
+- **The aspect rule (D8), everywhere:** an image a model made from a
+  reference is mapped back into the reference's frame by **undoing the
+  model's crop** — `wzrd.utils.uncrop_to_size` / `uncrop_array_to_size` /
+  `uncrop_box`: uniform scale to fit, centred, bands filled from the
+  reference or black. Used by `align_to_reference` (subtraction), islands
+  (seg map → surface/canvas), layerpack (masks → surface frame), reproject
+  (clip → its region box). Photos *into* a canvas are the other direction:
+  `conform_to_size` (cover-crop + resize). Plain resizes remain only where
+  the mapping really is a raster scale (surface/canvas → pack/projector
+  resolution). Measured on real keyframes: residual 4.1 px → 0.12–0.19 px.
+- **Region boxes** (`source_box` from `extract_color_regions`) are padded to
+  a Nano Banana native aspect (`islands.STANDARD_ASPECT_RATIOS` =
+  `NANO_BANANA_SIZES`), and the `region_surface_image` crop has the box's
+  aspect. A story or texture for one region (a tall pillar) is rendered from
+  that crop with `aspect_ratio="auto"` → it fits its box back within ~1 px.
+
 ## File map
 
 | File | Role |
@@ -101,7 +146,7 @@ never carries them. The parked Modal image mounts `tools_config.json` and
 | `media_tools.py` | `view_media` (downscaled images; one contact sheet per video) and `concat_videos` (→ `wzrd/concat.py`) |
 | `google_tools.py`, `fal_tools.py` | hosted models — [hosted-models.md](hosted-models.md) |
 | `engine_tools.py` | engine authoring slice — [render-engine.md](render-engine.md) §2.7 |
-| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir) + `set_project` |
+| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, `set_project` |
 | `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing; 15 s progress pings during remote calls |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |
 | `file_io.py`, `auth.py`, `modal_app.py`, `upload.py` | input resolution; parked cloud path |

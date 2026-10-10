@@ -9,12 +9,11 @@ This enables layer-based compositing in tools like Resolume using additive blend
 import json
 from pathlib import Path
 from typing import Union, Optional, Tuple, Callable, List, Dict
-import cv2
 import numpy as np
 from PIL import Image
 
 from .subtract_video import get_video_info, iter_video_frames
-from .utils import parse_aspect_ratio, compute_target_dimensions, ASPECT_RATIOS, VideoWriter
+from .utils import parse_aspect_ratio, compute_target_dimensions, ASPECT_RATIOS, VideoWriter, uncrop_array_to_size
 
 
 def load_island_metadata(json_path: Union[str, Path]) -> Dict:
@@ -127,12 +126,11 @@ def reproject_video(
             if progress_callback:
                 progress_callback(frame_num, frame_count or 0)
 
-            # Resize frame to match the original island source box
+            # Fit the frame into the island's source box. A model renders at
+            # its own native aspect (a cover crop of the region's surface
+            # crop), so the fit is uniform + centred, never a stretch (D8).
             if need_resize:
-                frame_arr = cv2.resize(
-                    frame_arr, (island_w, island_h),
-                    interpolation=cv2.INTER_LINEAR,
-                )
+                frame_arr = uncrop_array_to_size(frame_arr, (island_w, island_h))
 
             # Create canvas with island placed at correct position
             canvas = canvas_template.copy()

@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a + E1b landed. Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a + E1b landed, P1 done. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -68,11 +68,10 @@ A package that has to change one edits this section in the same commit and
 says so in its summary; on landing, the contract moves into the reference
 doc of its owner.
 
-**C1 — `project.json`** (project root, written by the MCP, owner P1):
-`{ "schema": 1, "canvas": [1376, 768], "spend_cap_usd": 20 }`. `canvas` is
-set once by `set_project(canvas=…)` and is immutable afterwards (a different
-value = error naming the current one). Absent file = legacy project: tools
-behave as today, minus the D8 stretch.
+**C1 — `project.json`** — landed with P1: `{ "schema": 1, "canvas": [w, h],
+"spend_cap_usd": 20 }`, absent = legacy project. Contract now in
+[mcp-server.md](../reference/mcp-server.md) "The project folder and its
+locked canvas".
 
 **C2 — provenance sidecar** `<output>.meta.json` next to every file a tool
 writes (owner P3): `{ "schema": 1, "tool", "args" (incl. prompt / refs /
@@ -118,6 +117,12 @@ engine falls back to `bbox`.
   changes, it changes here first.
 - Missing file, non-HAP file or no BC support → that binding draws nothing
   and reports a load error; every other binding keeps playing.
+- **A clip whose aspect differs from its box is fit uniformly, centred
+  ("contain"), never stretched** — the D8 rule (added with P1). Clips are
+  rendered at a model's native aspect from the region's crop, and video
+  models only offer a few (Kling: 16:9 / 9:16 / 1:1), so a tall pillar's
+  clip is close to, not exactly, its box; contain is the exact inverse of
+  the model's cover-crop. `reproject_video` does the same offline.
 
 **C6 — global library layout** (D16): `library/effects/<name>/{shader.wgsl,
 descriptor.json, preview.jpg}`, `library/recipes/<name>/{recipe.json,
@@ -145,16 +150,16 @@ serial).
 Each package: **lane · needs · files · build · gate**. "Needs" lists hard
 dependencies only; a contract (C1–C6) is never a reason to wait.
 
-### P1 — Locked canvas + aspect fix (D7, D8)
+### P1 — Locked canvas + aspect fix (D7, D8) — done 2026-10-10
 
-PY · needs nothing · `wzrd/utils.py`, `wzrd_mcp/project.py`,
-`wzrd_mcp/project_tools.py`, the image tools that size outputs.
-`set_project` gains a one-time `canvas` (C1). Remove the
-tolerance-stretch in `utils.py`; undo Nano Banana's crop exactly. Tools
-conform to / check against the canvas; `build_layerpack`'s
-`projector_resolution` defaults to the canvas. **Gate:** a fabric seg map's
-masks land within 1–2 px of the surface; re-running the drift measurement
-above shows < 0.5 px keyframe alignment.
+`set_project(canvas=…)` writes C1; surface/region/pack tools author at the
+canvas; every model-output → reference mapping undoes the model's crop
+(`wzrd.utils.uncrop_*`) instead of stretching; region boxes pad to Nano
+Banana native aspects; `nano_banana` defaults to `"auto"` with refs.
+Gate: kasbah keyframes 4.1 px → 0.12–0.19 px residual; a synthetic fabric
+seg map's masks land on ground truth (old stretch: 4 px at hems). Done — see
+[mcp-server.md](../reference/mcp-server.md) "The project folder and its
+locked canvas".
 
 ### P2 — `import_photos` + EXIF orientation
 
@@ -310,6 +315,12 @@ SKILL · needs everything above that it names · `wzrd_mcp/skills/`. A new
 library from recipes → show checklist: warm GPU, flash/haze checks); the
 `textureflow` skill points at recipes, `region=` and `check_frames`; the
 `live-engine` skill teaches C5 clip bindings and the `image` input.
+Also teach the **region story** flow (Xander, 2026-10-10): a story on one
+oddly shaped region (a tall pillar) = keyframes from that region's
+`region_surface_image` with `aspect_ratio="auto"`, interpolated with the
+video model at its nearest aspect, `region=` on every call, then placed in
+the region's `source_box` (engine, C5 contain-fit) or `reproject_video`.
+The plumbing lands with P1/P3; only the skill text is missing.
 **Gate:** a cold Claude session, given only the venue photos, follows the
 run sheet to a playable project without being told tool names.
 

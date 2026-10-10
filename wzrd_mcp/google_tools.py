@@ -184,8 +184,8 @@ async def nano_banana(
     prompt: str,
     image_urls: Optional[list[str]] = None,
     num_images: int = 1,
-    resolution: str = "1K",
-    aspect_ratio: str = "1:1",
+    resolution: Optional[str] = None,
+    aspect_ratio: Optional[str] = None,
     enable_web_search: bool = False,
     seed: int = -1,
     thinking_level: str = "medium",
@@ -209,13 +209,17 @@ async def nano_banana(
             is image_2, and so on. The prompt should explicitly mention these
             references to control how each image influences the output.
         num_images: Images per call (1-4). For variations, prefer parallel calls with num_images=1 and slightly different prompts.
-        resolution: Output resolution. Choices: "1K", "2K", "4K" (billed per output token: ~$0.034 / $0.050 / $0.113 per image).
-        aspect_ratio: Output aspect ratio. Choices: "auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "4:1", "1:4", "8:1", "1:8". With "auto" and references, the first reference's aspect is kept.
+        resolution: "1K", "2K" or "4K" (billed per output token: ~$0.034 / $0.050 / $0.113 per image). Default: the project canvas's tier, else "1K".
+        aspect_ratio: "auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "4:1", "1:4", "8:1", "1:8". Default: "auto" with references (image_1's aspect: a canvas surface stays the canvas, a region_surface_image stays its region's box), else the project canvas's aspect, else "1:1".
         enable_web_search: Use Google Search grounding for current events or real-world references.
         seed: Random seed (0-2147483647). It nudges the composition but does not reproduce an image exactly.
         thinking_level: How much the model reasons before drawing. "minimal" (~30% faster, fine for simple edits), "medium" (default), or "high".
     """
     image_urls = image_urls or []
+    canvas = project.canvas()
+    canvas_aspect, canvas_tier = project.canvas_aspect(canvas) if canvas else ("1:1", "1K")
+    aspect_ratio = aspect_ratio or ("auto" if image_urls else canvas_aspect)
+    resolution = resolution or canvas_tier
     if len(image_urls) > _MAX_REFS:
         raise ToolError(f"at most {_MAX_REFS} reference images (got {len(image_urls)}); best ≤10")
     if not 1 <= num_images <= 4:

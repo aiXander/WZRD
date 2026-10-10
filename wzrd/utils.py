@@ -24,11 +24,33 @@ ASPECT_RATIOS = {
     '9:21': 9 / 21,
 }
 
+# Nano Banana 2.1's native output size per aspect at "1K" ("2K"/"4K" are
+# exactly x2/x4). Every size measured from real outputs, 2026-10-10. It answers
+# a reference of another aspect by cover-cropping it to the nearest of these,
+# so a project canvas or region box at one of these ratios round-trips with
+# no crop at all (D7).
+NANO_BANANA_SIZES = {
+    '1:1': (1024, 1024),
+    '2:3': (848, 1264),
+    '3:2': (1264, 848),
+    '3:4': (896, 1200),
+    '4:3': (1200, 896),
+    '4:5': (928, 1152),
+    '5:4': (1152, 928),
+    '9:16': (768, 1376),
+    '16:9': (1376, 768),
+    '21:9': (1584, 672),
+}
+
 # Default base resolution (max dimension)
 DEFAULT_BASE_RESOLUTION = 1920
 
-# Tolerance for aspect ratio matching (percentage)
-ASPECT_RATIO_TOLERANCE = 0.02  # 2% tolerance
+# Aspect mismatch above which a generated image is reported as probably
+# re-framed by the model (a warning, never a reason to stretch). Below it the
+# mismatch is the model's own cover-crop to its native size — Nano Banana
+# returns 1376x768 (1.792) for a 16:9 surface — which `uncrop_to_size` undoes
+# exactly. Stretching instead was a constant 0.78 % vertical drift (D8).
+ASPECT_RATIO_TOLERANCE = 0.02
 
 
 
@@ -343,7 +365,10 @@ def center_crop_to_aspect(
     target_aspect: float
 ) -> Image.Image:
     """
-    Center crop an image to match target aspect ratio.
+    Center crop an image to exactly the target aspect ratio (a "cover" crop).
+
+    Only a crop of less than one pixel is skipped; any real mismatch is
+    cropped, never left for a later resize to stretch away.
 
     Args:
         image: PIL Image to crop
@@ -355,28 +380,113 @@ def center_crop_to_aspect(
     img_width, img_height = image.size
     current_aspect = img_width / img_height
 
-    if aspect_ratios_match(current_aspect, target_aspect):
-        return image  # Already correct aspect ratio
-
     if current_aspect > target_aspect:
         # Image is wider than target: crop width
-        new_width = int(img_height * target_aspect)
+        new_width = int(round(img_height * target_aspect))
         new_height = img_height
     else:
         # Image is taller than target: crop height
         new_width = img_width
-        new_height = int(img_width / target_aspect)
-    # Ensure even dimensions (required for video codecs)
-    new_width -= new_width % 2
-    new_height -= new_height % 2
+        new_height = int(round(img_width / target_aspect))
+
+    if (new_width, new_height) == (img_width, img_height):
+        return image  # Already the target aspect ratio
 
     # Calculate center crop coordinates
     left = (img_width - new_width) // 2
     top = (img_height - new_height) // 2
-    right = left + new_width
-    bottom = top + new_height
+    return image.crop((left, top, left + new_width, top + new_height))
 
-    return image.crop((left, top, right, bottom))
+
+def uncrop_to_size(
+    image: Image.Image,
+    size: Tuple[int, int],
+    fill: Optional[Image.Image] = None,
+) -> Tuple[Image.Image, dict]:
+    """
+    Undo a generator's cover-crop: place *image* back into a *size* frame.
+
+    Image models answer a reference with an image at their own native size,
+    cropped from the reference's centre ("cover"). The exact inverse is a
+    uniform scale until the image fits inside *size* ("contain"), centred;
+    the thin bands the model cropped away come back from *fill* (the
+    reference itself, when the caller has it) or black. A uniform scale
+    never distorts, so content lands where it was on the reference.
+
+    Args:
+        image: The generated (or otherwise model-cropped) image.
+        size: Target (width, height) — the reference frame.
+        fill: Optional image of *size* whose pixels fill the bands.
+
+    Returns:
+        Tuple of (image at *size*, info) — info has 'scale' and 'offset'
+        (x, y of the pasted image, i.e. the band widths).
+    """
+    tw, th = size
+    iw, ih = image.size
+    scale = min(tw / iw, th / ih)
+    nw, nh = min(tw, round(iw * scale)), min(th, round(ih * scale))
+    resized = image if (nw, nh) == (iw, ih) else image.resize((nw, nh), Image.Resampling.LANCZOS)
+    offset = ((tw - nw) // 2, (th - nh) // 2)
+    info = {'scale': scale, 'offset': offset}
+    if (nw, nh) == (tw, th):
+        return resized, info
+    if fill is not None and fill.size == (tw, th):
+        canvas = fill.convert(resized.mode).copy()
+    else:
+        canvas = Image.new(resized.mode, (tw, th))
+    canvas.paste(resized, offset)
+    return canvas, info
+
+
+def uncrop_array_to_size(
+    array: np.ndarray,
+    size: Tuple[int, int],
+    interpolation: int = cv2.INTER_LINEAR,
+) -> np.ndarray:
+    """`uncrop_to_size` for numpy arrays (masks, BGR frames): black bands."""
+    tw, th = size
+    ih, iw = array.shape[:2]
+    scale = min(tw / iw, th / ih)
+    nw, nh = min(tw, round(iw * scale)), min(th, round(ih * scale))
+    resized = array if (nw, nh) == (iw, ih) else cv2.resize(array, (nw, nh), interpolation=interpolation)
+    if (nw, nh) == (tw, th):
+        return resized
+    out = np.zeros((th, tw) + array.shape[2:], dtype=array.dtype)
+    x0, y0 = (tw - nw) // 2, (th - nh) // 2
+    out[y0:y0 + nh, x0:x0 + nw] = resized
+    return out
+
+
+def uncrop_box(
+    box: Tuple[float, float, float, float],
+    src_size: Tuple[int, int],
+    size: Tuple[int, int],
+) -> list:
+    """Map an [x0, y0, x1, y1] box through the same transform as `uncrop_to_size`."""
+    tw, th = size
+    iw, ih = src_size
+    scale = min(tw / iw, th / ih)
+    nw, nh = min(tw, round(iw * scale)), min(th, round(ih * scale))
+    sx, sy = nw / iw, nh / ih
+    ox, oy = (tw - nw) // 2, (th - nh) // 2
+    x0, y0, x1, y1 = box
+    return [round(x0 * sx + ox), round(y0 * sy + oy), round(x1 * sx + ox), round(y1 * sy + oy)]
+
+
+def conform_to_size(
+    image: Image.Image,
+    size: Tuple[int, int],
+) -> Image.Image:
+    """Cover-crop an image to the aspect of *size*, then resize to exactly *size*.
+
+    The import step for photos into a locked project canvas (D7): the photo
+    loses its edges, never its proportions.
+    """
+    if image.size == tuple(size):
+        return image
+    cropped = center_crop_to_aspect(image, size[0] / size[1])
+    return cropped.resize(tuple(size), Image.Resampling.LANCZOS)
 
 
 def resize_to_base_resolution(
@@ -450,18 +560,20 @@ def align_to_reference(
     """
     Align an image to match a reference image's dimensions.
 
-    Handles common AI generator issues:
-    - Slightly different resolutions -> resize to match
-    - Different aspect ratios -> center crop then resize
+    Same aspect → plain resize. Different aspect → the generator cropped the
+    reference to its own native size, so that crop is undone exactly
+    (`uncrop_to_size`, bands filled from the reference). Never stretches.
 
     Args:
         image: Image to align (e.g., AI-generated frame)
         reference: Reference image to match (e.g., darkened background)
-        tolerance: Aspect ratio tolerance for warnings
+        tolerance: Aspect mismatch above which a "probably re-framed" warning
+            is added (the image is uncropped either way)
 
     Returns:
         Tuple of (aligned_image, info_dict)
-        info_dict contains: 'resized', 'cropped', 'original_size', 'warnings'
+        info_dict contains: 'resized', 'cropped' (always False), 'padded'
+        (band offset x, y, or None), 'original_size', 'final_size', 'warnings'
     """
     ref_size = reference.size
     img_size = image.size
@@ -469,6 +581,7 @@ def align_to_reference(
     info = {
         'resized': False,
         'cropped': False,
+        'padded': None,
         'original_size': img_size,
         'final_size': ref_size,
         'warnings': []
@@ -480,23 +593,16 @@ def align_to_reference(
 
     ref_aspect = get_aspect_ratio(ref_size)
     img_aspect = get_aspect_ratio(img_size)
-
-    result = image
-
-    # Check aspect ratio mismatch
     if not aspect_ratios_match(img_aspect, ref_aspect, tolerance):
         info['warnings'].append(
-            f"Aspect ratio mismatch: image={img_aspect:.3f}, reference={ref_aspect:.3f}. "
-            f"Center cropping to match."
+            f"Aspect ratio mismatch: image={img_aspect:.3f}, reference={ref_aspect:.3f} — "
+            f"more than the model's usual native-size crop; it may have re-framed the scene."
         )
-        result = center_crop_to_aspect(result, ref_aspect)
-        info['cropped'] = True
 
-    # Resize to match reference dimensions
-    if result.size != ref_size:
-        info['resized'] = True
-        result = result.resize(ref_size, Image.Resampling.LANCZOS)
-
+    result, uncrop = uncrop_to_size(image, ref_size, fill=reference)
+    info['resized'] = True
+    if uncrop['offset'] != (0, 0):
+        info['padded'] = uncrop['offset']
     return result, info
 
 

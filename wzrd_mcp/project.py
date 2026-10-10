@@ -12,6 +12,7 @@ paths, chaining tools keeps working unchanged.
 Layout (created lazily, per project)::
 
     projects/<name>/
+      project.json        locked canvas + spend cap (C1; absent = legacy project)
       scene.json          engine entry point (authored by the engine/UI)
       effects/            project-local WGSL effects   <- render-core convention
       packs/<pack>/       layer packs (pack.json + masks/ + references/)
@@ -33,6 +34,7 @@ live under with `WZRD_PROJECTS_ROOT`.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -116,15 +118,126 @@ def list_projects() -> list[str]:
 def describe() -> dict:
     """Summary of the active project — what the `set_project` tool reports back."""
     root = project_dir()
+    meta = read_project_file()
     return {
         "project": active_project(),
         "project_dir": str(root),
         "exists": root.is_dir(),
+        "canvas": meta.get("canvas") if meta else None,
+        "spend_cap_usd": meta.get("spend_cap_usd") if meta else None,
         "subdirs": {
             k: str(root / k)
             for k in (SURFACES, GENERATED, VIDEO, REGIONS, CAPTURES, PACKS)
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# project.json — the locked canvas (C1, D7)
+# ---------------------------------------------------------------------------
+PROJECT_FILE = "project.json"
+PROJECT_SCHEMA = 1
+DEFAULT_SPEND_CAP_USD = 20.0
+_TIERS = {1: "1K", 2: "2K", 4: "4K"}
+
+
+def native_canvases() -> dict[str, tuple[int, int]]:
+    """Every allowed canvas: Nano Banana's native sizes, "WxH" -> (w, h)."""
+    from wzrd.utils import NANO_BANANA_SIZES
+
+    return {
+        f"{w * k}x{h * k}": (w * k, h * k)
+        for (w, h) in NANO_BANANA_SIZES.values() for k in _TIERS
+    }
+
+
+def parse_canvas(value: str) -> tuple[int, int]:
+    """'16:9' (that aspect's 1K size) or 'WxH' (must be a native size) -> (w, h)."""
+    from wzrd.utils import NANO_BANANA_SIZES
+
+    v = value.strip().lower().replace(" ", "")
+    if v in NANO_BANANA_SIZES:
+        return NANO_BANANA_SIZES[v]
+    sizes = native_canvases()
+    if v in sizes:
+        return sizes[v]
+    names = ", ".join(f"{k} ({w}x{h})" for k, (w, h) in NANO_BANANA_SIZES.items())
+    raise ValueError(
+        f"canvas {value!r} is not a Nano Banana native size. Give an aspect — {names} — "
+        f"or one of those sizes doubled/quadrupled (2K/4K), e.g. '2752x1536'."
+    )
+
+
+def canvas_aspect(size: tuple[int, int]) -> tuple[str, str]:
+    """(aspect name, resolution tier) of a native canvas, e.g. ('16:9', '2K')."""
+    from wzrd.utils import NANO_BANANA_SIZES
+
+    for name, (w, h) in NANO_BANANA_SIZES.items():
+        for k, tier in _TIERS.items():
+            if (w * k, h * k) == tuple(size):
+                return name, tier
+    raise ValueError(f"{size[0]}x{size[1]} is not a native canvas")
+
+
+def project_file(name: str | None = None) -> Path:
+    return project_dir(name) / PROJECT_FILE
+
+
+def read_project_file(name: str | None = None) -> dict | None:
+    """The project's `project.json`, or None for a legacy project."""
+    path = project_file(name)
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text())
+
+
+def write_project_file(data: dict, name: str | None = None) -> None:
+    """Atomic write (temp file + rename) — the app may read it any time."""
+    path = project_file(name)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def canvas() -> tuple[int, int] | None:
+    """The active project's locked canvas (w, h), or None (legacy project)."""
+    meta = read_project_file()
+    if meta and meta.get("canvas"):
+        w, h = meta["canvas"]
+        return int(w), int(h)
+    return None
+
+
+def _has_content(root: Path) -> bool:
+    return any(p.is_file() and not p.name.startswith(".") for p in root.rglob("*"))
+
+
+def lock_canvas(value: str) -> tuple[int, int]:
+    """Set the active project's canvas once (C1). Same value again is a no-op;
+    a different one, or a canvas for a project that already holds files
+    without one (legacy), is an error."""
+    size = parse_canvas(value)
+    root = project_dir()
+    meta = read_project_file()
+    if meta and meta.get("canvas"):
+        current = tuple(meta["canvas"])
+        if current != size:
+            raise ValueError(
+                f"project {active_project()!r} is locked to canvas {current[0]}x{current[1]}; "
+                f"a canvas never changes — start a new project for {size[0]}x{size[1]}"
+            )
+        return size
+    if meta is None and root.is_dir() and _has_content(root):
+        raise ValueError(
+            f"project {active_project()!r} already holds files made without a canvas (a legacy "
+            f"project); a canvas is chosen once, for new projects only — start a new project"
+        )
+    root.mkdir(parents=True, exist_ok=True)
+    data = {"schema": PROJECT_SCHEMA, "canvas": list(size),
+            "spend_cap_usd": DEFAULT_SPEND_CAP_USD, **(meta or {})}
+    data["canvas"] = list(size)
+    write_project_file(data)
+    return size
 
 
 # ---------------------------------------------------------------------------

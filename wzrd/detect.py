@@ -790,6 +790,7 @@ def detect_projection_from_array(
     min_projection_fraction: float = 0.10,
     target_aspect_ratio: Optional[str] = None,
     output_resolution: Optional[int] = None,
+    output_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[np.ndarray, dict]:
     """
     Detect the projection area from a numpy array and return cropped image.
@@ -806,6 +807,9 @@ def detect_projection_from_array(
                              exactly this aspect ratio in the output.
         output_resolution: Optional max dimension for output. If provided along with
                            target_aspect_ratio, output will be resized to exact dimensions.
+        output_size: Optional exact (width, height) the whole detected quad is
+                     rectified to, corners untouched — a locked project canvas
+                     (the projector raster). Overrides the two arguments above.
 
     Returns:
         Tuple of (cropped_image, info_dict):
@@ -861,7 +865,7 @@ def detect_projection_from_array(
 
     # Apply aspect ratio adjustment if target is specified
     target_aspect = None
-    if target_aspect_ratio is not None:
+    if target_aspect_ratio is not None and output_size is None:
         target_aspect = parse_aspect_ratio(target_aspect_ratio)
         corners_for_crop = adjust_corners_for_aspect_ratio(corners_for_crop, target_aspect)
         # Clamp adjusted corners to image bounds
@@ -877,8 +881,7 @@ def detect_projection_from_array(
             debug.save("corners_aspect_adjusted", vis)
 
     # Compute output size
-    output_size = None
-    if target_aspect is not None and output_resolution is not None:
+    if output_size is None and target_aspect is not None and output_resolution is not None:
         output_size = compute_target_dimensions(target_aspect, output_resolution)
 
     # Extract the cropped region
@@ -945,6 +948,7 @@ def detect_projection_area(
     min_projection_fraction: float = 0.10,
     target_aspect_ratio: Optional[str] = None,
     output_resolution: Optional[int] = None,
+    output_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[np.ndarray, dict]:
     """
     Detect the projection area in an image file and return cropped image.
@@ -964,6 +968,9 @@ def detect_projection_area(
                              exactly this aspect ratio in the output.
         output_resolution: Optional max dimension for output. If provided along with
                            target_aspect_ratio, output will be resized to exact dimensions.
+        output_size: Optional exact (width, height) the whole detected quad is
+                     rectified to, corners untouched — a locked project canvas
+                     (the projector raster). Overrides the two arguments above.
 
     Returns:
         Tuple of (cropped_image, info_dict):
@@ -1004,6 +1011,7 @@ def detect_projection_area(
         min_projection_fraction=min_projection_fraction,
         target_aspect_ratio=target_aspect_ratio,
         output_resolution=output_resolution,
+        output_size=output_size,
     )
 
     if debug_dir:
