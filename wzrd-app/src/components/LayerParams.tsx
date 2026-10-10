@@ -64,7 +64,10 @@ export function LayerParams({ mode = 'perform', bindingId }: { mode?: Mode; bind
   const declared = new Set(inputs.map((i) => i.name));
   const extras: EffectInput[] = Object.entries(binding.params ?? {})
     .filter(([k]) => !declared.has(k))
-    .map(([name, v]) => ({ name, type: typeof v === 'string' ? 'color' : 'float' }));
+    .map(([name, v]) => ({
+      name,
+      type: typeof v === 'string' ? 'color' : v && typeof v === 'object' && 'clip' in v ? 'image' : 'float',
+    }));
   const all = [...inputs, ...extras];
   const hue = bindingHue(binding, pack, index);
   const structural = leg === 'design';
@@ -94,13 +97,30 @@ export function LayerParams({ mode = 'perform', bindingId }: { mode?: Mode; bind
       <div className="flex-1 min-h-0 overflow-auto p-2.5 flex flex-col gap-1.5">
         {all.length === 0 && <div className="text-[11px] text-fg3 p-1">This effect has no controls.</div>}
         {all.map((input) =>
-          input.type === 'color' ? (
+          input.type === 'image' ? (
+            <ImageRow key={input.name} value={binding.params?.[input.name]} />
+          ) : input.type === 'color' ? (
             <ColorRow key={input.name} binding={binding} input={input} editable={structural} />
           ) : (
             <ScalarRow key={input.name} binding={binding} input={input} leg={leg} mode={mode} structural={structural} />
           )
         )}
       </div>
+    </div>
+  );
+}
+
+/** A clip input (C5): shows what plays; clips are picked in the clip grid. */
+function ImageRow({ value }: { value: any }) {
+  const clip: string | null = value && typeof value === 'object' ? value.clip ?? null : null;
+  return (
+    <div className="flex items-center gap-2 h-8 px-2 rounded-md bg-panel2 border border-line text-[11px]">
+      <span className="text-fg3 shrink-0">Clip</span>
+      <span className="num truncate flex-1 text-fg" title={clip ?? undefined}>
+        {clip ? clip.split('/').pop() : 'none — pick one in the clip grid'}
+      </span>
+      {clip && value.placement === 'canvas' && <span className="text-[9px] text-fg4">canvas</span>}
+      {clip && value.rate != null && value.rate !== 1 && <span className="num text-[9px] text-fg4">×{value.rate}</span>}
     </div>
   );
 }

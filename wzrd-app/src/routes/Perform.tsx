@@ -3,6 +3,7 @@
 //   ┌ monitor (what your hands are on) ─────────┬ deck: DESIGN|LIVE, TAKE ┐
 //   ├ looks bank (fire whole scenes) ───────────┤ masters + audio         │
 //   ├ layer stack (mixer) ─┬ selected layer's dials                       │
+//   ├ clip grid (compact) ─┘                                              │
 //
 // The monitor frame wears the deck colour, so a glance tells you whether
 // you're touching the wall or the draft.
@@ -13,6 +14,7 @@ import { AudioPanel, MastersPanel } from '../components/MastersPanel';
 import { LayerStack } from '../components/LayerStack';
 import { LayerParams } from '../components/LayerParams';
 import { LooksBank } from '../components/LooksBank';
+import { ClipGrid } from '../components/ClipGrid';
 import { useStore } from '../state/store';
 import { Panel } from '../ui/primitives';
 
@@ -56,20 +58,31 @@ export function Perform() {
         </Panel>
 
         <div className="min-h-0 grid grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] gap-2">
-          <Panel
-            title={
-              <>
-                Layers
-                <span className={'normal-case tracking-normal font-medium ' + (leg === 'live' ? 'text-live' : 'text-design')}>
-                  · {leg === 'live' ? 'live' : 'design'}
-                </span>
-              </>
-            }
-            right={<span className="text-[10px] text-fg4">M mute · S solo · [ ] fade</span>}
-            bodyClassName="overflow-auto"
-          >
-            <LayerStack />
-          </Panel>
+          <div className="min-h-0 flex flex-col gap-2">
+            <Panel
+              title={
+                <>
+                  Layers
+                  <span className={'normal-case tracking-normal font-medium ' + (leg === 'live' ? 'text-live' : 'text-design')}>
+                    · {leg === 'live' ? 'live' : 'design'}
+                  </span>
+                </>
+              }
+              right={<span className="text-[10px] text-fg4">M mute · S solo · [ ] fade</span>}
+              className="flex-[3] min-h-0"
+              bodyClassName="overflow-auto"
+            >
+              <LayerStack />
+            </Panel>
+            <Panel
+              title="Clips"
+              right={<span className="text-[10px] text-fg4">click = on DESIGN · T to take</span>}
+              className="flex-[2] min-h-0"
+              bodyClassName="min-h-0"
+            >
+              <ClipGrid compact />
+            </Panel>
+          </div>
           <Panel bodyClassName="min-h-0">
             <LayerParams />
           </Panel>

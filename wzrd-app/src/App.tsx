@@ -31,6 +31,7 @@ import { ingestAlignment } from './state/alignment';
 import { hydrateOverrides, loadLooks, refreshLiveScene, resetActionState } from './state/actions';
 import { dropPendingCommits } from './state/sceneCommit';
 import { useAutopilot } from './state/autopilot';
+import { useClipsPoller } from './state/clips';
 import { ensureMasks } from './state/masks';
 import { useShortcuts } from './state/shortcuts';
 import { useAutopilotDriver } from './state/autopilot';
@@ -164,6 +165,7 @@ export default function App() {
   const lastPromote = useRef<string>('idle');
   useShortcuts();
   useAutopilotDriver();
+  useClipsPoller();
 
   // The whole room re-tints with the deck (see index.css `--deck`).
   useEffect(() => {

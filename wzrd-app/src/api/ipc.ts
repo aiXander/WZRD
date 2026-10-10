@@ -298,6 +298,40 @@ export const projectOpen = (scenePath: string) =>
 /** Re-boot the engine on the current scene — crash recovery. */
 export const engineRestart = () => invoke<ProjectInfo>('engine_restart');
 
+// ---------- clips (A2: region × clip-slot grid) ----------
+
+/** C2 provenance sidecar — readers ignore unknown keys. */
+export type ClipSidecar = {
+  schema?: number;
+  tool?: string;
+  args?: Record<string, any>;
+  inputs?: string[];
+  parent?: string | null;
+  created?: string;
+  est_usd?: number;
+  region?: string | null;
+  source_box?: [number, number, number, number] | null;
+  rating?: 'favourite' | 'reject';
+  [k: string]: unknown;
+};
+/** One C3 HAP clip; paths are relative to the scene dir (C5's `image.clip`). */
+export type ClipEntry = {
+  path: string;
+  name: string;
+  mtime_ms: number;
+  sidecar: ClipSidecar | null;
+  /** The source mp4's sidecar (via `sidecar.parent`): prompt, tool, model. */
+  source: ClipSidecar | null;
+  thumb: string | null;
+};
+/** Newest first, plus the operator's row filing (clipgrid.json). */
+export const clipsList = () =>
+  invoke<{ clips: ClipEntry[]; rows: Record<string, string | null> }>('clips_list');
+export const clipThumb = (path: string) => invoke<string>('clip_thumb', { path });
+/** File a clip onto a region row (`null` = unassigned). App state only. */
+export const clipFile = (path: string, region: string | null) =>
+  invoke<void>('clip_file', { path, region });
+
 // ---------- events ----------
 
 export type TelemetryFrame = {

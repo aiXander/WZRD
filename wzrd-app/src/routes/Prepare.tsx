@@ -6,12 +6,14 @@
 //   │ regions│                                     │ target    │
 //   │        │                                     │ effect    │
 //   │        │                                     │ dials     │
-//   └────────┴─ code drawer (scene.json + WGSL) ───┴───────────┘
+//   └────────┴─ drawer: clip grid | code (scene.json + WGSL) ┴┘
 //
 // Building a layer is two clicks: a region on the map, an effect card.
+// Putting a rendered clip on a region is one: its slot in the clip grid.
 
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { SurfaceMap } from '../components/SurfaceMap';
+import { ClipGrid } from '../components/ClipGrid';
 import { LayerParams } from '../components/LayerParams';
 import { RegionGlyph } from '../components/LayerStack';
 import { setDeck } from '../state/actions';
@@ -40,6 +42,8 @@ function defaultsFor(inputs: EffectInput[], prev: Record<string, any> = {}): Rec
   const out: Record<string, any> = {};
   for (const i of inputs) {
     if (prev[i.name] !== undefined) out[i.name] = prev[i.name];
+    // An `image` input has no default: a clip arrives from the clip grid.
+    else if (i.type === 'image') continue;
     else if (i.type === 'color') out[i.name] = toHex(i.default);
     else out[i.name] = Number(i.default) || 0;
   }
@@ -57,7 +61,15 @@ export function Prepare() {
   const scene = useScene();
   const bindings = scene?.bindings ?? [];
   const [armed, setArmed] = useState(false);
-  const [code, setCode] = useState(false);
+  const [drawer, setDrawerState] = useState<'clips' | 'code' | null>(() => {
+    const v = localStorage.getItem('wzrd.prepare.drawer');
+    return v === 'code' || v === 'none' ? (v === 'none' ? null : 'code') : 'clips';
+  });
+  const setDrawer = (d: 'clips' | 'code' | null) => {
+    const next = drawer === d ? null : d;
+    localStorage.setItem('wzrd.prepare.drawer', next ?? 'none');
+    setDrawerState(next);
+  };
 
   // Authoring is a DESIGN act — put the hands there on the way in.
   useEffect(() => {
@@ -177,11 +189,16 @@ export function Prepare() {
             <SurfaceMap bindings={bindings} onRegionClick={onRegionClick} armed={armed} />
           </div>
           <div className="flex items-center gap-2 h-8 px-2 border-t border-line shrink-0">
-            <Btn size="sm" tone="ghost" active={code} onClick={() => setCode((c) => !c)} title="scene.json + effect shaders">
+            <Btn size="sm" tone="ghost" active={drawer === 'clips'} onClick={() => setDrawer('clips')} title="Rendered clips per region — click one to play it on DESIGN">
+              ▦ Clips
+            </Btn>
+            <Btn size="sm" tone="ghost" active={drawer === 'code'} onClick={() => setDrawer('code')} title="scene.json + effect shaders">
               {'</>'} Code
             </Btn>
             <span className="text-[10px] text-fg4">
-              Plain files: scene.json + effects/*/shader.wgsl — the AI and a text editor author the same scene.
+              {drawer === 'clips'
+                ? 'Click a clip to play it on its region (DESIGN), drag it to another row to re-file it, TAKE to go live.'
+                : 'Plain files: scene.json + effects/*/shader.wgsl — the AI and a text editor author the same scene.'}
             </span>
           </div>
         </Panel>
@@ -206,11 +223,16 @@ export function Prepare() {
         </Panel>
       </div>
 
-      {code && (
+      {drawer === 'code' && (
         <div className="h-[42%] min-h-[220px] mx-2 mb-2 rounded-lg border border-line overflow-hidden">
           <Suspense fallback={<div className="p-3 text-[11px] text-fg3">loading editor…</div>}>
             <MonacoPanel />
           </Suspense>
+        </div>
+      )}
+      {drawer === 'clips' && (
+        <div className="h-[34%] min-h-[180px] mx-2 mb-2 rounded-lg border border-line bg-panel overflow-hidden">
+          <ClipGrid />
         </div>
       )}
     </div>

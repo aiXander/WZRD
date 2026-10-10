@@ -19,24 +19,34 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::{projects, rpc, AppState};
+use crate::{clips, projects, rpc, AppState};
 
 pub fn spawn(app: AppHandle) {
     let port: u16 = std::env::var("WZRD_DEVPORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(9124);
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            log::warn!("dev shell port {port} unavailable ({e}) — browser bridge file commands off");
-            return;
-        }
-    };
-    log::info!("dev shell port on http://127.0.0.1:{port} (browser bridge)");
     let _ = std::thread::Builder::new()
         .name("devport".into())
         .spawn(move || {
+            // `tauri dev` restarts the app on a Rust change before the old
+            // process has let go of the port: retry for a few seconds.
+            let mut tries = 0;
+            let listener = loop {
+                match TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(l) => break l,
+                    Err(e) if tries < 40 => {
+                        tries += 1;
+                        log::debug!("dev shell port {port}: {e}, retrying");
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    Err(e) => {
+                        log::warn!("dev shell port {port} unavailable ({e}) — browser bridge shell commands off");
+                        return;
+                    }
+                }
+            };
+            log::info!("dev shell port on http://127.0.0.1:{port} (browser bridge)");
             for stream in listener.incoming().flatten() {
                 let app = app.clone();
                 let _ = std::thread::Builder::new()
@@ -123,6 +133,9 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "project_current" => Ok(projects::project_current(st())),
         "project_open" => projects::project_open(app.clone(), st(), s("scenePath")?),
         "engine_restart" => projects::engine_restart(app.clone(), st()),
+        "clips_list" => clips::clips_list(st()),
+        "clip_thumb" => ok(clips::clip_thumb(st(), s("path")?)),
+        "clip_file" => ok(clips::clip_file(st(), s("path")?, opt("region"))),
         other => Err(format!("no dev shell handler for {other}")),
     }
 }
