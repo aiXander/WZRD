@@ -136,6 +136,16 @@ never carries them. The parked Modal image mounts `tools_config.json` and
   `NANO_BANANA_SIZES`), and the `region_surface_image` crop has the box's
   aspect. A story or texture for one region (a tall pillar) is rendered from
   that crop with `aspect_ratio="auto"` → it fits its box back within ~1 px.
+- **Photos arrive upright.** `file_io.resolve_input` — the input side of
+  every tool — swaps a HEIC, or any photo with an EXIF rotation tag, for a
+  decoded, rotated temp copy (`wzrd.utils.upright_copy`; `pillow-heif` is a
+  core dependency). PIL ignores EXIF rotation and OpenCV can't read HEIC, so
+  without this an iPhone portrait reached tools sideways. TextureFlow's
+  byte packer and Kling's aspect pick apply it too (they read files
+  directly). `import_photos` brings photos into `captures/`: the newest in
+  `~/Downloads` (AirDrop; arrival = birthtime) or given paths, upright, and
+  `conform=True` cover-crops them to the canvas — `conform=False` for
+  night/day detection pairs, which need the whole frame.
 - **Fresh projects boot.** The engine refuses to start without a scene +
   pack, so `build_layerpack` writes a starter `<project>/scene.json`
   (`pack` → this pack, bpm 120, no bindings) when none exists — opened with
@@ -197,7 +207,7 @@ container seconds × $1.95/h L40S). Prices: [hosted-models.md](hosted-models.md)
 | `media_tools.py` | `view_media` (downscaled images; one contact sheet per video), `concat_videos` (→ `wzrd/concat.py`), `check_frames` (→ `wzrd/check_frames.py`: numeric clip QC — flash rate, loop seam, haze, lit share, still-vs-surface shift; thresholds and their reasons in the module docstring) |
 | `google_tools.py`, `fal_tools.py` | hosted models — [hosted-models.md](hosted-models.md) |
 | `engine_tools.py` | engine authoring slice — [render-engine.md](render-engine.md) §2.7 |
-| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, `set_project` |
+| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, `set_project`, `import_photos` |
 | `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing + sidecar hook; 15 s progress pings during remote calls |
 | `provenance.py` | C2 sidecars, spend cap, `region=` → pack layer box |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |

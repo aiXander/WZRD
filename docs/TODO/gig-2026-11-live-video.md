@@ -136,13 +136,15 @@ seg map's masks land on ground truth (old stretch: 4 px at hems). Done — see
 [mcp-server.md](../reference/mcp-server.md) "The project folder and its
 locked canvas".
 
-### P2 — `import_photos` + EXIF orientation
+### P2 — `import_photos` + EXIF orientation — done 2026-10-10
 
-PY · needs P1 · new tool + the shared input loader. HEIC via `pillow-heif`,
-EXIF orientation, from `~/Downloads` by recency → project `captures/`,
-conformed to the canvas; EXIF orientation applied in the shared loader for
-every tool. **Gate:** an iPhone HEIC shot in portrait lands upright and at
-canvas size.
+`import_photos` (newest from `~/Downloads` or given paths → `captures/`,
+upright, conformed to the canvas unless `conform=False`) and an upright
+shared loader in `resolve_input` (HEIC via `pillow-heif`, EXIF rotation)
+for every tool. Gate (synthetic, no real iPhone file on this machine): a
+portrait HEIC and a sideways EXIF-6 JPEG both land upright at 1376×768.
+Done — see [mcp-server.md](../reference/mcp-server.md) "The project folder
+and its locked canvas".
 
 ### P3 — Provenance sidecars + spend cap — done 2026-10-10
 

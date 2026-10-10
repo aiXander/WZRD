@@ -11,7 +11,8 @@ the call created inside the project. A tool that knows more (cost, region,
 the model it ran) returns a private `_provenance` dict, popped before the
 result reaches the agent:
 
-    {"est_usd": {path: usd}, "args": {...}, "region": id, "source_box": [...]}
+    {"est_usd": {path: usd}, "args": {...}, "region": id, "source_box": [...],
+     "parent": path | {output path: path}}
 
 `est_usd` is keyed per output so a multi-output call (TextureFlow's preview
 videos) is counted once, on the file that cost the money.
@@ -98,13 +99,14 @@ def write_sidecars(tool: str, client_args: dict, result: dict, since: float,
     local_inputs = [i for i in inputs if i.startswith("/")]
     created = datetime.now(timezone.utc).isoformat(timespec="seconds")
     written = []
+    parents = prov.get("parent", local_inputs[0] if local_inputs else None)
     for out in outputs:
         meta = {
             "schema": SIDECAR_SCHEMA,
             "tool": tool,
             "args": {k: v for k, v in {**client_args, **(prov.get("args") or {})}.items() if v is not None},
             "inputs": inputs,
-            "parent": prov.get("parent", local_inputs[0] if local_inputs else None),
+            "parent": parents.get(out) if isinstance(parents, dict) else parents,
             "created": created,
             "est_usd": round(float(est.get(out, 0.0)), 4),
             "region": prov.get("region"),

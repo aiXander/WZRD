@@ -466,8 +466,11 @@ def _tf_pack_media(args: dict) -> dict[str, bytes]:
     """Swap local paths in the media args for keys into a `files` dict.
 
     URLs are left as-is (the server downloads them). Keys are basenames, made
-    unique, so the server sees the original file names and extensions.
+    unique, so the server sees the original file names; photos go upright
+    (HEIC decoded, EXIF rotation applied — the server would ignore both).
     """
+    from wzrd.utils import upright_copy
+
     files: dict[str, bytes] = {}
 
     def pack(ref: str) -> str:
@@ -476,10 +479,11 @@ def _tf_pack_media(args: dict) -> dict[str, bytes]:
         path = Path(ref).expanduser()
         if not path.is_file():
             raise ToolError(f"texture_flow: {ref!r} is neither an http(s) URL nor an existing local file")
-        key, n = path.name, 2
+        src = Path(upright_copy(path))
+        key, n = f"{path.stem}{src.suffix}", 2
         while key in files:
-            key, n = f"{path.stem}_{n}{path.suffix}", n + 1
-        files[key] = path.read_bytes()
+            key, n = f"{path.stem}_{n}{src.suffix}", n + 1
+        files[key] = src.read_bytes()
         return key
 
     for name in _TF_MEDIA:

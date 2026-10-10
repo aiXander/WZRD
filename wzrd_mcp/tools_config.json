@@ -29,5 +29,6 @@
   "set_scene": {"enabled": true, "timeout": 30},
   "validate_wgsl": {"enabled": true, "timeout": 30},
   "get_preview": {"enabled": true, "timeout": 30},
-  "check_frames": {"enabled": true, "timeout": 120}
+  "check_frames": {"enabled": true, "timeout": 120},
+  "import_photos": {"enabled": true, "timeout": 120}
 }

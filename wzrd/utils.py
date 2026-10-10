@@ -304,6 +304,69 @@ def _generate_alignment_aids(
     return {}
 
 
+# ---------------------------------------------------------------------------
+# Photos as shot: HEIC + EXIF orientation
+# ---------------------------------------------------------------------------
+
+PHOTO_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif', '.tif', '.tiff'}
+_EXIF_ORIENTATION = 0x0112
+_heif_registered = False
+
+
+def _register_heif() -> None:
+    """Let PIL open HEIC/HEIF (iPhone photos) when pillow-heif is installed."""
+    global _heif_registered
+    if not _heif_registered:
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except ImportError:
+            pass
+        _heif_registered = True
+
+
+def load_upright(path: Union[str, Path]) -> Image.Image:
+    """Open a photo the way it was shot: HEIC decoded, EXIF rotation applied.
+
+    PIL ignores the EXIF orientation tag and OpenCV can't read HEIC, so an
+    iPhone portrait shot would otherwise arrive sideways (or not at all).
+    """
+    from PIL import ImageOps
+
+    _register_heif()
+    with Image.open(path) as img:
+        return ImageOps.exif_transpose(img)
+
+
+def upright_copy(path: Union[str, Path], tmp_dir: Optional[Union[str, Path]] = None) -> str:
+    """*path* itself if it is already upright and plainly decodable, else a
+    temp copy (JPEG, or PNG when it has alpha) with HEIC decoded and the EXIF
+    rotation baked into the pixels. Non-photos are returned untouched."""
+    import tempfile
+
+    p = Path(path)
+    if p.suffix.lower() not in PHOTO_EXTS:
+        return str(path)
+    _register_heif()
+    try:
+        with Image.open(p) as img:
+            fmt = (img.format or '').upper()
+            orientation = img.getexif().get(_EXIF_ORIENTATION, 1)
+    except Exception:
+        return str(path)  # not an image we can read — let the tool report it
+    if fmt not in ('HEIF', 'HEIC', 'AVIF') and orientation in (0, 1):
+        return str(path)
+    img = load_upright(p)
+    alpha = img.mode in ('RGBA', 'LA', 'PA')
+    fd, out = tempfile.mkstemp(suffix='.png' if alpha else '.jpg', prefix=f'{p.stem}_upright_', dir=tmp_dir)
+    os.close(fd)
+    if alpha:
+        img.save(out)
+    else:
+        img.convert('RGB').save(out, quality=95)
+    return out
+
+
 def parse_aspect_ratio(aspect_str: str) -> float:
     """
     Parse aspect ratio string to float.

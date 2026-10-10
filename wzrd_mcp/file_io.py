@@ -54,19 +54,27 @@ def _cdn_root() -> str | None:
 
 
 def resolve_input(url_or_path: str, suffix: str = "") -> str:
-    """URL → download to tmp file.  Base64 → decode to tmp file.  Local path → validate and return."""
+    """URL → download to tmp file.  Base64 → decode to tmp file.  Local path → validate.
+
+    Photos then come back upright: a HEIC, or a photo carrying an EXIF
+    rotation tag, is replaced by a decoded, rotated temp copy
+    (`wzrd.utils.upright_copy`) — so every tool, PIL- or OpenCV-based, sees
+    an iPhone shot the way it was taken. Other files pass through.
+    """
+    from wzrd.utils import upright_copy
+
     if url_or_path.startswith(("http://", "https://")):
-        return _download(url_or_path, suffix)
+        return upright_copy(_download(url_or_path, suffix))
     if url_or_path.startswith("base64:"):
-        return _decode_base64(url_or_path[7:], suffix)
+        return upright_copy(_decode_base64(url_or_path[7:], suffix))
     if url_or_path.startswith("data:"):
         # data:image/png;base64,iVBOR...
         _, encoded = url_or_path.split(",", 1)
-        return _decode_base64(encoded, suffix)
+        return upright_copy(_decode_base64(encoded, suffix))
     path = Path(url_or_path).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
-    return str(path)
+    return upright_copy(path)
 
 
 def upload(local_path: str) -> str:

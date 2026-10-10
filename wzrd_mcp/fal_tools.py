@@ -192,13 +192,12 @@ def _nearest_aspect(image: str, choices: tuple[str, ...]) -> str:
     """
     import math
 
-    from PIL import Image
+    from wzrd.utils import load_upright
 
     path = os.path.expanduser(image)
     if not os.path.isfile(path):
         return choices[0]
-    with Image.open(path) as im:
-        w, h = im.size
+    w, h = load_upright(path).size  # as shot: an iPhone portrait is tall
 
     def ratio(c: str) -> float:
         a, b = c.split(":")

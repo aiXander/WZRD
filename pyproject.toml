@@ -9,6 +9,7 @@ dependencies = [
     "pillow>=10.0.0",
     "numpy>=2.2.0",
     "opencv-python>=4.8.0,<4.11.0",  # 4.11+ lacks wheels for newer macOS
+    "pillow-heif>=0.18",
 ]
 
 [project.optional-dependencies]
