@@ -32,6 +32,7 @@ thiserror = "1"
 tungstenite = "0.21"
 wgpu = "22"
 winit = "0.30"
+snap = "1.1.2"
 
 [target.'cfg(unix)'.dependencies]
 # SIGTERM/SIGINT → session sidecar snapshot before exit (§5.3/§5.11).

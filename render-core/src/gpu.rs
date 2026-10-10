@@ -334,6 +334,9 @@ pub struct GpuContext {
     pub surface_config: wgpu::SurfaceConfiguration,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// Whether the device was created with `TEXTURE_COMPRESSION_BC` (HAP
+    /// clips need it; stills don't).
+    pub bc_supported: bool,
 
     /// Attached/detached by the host at runtime (None headless / pre-attach).
     pub preview: Option<PreviewTarget>,
@@ -421,11 +424,26 @@ impl GpuContext {
             .await
             .context("no compatible GPU adapter found")?;
 
+        // The one exception to `Features::empty()` (gig plan D2, CLAUDE.md):
+        // BC texture compression for HAP clips — requested only when the
+        // adapter offers it (Apple Silicon, desktop NVIDIA/AMD/Intel all do).
+        // Without it the engine runs as before and refuses HAP clips with a
+        // named per-binding warning.
+        let bc_supported = adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+        if !bc_supported {
+            log::warn!("GPU adapter lacks TEXTURE_COMPRESSION_BC — HAP clips will not play");
+        }
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("render-core device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: if bc_supported {
+                        wgpu::Features::TEXTURE_COMPRESSION_BC
+                    } else {
+                        wgpu::Features::empty()
+                    },
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
@@ -526,6 +544,7 @@ impl GpuContext {
             surface_config,
             device,
             queue,
+            bc_supported,
             preview: None,
             composite_texture,
             composite_view,

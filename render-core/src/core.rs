@@ -1966,6 +1966,17 @@ impl Core {
         }
     }
 
+    /// Hand both legs' consumed clip staging slots back to their decoders.
+    fn after_submit_legs(&mut self) {
+        let Some(gpu) = self.gpu.as_ref() else { return };
+        if let Some(p) = self.plan.as_mut() {
+            p.after_submit(gpu);
+        }
+        if let Some(p) = self.design.as_mut().and_then(|d| d.plan.as_mut()) {
+            p.after_submit(gpu);
+        }
+    }
+
     /// One presented frame (tick → record → submit → present). Must only be
     /// called while not occluded. On `SurfaceError::Lost`/`Outdated` the host
     /// should query the window's current size and call [`Core::resize`];
@@ -1986,7 +1997,7 @@ impl Core {
         let design_demand = self.design_demand();
 
         let gpu = self.gpu.as_ref().expect("checked above");
-        let plan = self.plan.as_ref().expect("checked above");
+        let plan = self.plan.as_mut().expect("checked above");
         let frame = gpu.surface.get_current_texture()?;
         let swap_view = frame
             .texture
@@ -2004,12 +2015,16 @@ impl Core {
             gpu.write_warp_uniforms(&self.alignment.bake_uniforms());
             gpu.encode_warp_bake(&mut encoder);
         }
-        // 1) Live leg → live composite.
+        // 1) Live leg → live composite (clip uploads first, same encoder).
+        plan.encode_uploads(&mut encoder);
         plan.encode_composite(gpu, &mut encoder, &gpu.composite_view);
         // 2) Design leg → design composite, only when something consumes it.
+        //    An idle design leg asks its clips for nothing, so they decode
+        //    nothing.
         if design_demand {
-            if let (Some(d), Some(view)) = (self.design.as_ref(), gpu.design_view.as_ref()) {
-                if let Some(p) = d.plan.as_ref() {
+            if let (Some(d), Some(view)) = (self.design.as_mut(), gpu.design_view.as_ref()) {
+                if let Some(p) = d.plan.as_mut() {
+                    p.encode_uploads(&mut encoder);
                     p.encode_composite(gpu, &mut encoder, view);
                 }
             }
@@ -2021,6 +2036,7 @@ impl Core {
         gpu.encode_final(&mut encoder, &swap_view);
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+        self.after_submit_legs();
 
         self.present_preview();
         let counts = self.frame_counts();
@@ -2050,22 +2066,25 @@ impl Core {
         let design_demand = self.design_demand();
         {
             let gpu = self.gpu.as_ref().expect("checked above");
-            let plan = self.plan.as_ref().expect("checked above");
+            let plan = self.plan.as_mut().expect("checked above");
             let mut encoder = gpu
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("offscreen frame encoder"),
                 });
+            plan.encode_uploads(&mut encoder);
             plan.encode_composite(gpu, &mut encoder, &gpu.composite_view);
             if design_demand {
-                if let (Some(d), Some(view)) = (self.design.as_ref(), gpu.design_view.as_ref()) {
-                    if let Some(p) = d.plan.as_ref() {
+                if let (Some(d), Some(view)) = (self.design.as_mut(), gpu.design_view.as_ref()) {
+                    if let Some(p) = d.plan.as_mut() {
+                        p.encode_uploads(&mut encoder);
                         p.encode_composite(gpu, &mut encoder, view);
                     }
                 }
             }
             gpu.queue.submit(std::iter::once(encoder.finish()));
         }
+        self.after_submit_legs();
         // The native preview keeps presenting while the projector window is
         // buried — that's the whole point of the occluded path.
         self.present_preview();

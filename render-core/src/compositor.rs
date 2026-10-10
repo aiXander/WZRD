@@ -59,9 +59,10 @@ pub struct LayerPass {
     /// Operator layer fader for this frame, folded from the `@opacity` /
     /// `@mute` / `@solo` overrides in [`PassPlan::tick`]. `0` skips the draw.
     pub opacity: f32,
-    /// C5 image placement for this pass (uv rect + texel encoding) when its
-    /// binding has an opened image; `None` = `sample_image` is transparent.
-    pub image: Option<([f32; 4], ImageEncoding)>,
+    /// C5 image for this pass — index into `PassPlan::images`, placement
+    /// rect (uv) and texel encoding — when its binding opened one; `None` =
+    /// `sample_image` is transparent.
+    pub image: Option<(usize, [f32; 4], ImageEncoding)>,
 
     pub layer_buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
@@ -71,6 +72,8 @@ pub struct LayerPass {
 pub struct BindingImage {
     pub binding_id: String,
     pub source: ImageSource,
+    /// C5 playhead rate.
+    pub rate: f32,
 }
 
 /// §5.2 pick state for one binding. All member passes stay in the plan;
@@ -101,6 +104,9 @@ pub struct PassPlan {
     /// draws nothing, the rest of the plan plays). Surfaced by `Core` in the
     /// apply reply + `hot_reload`.
     pub warnings: Vec<String>,
+    /// This plan's leg transport time at the last tick — the C5 playhead
+    /// clock (× each binding's rate).
+    clock_sec: f64,
     /// Per-plan FrameState uniform (§5.6 full-control-switch): the two legs
     /// tick with *different* contexts (own transport speed, own audioListen),
     /// so the buffer can't be shared on the GpuContext — and it must travel
@@ -168,6 +174,7 @@ impl PassPlan {
                         images.push(BindingImage {
                             binding_id: binding.id.clone(),
                             source,
+                            rate: param.rate,
                         });
                         Some((images.len() - 1, param.placement, encoding))
                     }
@@ -219,8 +226,8 @@ impl PassPlan {
                     centroid_uv: geom.centroid_uv,
                     bbox_uv: geom.bbox_uv,
                 };
-                let pass_image = image.map(|(_, placement, encoding)| {
-                    (image_box(placement, &identity), encoding)
+                let pass_image = image.map(|(i, placement, encoding)| {
+                    (i, image_box(placement, &identity), encoding)
                 });
                 let mut initial = LayerParamsGpu::build(
                     slice,
@@ -229,8 +236,10 @@ impl PassPlan {
                     &vec![0.0; resolved.scalars.len()],
                     &resolved.colors,
                 );
-                if let Some((b, enc)) = pass_image {
-                    initial = initial.with_image(b, enc);
+                if let Some((i, b, enc)) = pass_image {
+                    if images[i].source.has_frame() {
+                        initial = initial.with_image(b, enc);
+                    }
                 }
                 let layer_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(&format!(
@@ -287,6 +296,7 @@ impl PassPlan {
             clear_color: wgpu::Color::BLACK,
             images,
             warnings,
+            clock_sec: 0.0,
             frame_state,
         })
     }
@@ -297,6 +307,7 @@ impl PassPlan {
     /// cycle counters) advances here. The §5.5 override table wins over the
     /// scene-authored value wherever a (binding, param) entry exists.
     pub fn tick(&mut self, gpu: &GpuContext, ctx: &FrameContext, overrides: &ParamOverrides) {
+        self.clock_sec = ctx.elapsed_sec as f64;
         // §5.2 picks — re-roll when a group's cycle counter changes. The
         // choice is stateless (pure hash of binding id + cycle), so there's
         // no RNG to seed or persist.
@@ -387,11 +398,52 @@ impl PassPlan {
                 &pass.colors,
             );
             params.opacity = pass.opacity;
-            if let Some((b, enc)) = pass.image {
-                params = params.with_image(b, enc);
+            // A clip binds only once its first frame has landed (the zeroed
+            // texture would read as a colour cast under HAP Q's YCoCg).
+            if let Some((i, b, enc)) = pass.image {
+                if self.images[i].source.has_frame() {
+                    params = params.with_image(b, enc);
+                }
             }
             gpu.queue
                 .write_buffer(&pass.layer_buffer, 0, bytemuck::bytes_of(&params));
+        }
+    }
+
+    /// C5 clip uploads for a frame this plan renders: each clip a drawing
+    /// pass samples asks its decoder for the playhead frame and encodes at
+    /// most one staging→texture copy. Encode before [`Self::encode_composite`]
+    /// into the same encoder; call [`Self::after_submit`] after the submit.
+    pub fn encode_uploads(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if self.images.is_empty() {
+            return;
+        }
+        let mut drawn = vec![false; self.images.len()];
+        for p in &self.layer_passes {
+            if let Some((i, _, _)) = p.image {
+                drawn[i] |= p.active && p.opacity > 0.0;
+            }
+        }
+        for (img, drawn) in self.images.iter_mut().zip(drawn) {
+            // Muted / picked-out clips don't decode: no want, no upload.
+            if drawn {
+                img.source
+                    .encode_upload(encoder, self.clock_sec * img.rate as f64);
+            }
+        }
+    }
+
+    /// Return consumed clip staging slots to their decoders (re-map). Must
+    /// follow the submit that carried [`Self::encode_uploads`]' copies.
+    pub fn after_submit(&mut self, gpu: &GpuContext) {
+        let mut clips = false;
+        for img in &mut self.images {
+            img.source.after_submit();
+            clips |= img.source.is_clip();
+        }
+        if clips {
+            // Fire completed map callbacks (non-blocking).
+            gpu.device.poll(wgpu::Maintain::Poll);
         }
     }
 
