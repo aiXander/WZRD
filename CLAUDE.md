@@ -16,7 +16,7 @@ WZRD is an additive projection-mapping system: only changing regions get project
 
 - `docs/reference/render-engine.md` — **primary engine context doc**: current system state, contracts (scene.json, layer pack, RPC/telemetry, WGSL), invariants from the 2026-07 performance pass, working agreements, rejected approaches. Read before touching `render-core/` or `wzrd-app/`.
 - `docs/reference/user_design_spec.md` — the product north star; every engine trade-off answers to it.
-- `docs/reference/operator-ui.md` — the `wzrd-app` webview: rooms, the deck/masters/structure rules, layer mixer (`@opacity`/`@mute`/`@solo` overrides), modulation ranges, looks + auto-pilot, browser bridge, traps. Open when touching anything in `wzrd-app/src/`.
+- `docs/reference/operator-ui.md` — the `wzrd-app` webview: rooms, the deck/masters/structure rules, layer mixer (`@opacity`/`@mute`/`@solo` overrides), modulation ranges, looks + auto-pilot, project switcher + engine restart, clip grid, browser bridge (debug shell port), traps. Open when touching anything in `wzrd-app/src/` or the shell's `projects.rs` / `clips.rs` / `devport.rs`.
 - `docs/reference/textureflow.md` — the TextureFlow GPU endpoint on Modal (`deploy/textureflow/`, app `wzrd-textureflow`, env `wzrd`): render contract, pinned stack, weights volume, input traps, GPU-snapshot fast boot, the MCP client, timings. Open when touching `deploy/textureflow/` or the `texture_flow` / `textureflow_warm` MCP tools.
 - `docs/reference/mcp-server.md` — the MCP server: progressive disclosure (instructions → skills → references), the `server.tool()` registration stack, skills format and how they're served (tool / resources / prompts), `tools_config.json` gate, file map, how to add a tool or skill. Open when touching anything in `wzrd_mcp/` or its skills.
 - `docs/reference/hosted-models.md` — which hosted models the MCP's `nano_banana` (Google direct) / `kling_*` (FAL) tools call and why (the 2026-10 blind shootout that put Nano Banana 2.1 in), Google backend traps (Vertex draft images, client config), prices, and how to re-run the comparisons (`scripts/fal_shootout.py`, `scripts/google_nb_probe.py`). Open when touching `wzrd_mcp/google_tools.py` / `fal_tools.py` or swapping a model.
@@ -79,6 +79,9 @@ cd wzrd-app
 pnpm install                  # one-off
 WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json pnpm tauri dev
 # One process, three windows: webview UI + engine output + native preview overlay.
+# WZRD_SCENE is optional: without it the app opens the most recent project; switch
+# projects / restart the engine from the TopBar project menu.
+# Test projects with HAP clips: uv run python wzrd-app/scripts/fixture_projects.py
 # WZRD_DISPLAY=<idx> puts the engine window borderless-fullscreen on that monitor.
 # Runs the engine WITH OSC enabled; audio.* layers stay at defaults until the audio server is up.
 # Add WZRD_AUDIO=1 (or `pnpm tauri dev -- -- --audio`) to auto-start the audio server too —

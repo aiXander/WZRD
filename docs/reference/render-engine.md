@@ -116,10 +116,22 @@ agents.
   `RunEvent::ExitRequested` → `EngineHandle::shutdown()` → stop flag →
   join render thread (Core saves the session and drops the GPU context on
   that thread, *before* tauri destroys windows) → audio child killed.
+- **Re-rooting (gig A1, 2026-10-10):** the engine + preview windows live
+  in `EngineWindows` (created once, event handlers registered once); an
+  `EngineHandle` is one engine on one scene path. A project switch or
+  "Restart engine" is `shutdown()` (the teardown above) + a fresh
+  `start_in_process` on the same windows: ~150–250 ms, measured. This
+  needs every Core-owned listener to release its port on drop —
+  `osc.rs::OscListener` and `ws.rs::ServerHandle` stop + join (WS
+  connections are closed, so remote clients reconnect to the new
+  engine). The shell's tee logger follows the current engine's bus itself
+  (`telemetry::global_bus` is set-once). Project list, settings and the UI
+  side: [operator-ui.md](operator-ui.md) "Projects + engine restart".
 - **Env knobs:** `WZRD_DISPLAY=<idx>` → engine window borderless
-  fullscreen on that monitor (default: decorated window at pack
-  resolution); `WZRD_SPIKE=panic|device_loss` → deliberate render-thread
-  crash ~5 s after launch (test hook, never in a show).
+  fullscreen on that monitor (default: decorated window sized to the first
+  pack that boots on it); `WZRD_SPIKE=panic|device_loss` → deliberate
+  render-thread crash ~5 s after launch, once per process (test hook,
+  never in a show).
 - **Known warts:** (1) after an engine crash, SIGTERM is a no-op (the
   signal-hook flag's poller is dead) — quit via Cmd+Q/window close, which
   still works; (2) the `NativePreview` placeholder div assumes a

@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: agreed build plan, nothing built yet.** Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a landed. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -250,36 +250,35 @@ it, or every big TAKE reverts itself. **Gate:** a deliberately slow shader
 promoted to live reverts within ~0.5 s; a one-hour set of normal TAKEs
 triggers zero reverts.
 
-### A1 — Project switcher + "restart engine" (D13)
+### A1 — Project switcher + "restart engine" (D13) — done 2026-10-10
 
-APP · needs nothing (P4 makes new projects openable) ·
-`src-tauri/src/engine.rs`, `lib.rs`, TopBar. Tear down and respawn the
-render thread on a new scene path (same teardown as
-`RunEvent::ExitRequested`); the webview re-hydrates from scratch (store
-reset, `lockLegs`). The list = folders under the projects root
-(`WZRD_PROJECTS_ROOT`, default `<repo>/projects`) that contain a
-`scene.json`. Recent list in a per-machine `settings.json` in the Tauri app
-config dir (MIDI's machine default goes there later). **Gate:** switch
-between two projects mid-session, each comes back with its own alignment,
-masters and looks; engine crash → one click restores.
+Shipped: TopBar project menu + "Restart engine" (re-roots the in-process
+engine on the same windows, ~150–250 ms; per-machine `settings.json`
+recents; boot falls back to the most recent project). Gate passed in the
+browser seat: fixture-a ⇄ fixture-b each came back with its own masters,
+alignment and looks; a `WZRD_SPIKE=panic` crash → one click restored.
+Needed a small render-core fix (OSC/WS listeners release their ports on
+drop, `osc.rs`/`ws.rs`). Done — see
+[../reference/operator-ui.md](../reference/operator-ui.md) "Projects +
+engine restart" and [../reference/render-engine.md](../reference/render-engine.md) §1b.
 
-### A2 — Clip grid (D12)
+### A2 — Clip grid (D12) — built 2026-10-10, end-to-end gate open
 
-APP · needs C3/C5 to start, E1 + P5 to finish · new grid components,
-`src-tauri/src/rpc.rs` + the dev file middleware (browser bridge twin).
-A `clips_list` command returns the project's HAP clips with sidecar + thumb
-path; new files appear without a reload (poll or watch). Rows = the pack's
-regions (label + mask glyph from `state/masks.ts`) plus "unassigned"; slots
-newest first, placed by the sidecar's `region`; drag re-files a clip onto
-another row. Clicking a slot commits through `sceneCommit.ts` → design: set
-`image.clip` on the region's first binding whose effect declares an `image`
-input, else create `clip_<region>` with `videoClip` (C5). Active slot per
-row highlighted per leg (design vs live colour). Fresh clips flagged **NEW**
-until first clicked (in memory), plus a **"new from agent"** strip (also in
-Perform). Full grid in Prepare, compact one under the layer stack in
-Perform. Looks + auto-pilot need no change (a clip is just an effect input
-inside a look). **Gate:** agent render → on the wall in < 2 min, hands on
-design only; swapping one region's clip in Perform is one click + T.
+Shipped: region × clip-slot grid (full in Prepare's drawer, compact in
+Perform), click = bind on DESIGN via `sceneCommit` per C5, drag re-file
+(app-owned `clipgrid.json`), NEW flags + "new from agent" lane, 2 s
+polling. Verified against fixture HAP clips (C2/C3) on the engine working
+tree: a dropped clip showed as NEW within one poll, one click + T put it on
+the wall inside its region; swapping a region's clip in Perform is one
+click + T. See [../reference/operator-ui.md](../reference/operator-ui.md)
+"Clip grid".
+
+**Still open — the real end-to-end gate:** agent render → on the wall in
+< 2 min, hands on design only. Run it once **E1 b/c are committed** (HAP
+decode + region placement; uncommitted on 2026-10-10) and **P5** lands
+(`to_hap` + thumbnails written by the MCP): one `texture_flow(region=…)`
+render from an external Claude session, then click + T. Fixtures:
+`uv run python wzrd-app/scripts/fixture_projects.py`.
 
 ### F1 — Seed clip effects (D14)
 

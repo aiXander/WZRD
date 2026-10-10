@@ -36,15 +36,80 @@ Every scalar now uses the effect descriptor's `min`/`max` (`LayerParams.tsx
 
 | Room | What it's for | Key files |
 |---|---|---|
-| **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both), inspector (target, effect cards, dials), code drawer (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `SurfaceMap.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
+| **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both), inspector (target, effect cards, dials), bottom drawer = **clip grid** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
 | **Align** | §2.8 warp; side panel with the "projector bumped?" recovery hint, test patterns, background (lit-background warning). | `Align.tsx`, `WarpCanvas.tsx`, `state/alignment.ts` |
-| **Perform** | The booth: monitor (native preview, deck-coloured frame, PREVIEW/PROGRAM label), looks bank + auto-pilot, layer stack (mixer), selected layer's dials, deck panel (switch, cue monitor, TAKE/CUT/PULL, FADE, BAR/NOW), masters + BLACK/FLASH/FREEZE + room audio. | `Perform.tsx`, `DeckPanel.tsx`, `LayerStack.tsx`, `LayerParams.tsx`, `LooksBank.tsx`, `MastersPanel.tsx` |
+| **Perform** | The booth: monitor (native preview, deck-coloured frame, PREVIEW/PROGRAM label), looks bank + auto-pilot, layer stack (mixer) with the compact clip grid under it, selected layer's dials, deck panel (switch, cue monitor, TAKE/CUT/PULL, FADE, BAR/NOW), masters + BLACK/FLASH/FREEZE + room audio. | `Perform.tsx`, `DeckPanel.tsx`, `LayerStack.tsx`, `ClipGrid.tsx compact`, `LayerParams.tsx`, `LooksBank.tsx`, `MastersPanel.tsx` |
 | **Debug** | Engine internals (unchanged content, restyled). | `Debug.tsx` |
 
-`TopBar.tsx` is shared: rooms, compact DESIGN|LIVE + TAKE outside Perform,
+`TopBar.tsx` is shared: project menu (`ProjectMenu.tsx`), rooms, compact DESIGN|LIVE + TAKE outside Perform,
 tempo (beat lamps from the `transport` channel, BPM double-click/scroll,
-TAP, `1` = bar line here), health (Audio / FPS / reload verdict / Engine),
-ADOPT for agent edits, help overlay (`?`), toasts.
+TAP, `1` = bar line here), health (Audio / FPS / reload verdict / Engine —
+a restart button while the engine is down), ADOPT for agent edits, help
+overlay (`?`), toasts. While the engine is down a red banner under the bar
+(`EngineDownBanner`) shows the reason and one "Restart engine" button.
+
+## Projects + engine restart (gig A1)
+
+A **project** is a folder with a `scene.json` under the projects root
+(`WZRD_PROJECTS_ROOT`, else `projects_root` in settings, else
+`<repo>/projects` — the MCP's default). The engine's scene dir is fixed at
+boot, so **opening a project re-roots the in-process engine** (shutdown +
+boot on the same windows, ~150–250 ms; host side in
+[render-engine.md](render-engine.md) §1b "Re-rooting"). Each project brings
+its own pack, effects, looks, `alignment.json` and `session.json`
+(masters, knobs) back. "Restart engine" is the same move on the current
+scene — the crash recovery.
+
+- Shell: `src-tauri/src/projects.rs` (`projects_list`, `project_current`,
+  `project_open`, `engine_restart`). A failed open re-opens the previous
+  project and returns the error; a failed boot leaves the shell up with
+  the reason (`engine_status.last_error`) instead of dying.
+- **Per-machine `settings.json`** in the Tauri app config dir
+  (`~/Library/Application Support/build.gigabrain.wzrd/`): `recent`
+  (scene paths + `opened_ms`), optional `projects_root`; unknown keys are
+  preserved (MIDI's machine default lands here later). With no
+  `WZRD_SCENE` / `--scene` the app boots the most recent project — a
+  Finder launch works.
+- Webview: opening takes two clicks (arm → "OPEN", the wall goes dark for
+  a moment). `actions.ts::openProject` first **settles** in-flight scene
+  commits into the old project (`sceneCommit.ts::settleCommits`); every
+  hydrate then starts from `store.resetProject()` + `dropPendingCommits()`
+  + `resetActionState()`, so nothing of the previous engine leaks in.
+  Hydrate fires on the engine coming back (status edge) and on the
+  shell's `engine:project` event, deduped (`App.tsx::rehydrate`).
+- Test fixtures: `wzrd-app/scripts/fixture_projects.py` builds
+  `projects/fixture-a` + `fixture-b` (example pack, real HAP clips with
+  C2/C3 sidecars + thumbs); `--add-clip <project> --region <id>` simulates
+  an agent render landing.
+
+## Clip grid (gig A2)
+
+Resolume's layer rows, but each row is a **region** of the pack (mask
+glyph + name) plus "Unassigned". Slots are the project's HAP clips
+(gig plan contract C3: `generated/<stem>.mov` + `<stem>.thumb.jpg`),
+newest first, placed by the C2 provenance sidecar's `region`.
+
+- **Click a slot = play that clip on that region in DESIGN**
+  (`state/clips.ts::bindClip`, through `commitSceneMutation`): set
+  `params.image.clip` (C5) on the first binding whose `select.id` is that
+  region and whose effect declares an `image` input (keeps its
+  placement/rate), else append `clip_<region>` with the built-in
+  `videoClip`. TAKE as usual — in Perform a swap is one click + T.
+- Design's clip per region gets a design-colour ring, live's a red top
+  bar (`clipsByRegion` over both legs' scene JSON; only exact `select.id`
+  bindings count — a tag/group binding isn't "this region's clip").
+- **Drag** a slot onto another row to re-file it. The filing is app state
+  in `<project>/clipgrid.json` (`{"schema":1,"rows":{clip: region|null}}`);
+  the sidecar is never touched — it keeps saying what the clip was made
+  for. An unassigned clip can't be clicked until it's filed.
+- **NEW** = arrived after the grid's first load for this project (in
+  memory, cleared on click). NEW clips also line up in a "new from agent"
+  lane on top of the grid (both rooms).
+- Shell: `src-tauri/src/clips.rs` — `clips_list` (dir scan + sidecars,
+  incl. the source mp4's sidecar via `parent` for prompt/tool/cost, plus
+  the filing map), `clip_thumb` (base64; the webview has no asset
+  protocol), `clip_file`. Polled every 2 s from `App` (`useClipsPoller`),
+  so NEW is right in every room.
 
 ## Mechanisms worth knowing
 
@@ -89,11 +154,19 @@ ADOPT for agent edits, help overlay (`?`), toasts.
 The same Vite build runs in a plain browser: `src/api/transport.ts` picks
 Tauri `invoke`/`listen` inside the shell, else `wsBridge.ts` — JSON-RPC to
 the engine's WS (`ws://127.0.0.1:9123`, `?ws=` overrides; declares
-`hello {actor:"ui"}`) plus a dev-only Vite middleware (`vite.config.ts`,
-`/__wzrd/<cmd>`) for the shell's file commands, bound to `WZRD_SCENE`. Use
-it to drive and screenshot the UI with browser tooling while `pnpm tauri
-dev` runs. Two seats are independent: edits from one aren't mirrored into
-the other's store (both declare actor `ui`).
+`hello {actor:"ui"}`) plus, for everything the shell does itself (files,
+looks, projects, clips, engine restart), the shell's **debug-build-only
+HTTP twin** `src-tauri/src/devport.rs` on `127.0.0.1:9124`
+(`WZRD_DEVPORT`), reached through Vite's `/__shell` proxy. It calls the
+same Rust command functions on the main thread, so a browser seat follows
+project switches (the old Vite file middleware was pinned to
+`WZRD_SCENE`). A switch shows up in the browser as an engine-socket
+reconnect → hydrate. Use it to drive and screenshot the UI with browser
+tooling while `pnpm tauri dev` runs. Two seats are independent: edits from
+one aren't mirrored into the other's store (both declare actor `ui`).
+Browser-tooling trap: CDP's synthetic mouse drag doesn't fire HTML5
+drag-and-drop — exercise the clip grid's drop handlers with dispatched
+`DragEvent`s.
 
 ## Traps
 
@@ -105,6 +178,10 @@ the other's store (both declare actor `ui`).
   editor offline — venues are often offline.
 - `pnpm add` under a running dev server breaks Vite's resolved paths;
   restart `pnpm tauri dev`.
+- A Rust edit makes `tauri dev` restart the app before the old process
+  has let go of its ports: the dev port retries its bind, but the engine
+  WS (9123) can lose the race — the app then comes up with the engine
+  down and the banner's "Restart engine" fixes it.
 - Colour defaults from `effect.describe` arrive as float arrays — convert
   with `LayerParams.tsx::toHex` before writing a scene.
 
