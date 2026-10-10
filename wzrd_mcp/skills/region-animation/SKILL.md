@@ -16,11 +16,12 @@ metadata:
    windows as separate regions, the facade as one more"). `view_media` it next
    to the surface: borders must follow real edges.
 3. **Regions** — `extract_color_regions(image=<map>, surface_image=<surface>)`.
-   Each region returns `region_mask`, `region_surface_image`, `source_box`,
+   Each region returns `region_mask` (full canvas), `region_crop_mask` and
+   `region_surface_image` (cut to the region's box), `source_box`,
    `aspect_ratio`. Too many tiny regions → raise `min_area_fraction` or lower
    `max_colors`; similar colors merged → lower `delta_e_threshold`.
 4. **Per-region content** (load skill `textureflow`) — for each region:
-   `texture_flow(images=<style images>, diffusion_mask=<region_mask>,
+   `texture_flow(images=<style images>, diffusion_mask=<region_crop_mask>,
    width/height matching the region's aspect_ratio)`. Same style images across
    regions = coherence; different ones = contrast. Run regions in parallel (≤6).
 5. **Back on the canvas** — `reproject_video(video, **source_box)` per region.

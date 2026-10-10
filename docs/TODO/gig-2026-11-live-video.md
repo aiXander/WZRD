@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a + E1b landed, P1 done. Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a + E1b landed, P1 + P4 done. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -88,10 +88,9 @@ wide, middle frame). **The MCP writes the thumbnail at transcode time** — the
 app has no MCP client before the toolbox, so it never generates one; a clip
 without a thumb shows a placeholder.
 
-**C4 — `source_box` in `pack.json`** (owner P4, read by E1): optional
-per-layer `"source_box": [x0, y0, x1, y1]`, pixel space of the masks,
-max-exclusive — the same convention as the existing `bbox`. Absent → the
-engine falls back to `bbox`.
+**C4 — `source_box` in `pack.json`** — landed with P4: optional per-layer
+`[x0, y0, x1, y1]`, pack pixels, max-exclusive like `bbox`, may extend past
+the canvas. Contract now in [render-engine.md](../reference/render-engine.md) §2.2.
 
 **C5 — clip binding in `scene.json`** (owner E1, written by A2 and the agent):
 
@@ -183,19 +182,16 @@ No `list_assets` / `mark_asset` yet. **Gate:** a TextureFlow render with
 `region=` produces a sidecar naming region + box; a call past the cap is
 refused with the running total.
 
-### P4 — `source_box` in the pack + starter `scene.json`
+### P4 — `source_box` in the pack + starter `scene.json` — done 2026-10-10
 
-PY · needs nothing · `wzrd/layerpack.py`, `build_layerpack` in
-`wzrd_mcp/tools.py`. `build_layerpack` reads `islands.json` (written next to
-the masks by `extract_color_regions`) and writes each layer's padded box as
-C4. If the project has no `scene.json`, write a starter one (`pack` →
-`packs/<pack>`, `transport.bpm` 120, empty `bindings`/`post`) — never
-overwrite an existing one. Reason: the engine refuses to boot without a
-scene + pack (`Core::new`), and nothing else writes a scene offline, so a
-fresh venue project could not be opened by the switcher (absorbs the old
-backlog `build_scene` item). **Gate:** fresh project → seg map → regions →
-`build_layerpack` → `cargo run -- --scene <project>/scene.json` boots black
-with the pack loaded; every layer's `source_box` matches `islands.json`.
+`build_layerpack` carries each region's padded box from `islands.json` into
+`pack.json` (C4) and writes a starter `scene.json` when the project has
+none. Fixed on the way: `extract_color_regions`' `region_mask` pointed at
+the box crop (packs stretched it over the canvas); it is now the full mask,
+the crop is `region_crop_mask`. Gate: fresh canvas project → regions → pack;
+all four boxes equal `islands.json`; the HEAD engine boots it (`4 layers @
+1376x768`, 0 passes). Done — see [mcp-server.md](../reference/mcp-server.md)
+"The project folder and its locked canvas".
 
 ### P5 — Clip pipeline: `to_hap`, thumbnails, `extract_frames`
 

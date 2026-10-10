@@ -135,6 +135,17 @@ never carries them. The parked Modal image mounts `tools_config.json` and
   `NANO_BANANA_SIZES`), and the `region_surface_image` crop has the box's
   aspect. A story or texture for one region (a tall pillar) is rendered from
   that crop with `aspect_ratio="auto"` → it fits its box back within ~1 px.
+- **Fresh projects boot.** The engine refuses to start without a scene +
+  pack, so `build_layerpack` writes a starter `<project>/scene.json`
+  (`pack` → this pack, bpm 120, no bindings) when none exists — opened with
+  `"x"`, never overwriting one. It also carries each mask's `source_box`
+  (from the `islands.json` beside it) into `pack.json` (contract:
+  [render-engine.md](render-engine.md) §2.2).
+- **`extract_color_regions` outputs:** `region_mask` is the full-canvas mask
+  (what `build_layerpack` takes); `region_crop_mask` / `region_surface_image`
+  are cut to the region's box (TextureFlow `diffusion_mask`, Nano Banana
+  reference). Before 2026-10-10 `region_mask` pointed at the crop, so packs
+  built from it stretched crops over the whole canvas.
 
 ## File map
 

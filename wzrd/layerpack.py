@@ -36,7 +36,8 @@ Tags file schema (all keys optional except per-mask ``id``):
           "label": "trunk",
           "tags": ["tree", "structure"],
           "parent": null,
-          "z": 1
+          "z": 1,
+          "source_box": [x0, y0, x1, y1]   // in this mask file's pixels
         },
         ...
       },
@@ -47,6 +48,14 @@ Tags file schema (all keys optional except per-mask ``id``):
 
 If a mask file isn't named in ``layers``, its ``id`` defaults to its stem
 and it gets z-order = file order.
+
+``source_box`` (gig contract C4) is the region's padded box — the frame its
+clips are rendered for and placed into. It comes from the tags entry, else
+from an ``islands.json`` next to the masks (``extract_color_regions``
+output). It goes through the same mapping as its mask (uncrop into the
+surface frame, scale to projector resolution) and is written per layer as
+``[x0, y0, x1, y1]``, max-exclusive like ``bbox``. It may extend past the
+canvas: the padding is real clip frame that simply falls off-surface.
 """
 
 from __future__ import annotations
@@ -61,7 +70,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import cv2
 import numpy as np
 
-from .utils import uncrop_array_to_size
+from .utils import uncrop_array_to_size, uncrop_box
 
 PathLike = Union[str, Path]
 
@@ -74,6 +83,38 @@ MAX_LAYERS = 256  # D4: Texture2DArray hard cap
 # ──────────────────────────────────────────────────────────────────────────────
 
 _MASK_EXTS = {".png", ".webp", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
+def islands_source_boxes(masks_dir: Path) -> Dict[str, List[int]]:
+    """``region_mask`` filename -> padded ``source_box`` as [x0, y0, x1, y1],
+    from an ``islands.json`` in *masks_dir* (empty when there is none)."""
+    meta_path = Path(masks_dir) / "islands.json"
+    if not meta_path.is_file():
+        return {}
+    with open(meta_path) as f:
+        meta = json.load(f)
+    boxes: Dict[str, List[int]] = {}
+    for region in meta.get("regions", []):
+        box = region.get("source_box")
+        if region.get("region_mask") and box:
+            x, y = int(box["x"]), int(box["y"])
+            boxes[region["region_mask"]] = [x, y, x + int(box["width"]), y + int(box["height"])]
+    return boxes
+
+
+def _map_box(
+    box: List[float],
+    mask_size: Tuple[int, int],
+    frame: Optional[Tuple[int, int]],
+    target: Tuple[int, int],
+) -> List[int]:
+    """A box in mask pixels -> projector pixels, via the exact mask mapping."""
+    size = mask_size
+    if frame is not None and mask_size != frame:
+        box, size = uncrop_box(box, mask_size, frame), frame
+    sx, sy = target[0] / size[0], target[1] / size[1]
+    x0, y0, x1, y1 = box
+    return [round(x0 * sx), round(y0 * sy), round(x1 * sx), round(y1 * sy)]
 
 
 def _discover_masks(masks_dir: Path) -> List[Path]:
@@ -352,6 +393,7 @@ def build_layerpack(
     if not mask_files:
         raise ValueError(f"no mask files found in {masks_dir}")
 
+    island_boxes = islands_source_boxes(masks_dir)
     include_bg = include_background or bool(tags_data.get("background", False))
     layers: List[Dict[str, Any]] = []
     seen_ids: Dict[str, Path] = {}
@@ -365,7 +407,8 @@ def build_layerpack(
             )
 
         raw = _load_grayscale(mask_path)
-        mask = _normalise_mask(raw, pw, ph, feather_px=feather_px, surface_size=mask_frame or surface_size)
+        frame = mask_frame or surface_size
+        mask = _normalise_mask(raw, pw, ph, feather_px=feather_px, surface_size=frame)
         bbox, centroid, area_px = _bbox_and_centroid(mask)
 
         meta = _resolve_layer_meta(mask_path, z_default=slice_index, tags_layers=tags_layers)
@@ -384,7 +427,7 @@ def build_layerpack(
         if union is not None:
             union += mask  # uint16 saturation-safe accumulation
 
-        layers.append({
+        layer: Dict[str, Any] = {
             "id": layer_id,
             "mask": f"masks/{out_name}",
             "label": meta["label"],
@@ -394,7 +437,11 @@ def build_layerpack(
             "area_px": area_px,
             "parent": meta["parent"],
             "z": int(meta["z"]),
-        })
+        }
+        box = meta.get("source_box") or island_boxes.get(mask_path.name)
+        if box:
+            layer["source_box"] = _map_box(box, (raw.shape[1], raw.shape[0]), frame, (pw, ph))
+        layers.append(layer)
         slice_index += 1
 
     if include_bg and union is not None:

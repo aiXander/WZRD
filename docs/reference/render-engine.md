@@ -279,6 +279,16 @@ Authored by `python -m wzrd.layerpack`. Layer `id`/`tags`/`group` are
 semantic and stable across re-segmentation; mask paths are not. Loader
 refuses unknown major versions.
 
+**`source_box` (gig contract C4, landed 2026-10-10).** Optional per layer:
+`"source_box": [x0, y0, x1, y1]`, pack pixel space, max-exclusive like
+`bbox` — the region's box **padded to a Nano Banana native aspect** by
+`extract_color_regions`, i.e. the frame that region's clips are rendered for
+(from its `region_surface_image` crop). `build_layerpack` copies it from the
+`islands.json` next to the masks, through the same uncrop/scale mapping as
+the mask. It **may extend past the canvas** (negative or > size): the
+padding is real clip frame that falls off-surface, not an error. Absent →
+region placement falls back to `bbox`; empty/inverted → warned, `bbox`.
+
 **Requirement this puts on the authoring tool (v1 §4.1):** stable ids are
 only real if `wzrd.layerpack` can *re-import a new SAM2 segmentation onto an
 existing pack's identity table* — overlap-match new blobs to existing ids,

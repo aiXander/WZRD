@@ -337,7 +337,10 @@ async def extract_color_regions(
     """Split a flat-color segmentation map into region masks ("islands"), each with its bounding box on the canvas.
 
     Input is usually a solid-color segmentation map of the surface (black =
-    background). A map at another size than the surface (or the project
+    background). Per region: `region_mask` (full canvas — for
+    build_layerpack), `region_crop_mask` + `region_surface_image` (cut to the
+    region's box — the diffusion_mask / reference for content made for that
+    region), `source_box`, `aspect_ratio`. A map at another size than the surface (or the project
     canvas) is uncropped into it — uniform scale, never stretched. Each
     region's `source_box` is its box on the canvas, padded to a Nano Banana
     native aspect: render that region's keyframes/videos from its
@@ -380,8 +383,11 @@ async def extract_color_regions(
             entry["aspect_ratio"] = r["standard_aspect"]
         elif r.get("source_box"):
             entry["aspect_ratio"] = f"{r['source_box']['width'] / r['source_box']['height']:.3f}"
+        # region_mask = the full-canvas mask (build_layerpack); region_crop_mask =
+        # the same region cut to its source_box (texture_flow diffusion_mask).
+        entry["region_mask"] = str(out / r["region_mask"])
         if "crop_filename" in r:
-            entry["region_mask"] = str(out / r["crop_filename"])
+            entry["region_crop_mask"] = str(out / r["crop_filename"])
         if "surface_filename" in r:
             entry["region_surface_image"] = str(out / r["surface_filename"])
         published.append(entry)
@@ -636,7 +642,10 @@ async def build_layerpack(
 
     Each mask becomes one addressable layer. Give stable `mask_ids` so engine
     bindings keep targeting the same layer across re-shoots/re-segmentations.
-    In a project with a canvas the pack is authored at the canvas (the engine
+    Masks straight from extract_color_regions carry their region's padded
+    `source_box` into the pack (where the engine places that region's clips).
+    If the project has no scene.json yet, a starter one pointing at this pack
+    is written (an existing one is never touched). In a project with a canvas the pack is authored at the canvas (the engine
     scales it to the projector): leave projector_width/height unset, and the
     surface_image must be canvas-sized.
 
@@ -652,7 +661,7 @@ async def build_layerpack(
         include_background: Also generate `000_background.png`, the complement of all masks.
         pack_name: Folder name under packs/; default timestamped.
     """
-    from wzrd.layerpack import build_layerpack as _build
+    from wzrd.layerpack import build_layerpack as _build, islands_source_boxes
 
     if mask_ids and len(mask_ids) != len(masks):
         raise ToolError("mask_ids length must match masks length")
@@ -686,6 +695,20 @@ async def build_layerpack(
             for i, stem in enumerate(mask_ids)
         }
 
+    # C4: each mask's padded region box, from the islands.json beside it
+    # (staging drops the folder, so look it up here). Caller tags win.
+    layers = dict(rekeyed.get("layers") or {})
+    boxes: dict[Path, dict[str, list[int]]] = {}
+    for i, src in enumerate(resolved_masks):
+        folder = Path(src).parent
+        if folder not in boxes:
+            boxes[folder] = islands_source_boxes(folder)
+        box = boxes[folder].get(Path(src).name)
+        if box and "source_box" not in layers.get(ordered[i], {}):
+            layers[ordered[i]] = {**layers.get(ordered[i], {}), "source_box": box}
+    if layers:
+        rekeyed["layers"] = layers
+
     projector_resolution = size or (
         (projector_width, projector_height) if projector_width > 0 and projector_height > 0 else None
     )
@@ -699,13 +722,44 @@ async def build_layerpack(
         projector_resolution=projector_resolution, source_capture=src_path, canny=cny_path,
         feather_px=feather_px, include_background=include_background, mask_frame=size,
     )
-    return {
+    scene_json, created = _starter_scene(pack_dir)
+    result = {
         "scene": scene,
         "pack_dir": str(pack_dir),
         "pack_json": str(pack_dir / "pack.json"),
         "layer_count": len(scene["layers"]),
         "projector_resolution": scene["projector_resolution"],
+        "scene_json": scene_json,
+        "scene_json_created": created,
     }
+    if not created:
+        result["note"] = "scene.json already existed and was left untouched — it may point at another pack"
+    return result
+
+
+def _starter_scene(pack_dir: Path) -> tuple[str, bool]:
+    """Write `<project>/scene.json` pointing at *pack_dir* unless one exists.
+
+    The engine refuses to boot without a scene + pack and nothing else writes
+    a scene offline, so without this a fresh project can't be opened.
+    """
+    import json
+
+    path = project.project_dir() / "scene.json"
+    starter = {
+        "version": 1,
+        "pack": pack_dir.relative_to(project.project_dir()).as_posix(),
+        "transport": {"bpm": 120},
+        "bindings": [],
+        "post": [],
+    }
+    try:
+        with open(path, "x") as f:  # "x": never overwrite, even in a race
+            json.dump(starter, f, indent=2)
+            f.write("\n")
+    except FileExistsError:
+        return str(path), False
+    return str(path), True
 
 
 # ---------------------------------------------------------------------------
