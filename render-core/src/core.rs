@@ -42,6 +42,7 @@ use crate::rpc::{
     self, parking_lot_lite::SwapValue, Actor, EngineCommand, PackInfo, PackInfoCell, RpcContext,
 };
 use crate::scene::{resolve_selector, SceneFile};
+use crate::perf::{self, Perf, Stage};
 use crate::session::{self, SessionFile};
 use crate::telemetry::{
     AudioSnapshot, Bus, ChangeLog, Connectivity, ConnectivityCell, DeckSnapshot, DriverSnapshot,
@@ -268,6 +269,11 @@ pub struct Core {
     /// disables the cap (`--frame-cap-hz 0`).
     frame_budget: Option<Duration>,
     last_redraw_request: Option<Instant>,
+
+    /// Perf-monitor PM1 — per-stage frame profiler (`perf` channel). Every
+    /// stage of the per-frame host contract is a span into it; see
+    /// `perf.rs` for the hot-path rules.
+    perf: Perf,
 }
 
 impl Core {
@@ -446,6 +452,10 @@ impl Core {
         // consumers, the channel just stays empty.
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let changes = Arc::new(ChangeLog::new());
+        let perf = Perf::new(cli.perf == crate::PerfMode::On);
+        if !perf.on() {
+            log::info!("perf monitor off (--perf off)");
+        }
         let rpc_ctx = RpcContext {
             pack: Arc::new(PackInfoCell::new(PackInfo::from_pack(&pack))),
             changes: Arc::clone(&changes),
@@ -464,6 +474,7 @@ impl Core {
             session_dirty: Arc::clone(&session_dirty),
             probe_thresholds: Arc::clone(&probe_thresholds),
             alignment: Arc::clone(&alignment),
+            perf: Arc::clone(perf.shared()),
         };
         let ws_handle = match cli.ws_addr {
             Some(addr) => Some(
@@ -547,6 +558,7 @@ impl Core {
             last_audio_emit: Instant::now(),
             frame_budget,
             last_redraw_request: None,
+            perf,
         })
     }
 
@@ -1936,7 +1948,9 @@ impl Core {
     /// own audioListen — shared raw audio signal). Both tick every frame;
     /// rendering the design composite is demand-gated separately.
     fn tick_legs(&mut self) {
+        self.perf.before_tick(self.audio_state.packet_age_ms());
         let Self {
+            perf,
             gpu,
             plan,
             design,
@@ -1952,10 +1966,12 @@ impl Core {
             ..
         } = self;
         let Some(gpu) = gpu.as_ref() else { return };
+        let span = perf.begin();
         if let Some(plan) = plan.as_mut() {
             let ctx = transport.frame_context(audio_state, sliders, masters.audio_listen());
             plan.tick(gpu, &ctx, overrides);
         }
+        let span = perf.lap(Stage::TickLive, span);
         if let Some(d) = design.as_mut() {
             if let Some(p) = d.plan.as_mut() {
                 let ctx = design_transport.frame_context(
@@ -1966,6 +1982,7 @@ impl Core {
                 p.tick(gpu, &ctx, design_overrides);
             }
         }
+        perf.end(Stage::TickDesign, span);
     }
 
     /// Hand both legs' consumed clip staging slots back to their decoders.
@@ -1987,11 +2004,13 @@ impl Core {
         // §5.4 speed master bends the musical clock (integrated, never a
         // scaled absolute time). §5.6: each leg's clock bends under its own
         // speed master — design at 4× never touches the show.
+        let span = self.perf.enter();
         self.transport.step(self.masters.speed());
         if self.two_leg {
             self.design_transport.step(self.design_masters.speed());
         }
         self.update_promote();
+        self.perf.end(Stage::TickLive, span);
         if self.gpu.is_none() || self.plan.is_none() {
             return Ok(());
         }
@@ -2000,7 +2019,12 @@ impl Core {
 
         let gpu = self.gpu.as_ref().expect("checked above");
         let plan = self.plan.as_mut().expect("checked above");
-        let frame = gpu.surface.get_current_texture()?;
+        // `acquire` is vsync backpressure, timed even when it errors so a
+        // `SurfaceError` frame's wait still lands somewhere.
+        let span = self.perf.begin();
+        let acquired = gpu.surface.get_current_texture();
+        let span = self.perf.lap(Stage::Acquire, span);
+        let frame = acquired?;
         let swap_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2036,17 +2060,27 @@ impl Core {
         //    presented frame so a master move lands next frame.
         gpu.write_final_pass(&self.final_pass_uniforms());
         gpu.encode_final(&mut encoder, &swap_view);
-        gpu.queue.submit(std::iter::once(encoder.finish()));
+        let commands = encoder.finish();
+        let span = self.perf.lap(Stage::Encode, span);
+        gpu.queue.submit(std::iter::once(commands));
+        let span = self.perf.lap(Stage::Submit, span);
         frame.present();
+        let span = self.perf.lap(Stage::Present, span);
+        self.perf.after_submit();
         self.after_submit_legs();
+        let span = self.perf.lap(Stage::Submit, span);
 
         self.present_preview();
+        let span = self.perf.lap(Stage::PreviewPresent, span);
         let counts = self.frame_counts();
         self.fps.mark(&self.bus, counts, true);
+        let span = self.perf.lap(Stage::Telemetry, span);
         // §6.4 demand-gated capture: the JPEG readback path only runs
         // when someone actually subscribes to the `preview` channel
         // (remote WS clients; the webview's Prepare canvas underlay).
         self.capture_preview_jpeg();
+        self.perf.end(Stage::PreviewJpeg, span);
+        self.perf.end_frame(true, self.changes.rev());
         Ok(())
     }
 
@@ -2056,16 +2090,19 @@ impl Core {
     /// pass runs here, so the brightness/saturation masters don't apply —
     /// by design, the preview shows the un-mastered composite.
     pub fn render_offscreen_frame(&mut self) {
+        let span = self.perf.enter();
         self.transport.step(self.masters.speed());
         if self.two_leg {
             self.design_transport.step(self.design_masters.speed());
         }
         self.update_promote();
+        self.perf.end(Stage::TickLive, span);
         if self.gpu.is_none() || self.plan.is_none() {
             return;
         }
         self.tick_legs();
         let design_demand = self.design_demand();
+        let span = self.perf.begin();
         {
             let gpu = self.gpu.as_ref().expect("checked above");
             let plan = self.plan.as_mut().expect("checked above");
@@ -2084,15 +2121,25 @@ impl Core {
                     }
                 }
             }
-            gpu.queue.submit(std::iter::once(encoder.finish()));
+            let commands = encoder.finish();
+            let span = self.perf.lap(Stage::Encode, span);
+            gpu.queue.submit(std::iter::once(commands));
+            self.perf.end(Stage::Submit, span);
         }
+        let span = self.perf.begin();
+        self.perf.after_submit();
         self.after_submit_legs();
+        let span = self.perf.lap(Stage::Submit, span);
         // The native preview keeps presenting while the projector window is
         // buried — that's the whole point of the occluded path.
         self.present_preview();
+        let span = self.perf.lap(Stage::PreviewPresent, span);
         let counts = self.frame_counts();
         self.fps.mark(&self.bus, counts, false);
+        let span = self.perf.lap(Stage::Telemetry, span);
         self.capture_preview_jpeg();
+        self.perf.end(Stage::PreviewJpeg, span);
+        self.perf.end_frame(false, self.changes.rev());
     }
 
     /// Periodic telemetry the UI depends on: `drivers` (~10 Hz), `audio`
@@ -2201,10 +2248,13 @@ impl Core {
     pub fn poll_inbound(&mut self) {
         // Drain IPC commands first — they can race the file watcher on the
         // same files but are individually cheaper.
+        let span = self.perf.enter();
         let queue: Vec<_> = self.cmd_rx.try_iter().collect();
         for cmd in queue {
+            self.perf.note_cmd(cmd.cmd.kind(), cmd.queued_at.elapsed());
             rpc::handle(self, cmd);
         }
+        let span = self.perf.lap(Stage::InboundCmds, span);
 
         let changes = self
             .watcher
@@ -2212,15 +2262,21 @@ impl Core {
             .map(|w| w.poll())
             .unwrap_or_default();
         for change in changes {
+            self.perf.note_reload();
             match change {
                 ChangeKind::Effects => self.reload_effects(),
                 ChangeKind::Scene => self.reload_scene(),
             }
         }
+        let span = self.perf.lap(Stage::InboundWatch, span);
 
         // §5.6 pre-flight probe: run a few ms of probe frames between live
         // frames while an apply is waiting on its verdict.
+        if self.pending_apply.is_some() {
+            self.perf.note_probe_step();
+        }
         self.step_probe();
+        let span = self.perf.lap(Stage::InboundProbe, span);
 
         // §5.6 design-leg autosave: debounce-write the draft ~2 s after the
         // last applied edit so a crash mid-design can't eat it.
@@ -2237,9 +2293,13 @@ impl Core {
             self.last_audio_pill = Instant::now();
         }
 
+        let span = self.perf.lap(Stage::InboundMisc, span);
+
         // Live-value channels the operator UI renders (driver rack, audio
         // strip, connectivity panel).
         self.emit_periodic_telemetry(heartbeat);
+        self.emit_perf();
+        let span = self.perf.lap(Stage::Telemetry, span);
 
         // §5.3 session sidecar — debounced persist of operator state
         // (masters, knobs, overrides). One write ~1.5 s after the last
@@ -2273,6 +2333,47 @@ impl Core {
             }
             self.exit_requested = true;
         }
+        self.perf.end(Stage::InboundMisc, span);
+    }
+
+    /// Perf-monitor PM1 — a frozen spike as soon as it's ready, and the
+    /// 2 Hz `perf` aggregate. Resource counts + the GPU byte inventory are
+    /// gathered here (1 Hz) because only Core can see the GPU context.
+    fn emit_perf(&mut self) {
+        if !self.perf.on() {
+            return;
+        }
+        if self.perf.emit_due() && self.perf.slow_due() {
+            let resources = self
+                .gpu
+                .as_ref()
+                .map(|g| perf::wgpu_resources(g.instance(), g.backend()))
+                .unwrap_or(serde_json::Value::Null);
+            let bytes = self.gpu_bytes();
+            self.perf.set_slow_inputs(resources, bytes);
+        }
+        let last_change = self.changes.recent(1).pop().map(|e| {
+            serde_json::json!({ "epoch": e.epoch, "rev": e.rev, "actor": e.actor, "facet": e.facet })
+        });
+        self.perf.emit(&self.bus, last_change);
+    }
+
+    /// Own GPU-memory inventory: every long-lived texture/buffer the engine
+    /// holds, sized from its descriptor (portable — no Metal-only query).
+    /// Covers the GPU context (composites, atlas, warp LUT, swapchains),
+    /// both legs' clip/still inputs and the preview readback buffer.
+    fn gpu_bytes(&self) -> Option<u64> {
+        let gpu = self.gpu.as_ref()?;
+        let mut total = gpu.owned_bytes();
+        let plans = self
+            .plan
+            .iter()
+            .chain(self.design.as_ref().and_then(|d| d.plan.as_ref()));
+        for plan in plans {
+            total += plan.images.iter().map(|i| i.source.gpu_bytes()).sum::<u64>();
+        }
+        total += self.preview.gpu_bytes();
+        Some(total)
     }
 
     /// True once a termination signal asked for a graceful exit. The host
@@ -2408,6 +2509,7 @@ impl Core {
         } else {
             self.frame_budget
         };
+        let span = self.perf.enter();
         if let Some(budget) = budget {
             if let Some(last) = self.last_redraw_request {
                 let elapsed = last.elapsed();
@@ -2417,6 +2519,7 @@ impl Core {
             }
             self.last_redraw_request = Some(Instant::now());
         }
+        self.perf.end(Stage::Pace, span);
     }
 }
 

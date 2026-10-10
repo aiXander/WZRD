@@ -49,6 +49,7 @@ that is done when its gate passes headlessly, then a UI one built on it.
 | 4 In-app generation | T4a (APP Rust), T4b (APP UI) | — | 0–3 |
 | 5 Site room | T5 (APP) | T4a | 0–3 |
 | 6 Booth hardening | MIDI (APP), T6 (ENG) | — | anything |
+| 7 Agent chat (sketch) | T7 (APP) | Foreman's dogfood checkpoint | anything |
 
 The ENG lane (0 → 1 → 2 → 3) is serial; the APP-only work of phases 4–6
 runs alongside it. Watch `src-tauri/src/{lib,rpc}.rs` — T1b, T4a and MIDI
@@ -179,9 +180,59 @@ turns into buttons):
 
 Both depend on nothing above and can run any time.
 
+## Phase 7 — in-app agent chat (sketch, leans on Foreman)
+
+> **Not designed yet — a direction, not a spec.** Grill it with Xander
+> before building. Written 2026-10-10 after reading Foreman.
+
+The gig keeps chat an external Claude Code session (gig plan D11). The
+in-app version should **not** sit on phase 4's MCP client: that client is
+for agent-less buttons, and the chat's agent has its own MCP connection to
+`wzrd_mcp`. Nor should the app embed an LLM loop or its own terminal —
+roadmap §5.10 settled that **Claude Code is the author**.
+
+**Foreman** (`~/Documents/GitHub/agent_frameworks/foreman`, Xander's own
+tool, read its `AGENTS.md`) solves exactly the hard half: a local Bun daemon
+that hosts *unmodified* Claude Code sessions in its own PTY host and gives
+each a visual **card** (goal / progress / click-to-answer questions /
+handover) plus a proven channel back (human messages batched on Send,
+delivered mid-turn via hooks or into an idle TUI only when it reads as
+ready; Pause, Stop). Its "page" model — a custom UI the human edits
+directly while the agent sees the edits on its next turn — is the same
+two-seat shape WZRD already has. So: **lean on Foreman as the agent host;
+build only the WZRD-specific panel.** No code sharing (Bun/TS daemon vs
+Tauri/Rust; Foreman rules out a desktop shell) and WZRD must not become a
+Foreman page (the operator UI is a native app with engine windows).
+
+| Need in WZRD | Foreman primitive to reuse | Already in WZRD |
+|---|---|---|
+| Run the agent | managed Claude Code session, cwd = project, `wzrd_mcp` loaded | — |
+| Agent sees the operator's direct edits without a turn | page-edit diff on next delivery | `changes` ring + actor + `since_rev` (§2.7) — keep it, the engine is the authority, not a file diff |
+| "Talk about *this*" | a **tell**: one message + context, sent only from a click | add: a "tell agent" action on layer / effect / clip cards whose context is facet ids + design rev (the `get_scene_context ids` vocabulary) |
+| Agent asks ("which of these 4 clips?") | `foreman_ask`: 2–4 options + default + policy | render as buttons in the panel |
+| What is it doing | `foreman_brief` / `progress` / `handover` | panel header: goal + now-line |
+| Show-night brakes | Stop (one ESC, only while busy), Pause (park after this step) | — |
+| Attention | notify only blocking / high-impact | in Perform, a silent badge; never cover the deck |
+
+**Shape, in two steps:** (a) link out — the app shows the bound session's
+state + now-line and opens its Foreman card in the browser; (b) a thin chat
+panel in the Prepare room (design only — the design spec's "shape of the instrument" puts AI
+chat in design) whose Rust side calls
+`foremand`'s local API with the CLI bearer token and follows its SSE stream
+(not from the webview: Foreman checks exact Origin, same reason as T4a).
+Step (b) needs one Foreman-side addition — today its tell route only
+accepts page clicks (`pin_id`) — planned in Foreman, not here.
+
+**Preconditions:** Foreman past its own one-week dogfood checkpoint (its
+API still moves); unchanged rules — agent works on design only, never
+`promote`, ADOPT stays the operator's. If T4a picks "watch the output
+folder" for job progress, the job tray shows agent-started renders too.
+
+**Gate:** from the app, ask for "4 more clips for the left fabric, colder",
+answer the agent's one clarifying question by click, watch progress, and the
+clips land NEW in the grid — no terminal window opened.
+
 ## Open questions
 
 - Should the clip grid also hold *effect* slots (Resolume puts generators and
   clips in the same grid)? Decide after the gig, from how the grid felt live.
-- In-app chat (parked in the gig plan) would sit on phase 4's MCP client —
-  revisit once phase 4 exists.

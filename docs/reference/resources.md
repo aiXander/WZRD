@@ -8,6 +8,20 @@ unless a reference doc says so. Append new entries at the top of the relevant se
 one-or-two-sentence "why we'd care" note — the description should say what it buys *us*, not
 just what the project is.
 
+## Agent tooling
+
+### Foreman — `~/Documents/GitHub/agent_frameworks/foreman` (local, Xander's own)
+
+Local Bun daemon + browser UI that hosts unmodified Claude Code sessions in its own PTY host and
+gives each a visual card (goal, progress, click-to-answer questions, handover) plus a proven
+human → agent channel (batched Send, hook / idle-TUI delivery, Pause, Stop) and agent-built HTML
+"pages" the human edits directly. Start at its `AGENTS.md`.
+
+*Why we'd care:* it is the agent host the in-app chat should lean on instead of embedding an LLM
+or a terminal — direction in [vj-toolbox.md](../TODO/vj-toolbox.md) phase 7. Its tell (a click
+that sends one message + context) and click-to-answer question are the two primitives worth
+mirroring in WZRD's own UI either way.
+
 ## Depth / geometry / surface understanding
 
 ### Marigold V2 — <https://github.com/huawei-bayerlab/marigold-v2>

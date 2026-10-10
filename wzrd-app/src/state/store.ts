@@ -16,6 +16,8 @@ import type {
   LegName,
   LookEntry,
   PackInfo,
+  PerfPayload,
+  PerfSpike,
   ProbeReport,
   ProjectInfo,
 } from '../api/ipc';
@@ -203,6 +205,12 @@ interface Store {
   frameStats: FrameStats | null;
   setFrameStats: (v: FrameStats) => void;
 
+  // Perf-monitor PM1 — `perf` (2 Hz aggregate) + sticky `perf_spike`.
+  perf: PerfPayload | null;
+  setPerf: (v: PerfPayload) => void;
+  perfSpike: PerfSpike | null;
+  setPerfSpike: (v: PerfSpike | null) => void;
+
   drivers: DriverRow[];
   setDrivers: (v: DriverRow[]) => void;
 
@@ -298,6 +306,8 @@ const PROJECT_INITIAL = {
   drivers: [],
   masters: null,
   deck: null,
+  perf: null,
+  perfSpike: null,
   alignment: null,
   alignmentError: null,
   selectedHandle: null,
@@ -396,6 +406,11 @@ export const useStore = create<Store>((set) => ({
 
   frameStats: null,
   setFrameStats: (v) => set({ frameStats: v }),
+
+  perf: null,
+  setPerf: (v) => set({ perf: v }),
+  perfSpike: null,
+  setPerfSpike: (v) => set({ perfSpike: v }),
 
   drivers: [],
   setDrivers: (v) => set({ drivers: v }),

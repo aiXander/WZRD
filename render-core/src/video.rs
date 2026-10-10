@@ -32,6 +32,7 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use wgpu::util::DeviceExt;
 
 use crate::gpu::{GpuContext, ImageEncoding};
+use crate::perf::{ClipStats, ThreadCpu};
 
 /// Staging slots per clip stream: up to three prefetched frames plus one in
 /// transit back to the decoder.
@@ -113,6 +114,18 @@ impl ImageSource {
 
     pub fn is_clip(&self) -> bool {
         matches!(self.kind, SourceKind::Clip(_))
+    }
+
+    /// Perf-monitor PM1 GPU-MB inventory: the texture, plus a clip's
+    /// staging ring.
+    pub fn gpu_bytes(&self) -> u64 {
+        match &self.kind {
+            SourceKind::Still { _texture } => crate::perf::texture_bytes(_texture),
+            SourceKind::Clip(c) => {
+                crate::perf::texture_bytes(&c.texture)
+                    + c.slots.iter().map(|b| b.size()).sum::<u64>()
+            }
+        }
     }
 }
 
@@ -639,6 +652,9 @@ struct ClipStream {
     last_want: Option<(u32, i32)>,
     /// Previous call's playhead, to estimate frames per render frame.
     prev_playhead: Option<f64>,
+    /// Perf-monitor PM1: decode ms (written by the decoder), stale frames
+    /// + ready-queue depth (written here).
+    stats: Arc<ClipStats>,
 }
 
 fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
@@ -733,6 +749,7 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
     ready_tx.send(Ready { slot: 0, frame: 0 }).expect("fresh channel");
 
     let info = Arc::new(info);
+    let stats = ClipStats::register(label.clone());
     let decoder = Decoder {
         info: Arc::clone(&info),
         file,
@@ -747,6 +764,8 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
         blocks,
         label: label.clone(),
         errors: 0,
+        stats: Arc::clone(&stats),
+        cpu: ThreadCpu::register(format!("clip-decode:{label}")),
     };
     std::thread::Builder::new()
         .name(format!("clip-decode:{label}"))
@@ -773,6 +792,7 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
             current: None,
             last_want: None,
             prev_playhead: None,
+            stats,
         })),
         view,
         encoding: format.encoding(),
@@ -839,6 +859,7 @@ impl ClipStream {
             self.ready.push(r);
         }
         if self.ready.is_empty() || self.current == Some(wanted) {
+            self.note_frame(wanted);
             return;
         }
 
@@ -903,6 +924,20 @@ impl ClipStream {
             }
             keep
         });
+        self.note_frame(wanted);
+    }
+
+    /// Perf: after this frame's upload decision. The playhead wanted
+    /// `wanted` and the texture holds something else → stale (the decoder
+    /// fell behind). A native-rate repeat — a 30 fps clip on a 60 Hz engine
+    /// wanting the same frame twice — has `current == wanted`, so it never
+    /// counts. Nothing on screen yet (first frame in flight) isn't stale
+    /// either.
+    fn note_frame(&self, wanted: u32) {
+        self.stats.set_queue(self.ready.len());
+        if self.current.is_some_and(|c| c != wanted) {
+            self.stats.mark_stale();
+        }
     }
 
     /// Re-map consumed slots; each callback hands its slot back to the
@@ -937,6 +972,8 @@ struct Decoder {
     blocks: Vec<u8>,
     label: String,
     errors: u32,
+    stats: Arc<ClipStats>,
+    cpu: ThreadCpu,
 }
 
 impl Decoder {
@@ -964,6 +1001,7 @@ impl Decoder {
                 },
                 default(Duration::from_millis(250)) => {}
             }
+            self.cpu.tick();
             loop {
                 match self.want_rx.try_recv() {
                     Ok(w) => want = Some(w),
@@ -987,8 +1025,10 @@ impl Decoder {
                     continue;
                 }
                 let slot = free.pop().expect("checked non-empty");
+                let started = std::time::Instant::now();
                 match self.decode_into(frame, slot) {
                     Ok(()) => {
+                        self.stats.record_decode(started.elapsed());
                         self.in_flight[slot] = Some(frame);
                         if self.ready_tx.send(Ready { slot, frame }).is_err() {
                             return;

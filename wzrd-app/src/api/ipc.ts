@@ -74,6 +74,82 @@ export type DeckPayload = {
 
 export type ProbeThresholds = { a_ms: number; b_ms: number };
 
+/** Perf-monitor PM1 — p50/p95/max in ms over the engine's last ~300 frames. */
+export type PerfPct = { p50: number; p95: number; max: number };
+
+/**
+ * Perf-monitor PM1 — the 2 Hz `perf` channel (not sticky) and the
+ * `perf.snapshot` result. `cpu` is keyed by render-thread stage
+ * (`inbound.cmds`, `tick.live`, `encode`, `acquire`, `pace`, `host`, …);
+ * `frame.work` = Σ stages − acquire − pace; `headroom` = 1 − work p95 / budget.
+ */
+export type PerfPayload = {
+  budget_ms: number;
+  headroom: number | null;
+  presenting: boolean;
+  frames: number;
+  cpu: Record<string, PerfPct>;
+  frame: { interval: PerfPct; work: PerfPct; unaccounted: PerfPct; monitor: PerfPct };
+  dropped: { window: number; total: number };
+  /** PM2 (GPU timestamps) — null until then. */
+  gpu: Record<string, { p50: number; p95: number }> | null;
+  /** CPU % of one core; null where the platform has no thread CPU clock. */
+  threads: { name: string; cpu_pct: number | null }[];
+  clips: {
+    label: string;
+    decode_p50: number | null;
+    decode_p95: number | null;
+    /** Wanted frame not ready (decoder behind) since the previous emit. */
+    stale: number;
+    stale_total: number;
+    queue: number;
+  }[];
+  clips_idle: number;
+  latency: {
+    knob_submit_p95: number | null;
+    rpc_queue_p95: number | null;
+    osc_age_p50: number | null;
+  };
+  process: {
+    cpu_pct: number | null;
+    rss_mb: number | null;
+    gpu_mb: number | null;
+    resources: Record<string, number> | null;
+  };
+  telemetry_bps: { ws: Record<string, number>; webview: Record<string, number> };
+  last_change: { epoch: number; rev: number; actor: string; facet: string } | null;
+  spikes: { trigger_ms: number; total: number; suppressed: number };
+};
+
+/** Perf-monitor PM1 — one frame of a spike capture (offset 0 = the spike). */
+export type PerfSpikeFrame = {
+  offset: number;
+  interval_ms: number;
+  work_ms: number;
+  presenting: boolean;
+  stages: Record<string, number>;
+  ran: {
+    cmds: string[];
+    cmd_count: number;
+    reloads: number;
+    probe_steps: number;
+    clip_opens: number;
+    rev: number;
+  };
+};
+
+/** Perf-monitor PM1 — sticky `perf_spike`: a frame over `trigger_ms`, ± 5 neighbours. */
+export type PerfSpike = {
+  ts_ms: number;
+  frame_ms: number;
+  trigger_ms: number;
+  budget_ms: number;
+  worst_stage: string;
+  worst_stage_ms: number;
+  frames: PerfSpikeFrame[];
+  suppressed: number;
+};
+
 /** §5.14 — one extra (non-corner) warp handle. */
 export type WarpPoint = {
   id: string;

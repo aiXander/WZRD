@@ -187,6 +187,7 @@ not "fix" it to alpha blending.
 | `app.rs` | Thin `WinitHost` — window creation/fullscreen/display selection, winit event delegation into `Core`, exit decisions. The only winit-aware file besides `lib.rs`. |
 | `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → §2.8 warp) and `WarpTarget` (the alignment LUT + its bake pipeline). Step 3: keeps `instance`/`adapter` so `PreviewTarget` (second swapchain; §5.6 source toggle — one bind group per leg, LIVE renders with real masters, DESIGN neutral) can attach at runtime; `render_preview()` self-heals `Lost`/`Outdated`. Its test module holds the two GPU-backed guards worth knowing about: `baked_lut_matches_the_cpu_model` and `final_pass_samples_through_the_warp` (both skip cleanly with no adapter), plus a naga parse+validate of the output shaders so a WGSL typo fails on the desk rather than at device creation. |
 | `alignment.rs` | §2.8 alignment layer: `AlignmentDoc` (the `alignment.json` schema), `homography_from_corners` (Heckbert) + analytic 3×3 inverse, the Wendland C² kernel and its LU solve, `AlignmentState` (solved doc + dirty stamps, shared with the render thread and the RPC surface), `TestPattern`, bake-uniform packing, and the boot migration from the legacy calibration matrix. Talks to no GPU. |
+| `perf.rs` | §2.9 always-on frame profiler (perf-monitor PM1): the fixed `Stage` enum, `Perf` recorder (span/lap/enter tokens into a `[u32; Stage::COUNT]`, 300-frame ring, spike capture, 2 Hz aggregate), the cross-thread `Shared` half in `RpcContext` (knob stamps, trigger, latest snapshot), and the process-global lock-free side probes: `ThreadCpu`, `ClipStats`, `count_telemetry`, plus `wgpu_resources` / `texture_bytes`. |
 | `probe.rs` | §5.6 shader pre-flight probe: `ProbeThresholds` (A/B atomics, sidecar-persisted), `ProbeSession` (half-res interleaved probe frames, overhead-calibrated full-res p95 prediction, pessimistic driver values), three-band verdict + JPEG thumbnail. |
 | `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick(&mut)` (driver eval → uniforms, §5.2 pick re-rolls via `active` flags); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). Owns the stable hashes (`fnv1a`/`seed01`/`pick_choice`) behind layer_seed + pick determinism. |
 | `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `Crossfade` (§5.4 engine-wide crossfade-time master — default promote fade in seconds, 0–30 s); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
@@ -196,7 +197,7 @@ not "fix" it to alpha blending.
 | `scene.rs` | `scene.json` parser + selector resolution. |
 | `pack.rs` | Layer-pack loader; per-slice uv geometry (`LayerGeom`) from the manifest or the mask bytes (§5.2); §2.2 identity sidecar (`IdentityFile` lenient load/merge, strict `apply_identity_delta`, atomic `save_identity`). |
 | `osc.rs` | UDP OSC sink for `/audio/lmh` + `/audio/onset/*` → lock-free `AudioFeatures` atomics. `OscListener` drop stops + joins the thread, so the port is free on return (an in-process re-root rebinds it, §1b). |
-| `rpc.rs` | JSON-RPC dispatch: inline read-only + live-tuning methods (`param.set` both forms, `master.set`, `hello`, `changes.list`) + queued `EngineCommand`s for mutations (`scene.load` incl. `base_rev` CAS, `effect.*`, `identity.setGroups`, `session.save`); `wgsl.validate` with user-source line remapping; §2.7 `Actor` (per-connection identity) + `PackInfoCell` (swappable `pack.info` snapshot). |
+| `rpc.rs` | JSON-RPC dispatch: inline read-only + live-tuning methods (`param.set` both forms, `master.set`, `hello`, `changes.list`) + queued `EngineCommand`s for mutations — an envelope `{cmd: Command, queued_at}` so the render thread can time `rpc.queue` (`scene.load` incl. `base_rev` CAS, `effect.*`, `identity.setGroups`, `session.save`); `wgsl.validate` with user-source line remapping; §2.7 `Actor` (per-connection identity) + `PackInfoCell` (swappable `pack.info` snapshot). |
 | `ws.rs` | tungstenite server, thread-per-connection, telemetry fan-out. `ServerHandle` drop joins the accept loop and closes every connection — port free on return, clients reconnect to the next engine (§1b re-rooting). |
 | `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay + `subscriber_count`), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (non-blocking composite readback → JPEG @ ~15 fps — **demand-gated since Step 3**: capture only runs with ≥1 `preview` subscriber), §2.7 `ChangeLog` (design rev + boot epoch + change ring), payload types. |
 | `watch.rs` | notify-based watcher over the scene file + effects dir. |
@@ -375,6 +376,8 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `effect.describe {name?}` | queued | §5.5 — input descriptors (type, default, `min`/`max`/`step`/`unit`/`widget`) for one effect, or the whole catalog (built-ins included) when `name` is omitted. |
 | `wgsl.validate {source}` | inline | naga diagnostics remapped to user-source lines (drives Monaco squiggles). |
 | `telemetry.channels` | inline | The list of live channel names (`telemetry::ALL_CHANNELS`). |
+| `perf.snapshot` | inline | §2.9 — the latest `perf` aggregate (same object as the channel). Errors when started with `--perf off` or before the first aggregate (~0.5 s). |
+| `perf.setTrigger {ms}` | inline | §2.9 — spike-capture threshold in ms of frame interval, (0, 10000]; default 2× budget = 33.3. Runtime-only. Returns `{ok, trigger_ms}`. |
 | `param.set {name, value, leg?}` | **inline** | Writes the target leg's `SliderBank` (§2.6 — `leg` default `"design"`; the UI passes the deck toggle's leg); bound `ui.slider` params update next frame. **No rebuild, no disk write — this is the live knob path.** |
 | `param.set {binding, param, value, leg?}` | **inline** | §5.5 override form — pins any *scalar* param on a binding (const or driver output alike) in the target leg's override table; `value: null` clears. Same zero-rebuild property; survives plan rebuilds as long as a scalar param with that name exists (the carry-forward rule). |
 | `param.list {leg?}` | inline | `{ sliders, overrides, leg }` — the target leg's knob values + override table (design default). |
@@ -405,6 +408,8 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 | `log` | on event | Info+ engine log lines (via the tee logger). |
 | `masters` | on `master.set`, promote/pull control copies + startup | §5.4/§2.6 — both legs plus the engine-wide crossfade master: `{live: {brightness, speed, saturation, audioListen}, design: {...}, crossfade}` (sticky). |
 | `deck` | on promote/pull/preview transitions + ~10 Hz while ramping | §2.6 snapshot `{promote: idle\|pending\|ramping, mix, fade_ms, quantize, preview_source, two_leg}` (sticky). |
+| `perf` | 2 Hz | §2.9 — the frame-profiler aggregate (headroom, per-stage p50/p95/max, threads, clips, latency, process, telemetry bytes/s). Not sticky. `gpu: null` until PM2. |
+| `perf_spike` | on a frame over the trigger (≤ 1 per 2 s) | §2.9 — that frame ± 5 neighbours with per-stage ms and what ran in each (sticky). |
 | `alignment` | at boot, on every accepted mutation, on output resize | §2.8 — the whole document plus `weights` and `{output, points_max, test_pattern, solve_ok}` (sticky, so the Align tab hydrates from `lastPayload` and an external camera script sees the UI's edits). |
 
 ### 2.4 Effect WGSL contract
@@ -855,6 +860,70 @@ Headless verification lives in `render-core/tools/align_drag.py` — corner
 sweeps, a live handle demo, and `--verify-isolation`, which asserts
 `alignment.json` comes out byte-identical across a `scene.load` + `pull`.
 
+### 2.9 Frame profiler: `perf` channel (perf-monitor PM1, landed 2026-10-10)
+
+`fps`/`frame_stats` time mark-to-mark, so a 2 ms and a 15 ms frame both read
+"60". `perf.rs` times what the frame *spends* its time on and reports
+**headroom = 1 − cpu.work p95 / 16.7 ms** (fixed 60 Hz budget — the engine
+doesn't know the projector's refresh). `fps`/`frame_stats` are untouched
+(§3.2's honesty contract).
+
+- **Stages** (`perf::Stage`, fixed enum, no strings in the hot path):
+  `inbound.cmds`, `inbound.watch`, `inbound.probe`, `inbound.misc`,
+  `telemetry`, `tick.live` (incl. transport step + promote machine),
+  `tick.design`, `encode`, `acquire` (wait), `submit` (incl. handing clip
+  slots back), `present`, `preview.present`, `preview.jpeg`, `pace` (wait),
+  **`host`** — render-thread time *between* Core calls (winit dispatch,
+  TauriHost's size/occlusion polling). `cpu.work = Σ stages − acquire − pace`.
+  Each host entry point (`poll_inbound`, `pace_frame`, `redraw`,
+  `render_offscreen_frame`) opens with `perf.enter()`, which charges the gap
+  since the last span to `host`, so the stages tile the whole frame interval;
+  `frame.unaccounted` (interval − Σ stages) is the coverage check — measured
+  ≤ 0.015 ms p95 on the smoke scene. **A new cost path adds a stage** (not a
+  span inside an existing one) and a matching `Stage::name`.
+- **Hot path:** `begin`/`lap`/`end` are clock reads into a fixed array; one
+  ring-slot write per frame; atomics only. Allocation, sorting, JSON and the
+  registries' mutexes run at the 2 Hz emit inside the `telemetry` stage.
+  Measured cost: ~0.7 µs/frame hot path + ~25 µs per aggregate (~1 µs/frame
+  amortised) — `cargo test --release perf_overhead -- --ignored --nocapture`
+  replays it. `--perf off` (CLI; the Tauri host passes `On`) removes it.
+- **Side probes** (process-global, lock-free): each owned thread
+  (render, `clip-decode:*`, `ws-conn-*`, `osc-recv`, `engine-telemetry`)
+  samples its own `CLOCK_THREAD_CPUTIME_ID` ~1 Hz via `perf::ThreadCpu`
+  (`#[cfg(unix)]`; null elsewhere; a slot unsampled > 3 s reads 0 — it's
+  parked). `perf::ClipStats` per clip stream: decode ms (decoder thread),
+  **stale frames** — wanted frame ≠ the one in the texture after the upload
+  decision; a native-rate repeat (`current == wanted`) never counts — and
+  ready-queue depth. Streams that never decoded (the idle design copy) are
+  counted in `clips_idle`, not listed. `count_telemetry` counts bytes where
+  they're already serialized: `ws.rs` (per notification) and the Tauri
+  `telemetry_loop` (`json_len`, the webview hop).
+- **Latency:** `knob_submit` (`param.set`/`master.set` stamp the oldest
+  pending write in `Shared`; the tick picks it up, the submit resolves it),
+  `rpc_queue` (`EngineCommand.queued_at` → handled), `osc_age`
+  (`AudioFeatures::packet_age_ms` at tick — engine-local clock, not epoch).
+- **Process (1 Hz):** CPU % (`CLOCK_PROCESS_CPUTIME_ID`), RSS (macOS
+  `proc_pidinfo`, Linux `/proc/self/statm`), wgpu live counts per type
+  (`Instance::generate_report`, `num_kept_from_user` — the leak signal) and
+  **`gpu_mb`, an inventory** summed from descriptors at sample time
+  (`GpuContext::owned_bytes` + every plan image's `ImageSource::gpu_bytes` +
+  the preview readback buffer; swapchains estimated at 3 images) — not a
+  create-site counter, so a leaked resource shows in the counts, not the MB.
+- **Dropped:** presented frames with interval > 1.5× budget (window + total).
+- **Spikes:** interval > `trigger_ms` (default 33.3) after the first 60
+  frames freezes that frame ± 5 neighbours (stages + `ran: {cmds, reloads,
+  probe_steps, clip_opens, rev}`) → sticky `perf_spike` + one `warn` log
+  line. At most one capture per 2 s; the rest are `suppressed`.
+- **Consumer:** Debug room → "Performance (frame profiler)" panel
+  (`routes/Debug.tsx` `PerfPanel`; types `PerfPayload`/`PerfSpike` in
+  `api/ipc.ts`, store `perf`/`perfSpike`, `perf_spike` hydrated from
+  `lastPayload`). The graphed panel, GPU timestamps, `--bench` gate and
+  `perf.profile` are PM2–PM4 in [../TODO/perf-monitor.md](../TODO/perf-monitor.md).
+
+What it showed on day one (2026-10-10, M2): smoke scene headroom ~0.93
+(work p95 ~1.2 ms); fixture-a with two HAP clips decodes in ~0.1 ms p95,
+0 stale. Two real findings are logged in §4 (#9, #10).
+
 ---
 
 ## 3. The 2026-07 pass — what was wrong and what changed
@@ -1043,8 +1112,21 @@ Ranked; none currently show-stopping at 5–20 layers.
    renders to its own FBO first).
 7. **Fixed WS port 9123.** A stale engine process blocks respawn. Use port
    0 + handshake, or kill-by-pidfile, when it bites.
-8. **No GPU-side timing.** Frame stats are CPU wall-clock; wgpu timestamp
-   queries would attribute cost per pass. Add when shader complexity grows.
+8. **No GPU-side timing.** The §2.9 profiler is CPU-only; wgpu timestamp
+   queries would attribute cost per pass (PM2), plus the regression gate
+   (PM3): [../TODO/perf-monitor.md](../TODO/perf-monitor.md).
+9. **Knob → submit is ~2 frames, not ≤ 1** (§2.9 measured `knob_submit_p95`
+   ≈ 31 ms at 60 Hz). Legs tick *before* `acquire`, and `acquire` is where
+   the frame waits for vsync, so a value read at tick reaches the GPU one
+   vsync wait later — and a write landing during that wait misses the tick.
+   Ticking after `acquire` would cut ~one frame; not done (behaviour change,
+   needs the probe/timing re-checked).
+10. **Dev builds drop frames on the preview JPEG.** `preview.jpeg` p95 is
+   ~24 ms in `pnpm tauri dev` (unoptimized render-core; headroom went
+   negative) vs ~1.9 ms in release. The encode runs on the render thread on
+   capture frames (~15 fps) whenever a `preview` subscriber exists (the
+   webview's Prepare underlay). Fix candidates: `[profile.dev.package."*"]
+   opt-level` in `src-tauri`, or encode off-thread.
 
 **Latent safety/scaling risks (from v1 §9 — not yet bitten at 5–20 layers):**
 - **Pathological user-WGSL.** `naga` catches syntax/type errors, but an

@@ -427,6 +427,7 @@ impl EngineHandle {
             osc_addr: "127.0.0.1:9000".parse().expect("valid osc addr"),
             ws_addr: Some(ws_addr),
             frame_cap_hz: 240,
+            perf: render_core::PerfMode::On,
         };
         let mut core = Core::new(&cli).context("initialising engine core")?;
         let (ctx, cmd_tx) = core.control_channel();
@@ -746,10 +747,18 @@ fn telemetry_loop(inner: Arc<EngineInner>, app: AppHandle, bus: render_core::tel
         ALL_CHANNELS.iter().map(|s| s.to_string()).collect();
     let (sub_id, rx) = bus.subscribe(channels);
     let mut last_status_emit = Instant::now() - Duration::from_secs(1);
+    let mut cpu = render_core::perf::ThreadCpu::register("engine-telemetry");
 
     loop {
+        cpu.tick();
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(frame) => {
+                // Perf PM1 `telemetry_bps.webview` — the webview hop's load.
+                render_core::perf::count_telemetry(
+                    render_core::perf::Hop::Webview,
+                    &frame.channel,
+                    render_core::perf::json_len(&frame.payload),
+                );
                 // Sticky set comes from the engine, never a local copy — a
                 // second list here is how `alignment` went missing from the
                 // Align tab (it only emits at boot, so the snapshot *is* the

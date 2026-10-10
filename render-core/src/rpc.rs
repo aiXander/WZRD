@@ -80,9 +80,26 @@ impl PackInfoCell {
     }
 }
 
+/// One queued mutation as it travels the command channel: the command
+/// plus its enqueue stamp, so the render thread can report `rpc.queue`
+/// latency (perf-monitor PM1) without touching any variant.
+pub struct EngineCommand {
+    pub cmd: Command,
+    pub queued_at: std::time::Instant,
+}
+
+impl EngineCommand {
+    pub fn new(cmd: Command) -> Self {
+        Self {
+            cmd,
+            queued_at: std::time::Instant::now(),
+        }
+    }
+}
+
 /// A command that mutates engine state. Issued from the WS server thread;
 /// processed on the render thread.
-pub enum EngineCommand {
+pub enum Command {
     /// Replace the current scene with the given JSON. Doesn't touch disk.
     /// §5.10: `base_rev` is a compare-and-swap guard — the engine rejects
     /// the apply when the design rev moved since the caller's read.
@@ -167,6 +184,26 @@ pub enum EngineCommand {
     },
 }
 
+impl Command {
+    /// The RPC method that queued this command — the perf spike report's
+    /// "what ran in this frame" (static, so recording it never allocates).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Command::SceneLoad { .. } => "scene.load",
+            Command::SceneReload { .. } => "scene.reload",
+            Command::EffectUpsert { .. } => "effect.upsert",
+            Command::EffectRemove { .. } => "effect.remove",
+            Command::IdentitySet { .. } => "identity.setGroups",
+            Command::EffectDescribe { .. } => "effect.describe",
+            Command::SessionSave { .. } => "session.save",
+            Command::Promote { .. } => "promote",
+            Command::Pull { .. } => "pull",
+            Command::PreviewSource { .. } => "preview.setSource",
+            Command::Transport { .. } => "transport.set",
+        }
+    }
+}
+
 /// Bound bag of references used to answer the synchronous (read-only)
 /// requests. Held by the WS server alongside the command channel.
 #[derive(Clone)]
@@ -222,6 +259,10 @@ pub struct RpcContext {
     /// the render thread) and engine-wide: never per leg, never touched by
     /// `scene.load`, promote/pull or any authoring verb.
     pub alignment: Arc<crate::alignment::AlignmentState>,
+    /// Perf-monitor PM1 — knob-write stamps (`knob→submit` latency), the
+    /// spike trigger (`perf.setTrigger`) and the latest aggregate
+    /// (`perf.snapshot`).
+    pub perf: Arc<crate::perf::Shared>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -419,12 +460,12 @@ pub fn dispatch(
             }
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::IdentitySet {
+                .send(EngineCommand::new(Command::IdentitySet {
                     groups: p.groups,
                     labels: p.labels,
                     actor: *actor,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -524,11 +565,11 @@ pub fn dispatch(
             };
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::Promote {
+                .send(EngineCommand::new(Command::Promote {
                     fade_ms,
                     quantize,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -539,10 +580,10 @@ pub fn dispatch(
         "pull" => {
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::Pull {
+                .send(EngineCommand::new(Command::Pull {
                     actor: *actor,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -577,13 +618,13 @@ pub fn dispatch(
             };
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::Transport {
+                .send(EngineCommand::new(Command::Transport {
                     bpm: p.bpm,
                     resync: p.resync,
                     sync: p.sync,
                     leg,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -609,10 +650,10 @@ pub fn dispatch(
             };
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::PreviewSource {
+                .send(EngineCommand::new(Command::PreviewSource {
                     source,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -684,6 +725,22 @@ pub fn dispatch(
             Ok(serde_json::to_value(diagnostics).expect("diagnostics"))
         }
 
+        // Perf-monitor PM1 — the latest 2 Hz `perf` aggregate (same object
+        // the channel carries) and the spike-capture trigger. Inline: both
+        // are plain shared reads/writes, never a render-thread hop.
+        "perf.snapshot" => ctx.perf.snapshot().map_err(RpcError::message),
+
+        "perf.setTrigger" => {
+            #[derive(Deserialize)]
+            struct Params {
+                ms: f32,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            let ms = ctx.perf.set_trigger_ms(p.ms).map_err(RpcError::message)?;
+            Ok(json!({ "ok": true, "trigger_ms": ms }))
+        }
+
         "telemetry.channels" => {
             Ok(json!({ "channels": crate::telemetry::ALL_CHANNELS }))
         }
@@ -731,6 +788,7 @@ pub fn dispatch(
                         RpcError::message("slider form requires `value`")
                     })?;
                     sliders.set(&name, value);
+                    ctx.perf.knob_written();
                     session::touch(&ctx.session_dirty);
                     Ok(json!({ "ok": true, "name": name, "value": value, "leg": leg.as_str() }))
                 }
@@ -741,6 +799,7 @@ pub fn dispatch(
                             overrides.clear(&binding, &param);
                         }
                     }
+                    ctx.perf.knob_written();
                     session::touch(&ctx.session_dirty);
                     Ok(json!({
                         "ok": true,
@@ -825,6 +884,7 @@ pub fn dispatch(
             let stored = masters
                 .set(&p.name, p.value)
                 .map_err(|e| RpcError::message(format!("{e:#}")))?;
+            ctx.perf.knob_written();
             session::touch(&ctx.session_dirty);
             ctx.bus.emit_masters(masters_state(ctx));
             Ok(json!({ "ok": true, "name": p.name, "value": stored, "leg": leg.as_str() }))
@@ -845,12 +905,12 @@ pub fn dispatch(
                 .map_err(|e| RpcError::message(format!("params: {e}")))?;
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::SceneLoad {
+                .send(EngineCommand::new(Command::SceneLoad {
                     json: p.json,
                     base_rev: p.base_rev,
                     actor: *actor,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -861,10 +921,10 @@ pub fn dispatch(
         "scene.reload" => {
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::SceneReload {
+                .send(EngineCommand::new(Command::SceneReload {
                     actor: *actor,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -884,13 +944,13 @@ pub fn dispatch(
                 .map_err(|e| RpcError::message(format!("params: {e}")))?;
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::EffectUpsert {
+                .send(EngineCommand::new(Command::EffectUpsert {
                     name: p.name,
                     wgsl: p.wgsl,
                     descriptor: p.descriptor,
                     actor: *actor,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -912,10 +972,10 @@ pub fn dispatch(
             };
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::EffectDescribe {
+                .send(EngineCommand::new(Command::EffectDescribe {
                     name: p.name,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -926,7 +986,7 @@ pub fn dispatch(
         "session.save" => {
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::SessionSave { reply: reply_tx })
+                .send(EngineCommand::new(Command::SessionSave { reply: reply_tx }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -943,11 +1003,11 @@ pub fn dispatch(
                 .map_err(|e| RpcError::message(format!("params: {e}")))?;
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             cmd_tx
-                .send(EngineCommand::EffectRemove {
+                .send(EngineCommand::new(Command::EffectRemove {
                     name: p.name,
                     actor: *actor,
                     reply: reply_tx,
-                })
+                }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
             reply_rx
                 .recv()
@@ -966,8 +1026,8 @@ pub fn dispatch(
 /// Process an [`EngineCommand`] on the render thread. Sends the reply via
 /// the embedded channel so the WS worker can unblock.
 pub fn handle(core: &mut Core, cmd: EngineCommand) {
-    match cmd {
-        EngineCommand::SceneLoad {
+    match cmd.cmd {
+        Command::SceneLoad {
             json,
             base_rev,
             actor,
@@ -978,7 +1038,7 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
             // before they may enter design). §5.10: base_rev CAS first.
             core.scene_load_rpc(json, base_rev, actor, reply);
         }
-        EngineCommand::SceneReload { actor, reply } => {
+        Command::SceneReload { actor, reply } => {
             match std::fs::read_to_string(core.scene_path()) {
                 Ok(raw) => core.scene_load_rpc(raw, None, actor, reply),
                 Err(e) => {
@@ -986,7 +1046,7 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
                 }
             }
         }
-        EngineCommand::EffectUpsert {
+        Command::EffectUpsert {
             name,
             wgsl,
             descriptor,
@@ -1023,7 +1083,7 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
                 }
             }
         }
-        EngineCommand::EffectRemove { name, actor, reply } => {
+        Command::EffectRemove { name, actor, reply } => {
             match remove_effect(core, &name) {
                 Ok(()) => {
                     core.after_effect_remove(&name, actor, reply);
@@ -1033,7 +1093,7 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
                 }
             }
         }
-        EngineCommand::IdentitySet {
+        Command::IdentitySet {
             groups,
             labels,
             actor,
@@ -1041,33 +1101,33 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
         } => {
             let _ = reply.send(core.cmd_identity_set(groups, labels, actor));
         }
-        EngineCommand::EffectDescribe { name, reply } => {
+        Command::EffectDescribe { name, reply } => {
             let res = core
                 .describe_effects(name.as_deref())
                 .map_err(|e| format!("{e:#}"));
             let _ = reply.send(res);
         }
-        EngineCommand::SessionSave { reply } => {
+        Command::SessionSave { reply } => {
             let res = core
                 .save_session()
                 .map(|path| json!({ "ok": true, "path": path.display().to_string() }))
                 .map_err(|e| format!("{e:#}"));
             let _ = reply.send(res);
         }
-        EngineCommand::Promote {
+        Command::Promote {
             fade_ms,
             quantize,
             reply,
         } => {
             let _ = reply.send(core.cmd_promote(fade_ms, quantize));
         }
-        EngineCommand::Pull { actor, reply } => {
+        Command::Pull { actor, reply } => {
             let _ = reply.send(core.cmd_pull(actor));
         }
-        EngineCommand::PreviewSource { source, reply } => {
+        Command::PreviewSource { source, reply } => {
             let _ = reply.send(core.cmd_preview_source(source));
         }
-        EngineCommand::Transport {
+        Command::Transport {
             bpm,
             resync,
             sync,

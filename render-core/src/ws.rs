@@ -129,12 +129,16 @@ fn conn_loop(
     // §5.10 per-connection actor identity: WS connections default to
     // `agent` (a remote operator UI re-declares via `hello {actor: "ui"}`).
     let mut actor = rpc::Actor::Agent;
+    let mut cpu = crate::perf::ThreadCpu::register(
+        thread::current().name().unwrap_or("ws-conn").to_string(),
+    );
 
     if let Err(e) = ws.get_mut().set_nonblocking(true) {
         log::warn!("WS: nonblocking toggle failed: {e}");
     }
 
     loop {
+        cpu.tick();
         if shutdown.load(Ordering::Relaxed) {
             let _ = ws.close(None);
             let _ = ws.flush();
@@ -184,7 +188,9 @@ fn conn_loop(
                         "payload": frame.payload,
                     },
                 });
-                if let Err(e) = ws.send(Message::Text(notif.to_string())) {
+                let text = notif.to_string();
+                crate::perf::count_telemetry(crate::perf::Hop::Ws, &frame.channel, text.len());
+                if let Err(e) = ws.send(Message::Text(text)) {
                     log::trace!("WS notify send failed: {e}");
                     break;
                 }

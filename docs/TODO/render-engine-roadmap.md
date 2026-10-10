@@ -153,8 +153,8 @@ deck reads in surface-language").
   `PreviewSampler`). The binary-frames and design-leg-`PreviewSampler`
   items are **dead** — revive only if remote (WS) operation ever becomes a
   primary workflow and the JPEG thumbnail stops sufficing there.
-- Optional, still open: `WaitUntil` scheduling; GPU timestamp queries into
-  `frame_stats`; adaptive frame cap (drop to 30 Hz when no audio + no
+- Optional, still open: `WaitUntil` scheduling; GPU timestamp queries
+  (now part of [perf-monitor.md](perf-monitor.md) PM2); adaptive frame cap (drop to 30 Hz when no audio + no
   clock-driven bindings are active).
 
 ### 5.9 Video layers — LANDED (2026-10-10, gig package E1)
@@ -259,8 +259,9 @@ Still open: MIDI controller mapping (WKWebView has no Web MIDI — needs a
 Rust-side bridge; full spec in [midi-controller.md](midi-controller.md));
 virtualized log list; region renaming + `identity.json` editing (→ §5.13,
 delivered inside the Site room, vj-toolbox phase 5). In-app AI chat is
-parked — §5.10 settled Claude Code as the author; revisit on top of
-[vj-toolbox.md](vj-toolbox.md) phase 4's MCP client.
+parked — §5.10 settled Claude Code as the author; the direction (host the
+Claude Code session in Foreman, build only a WZRD panel) is sketched in
+[vj-toolbox.md](vj-toolbox.md) phase 7.
 
 ### 5.13 Identity sidecar: group authoring + region renaming — ENGINE SLICE LANDED (2026-07-22)
 

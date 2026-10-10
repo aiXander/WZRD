@@ -37,6 +37,9 @@ snap = "1.1.2"
 [target.'cfg(unix)'.dependencies]
 # SIGTERM/SIGINT → session sidecar snapshot before exit (§5.3/§5.11).
 signal-hook = "0.3"
+# perf.rs: CLOCK_THREAD_CPUTIME_ID / CLOCK_PROCESS_CPUTIME_ID + RSS (POSIX —
+# same calls on macOS and Linux; non-unix reports null).
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already in winit's dependency tree — used directly for the App Nap /

@@ -605,6 +605,38 @@ impl GpuContext {
         (self.warp.width, self.warp.height)
     }
 
+    /// Perf-monitor PM1 — for `Instance::generate_report` (live resource
+    /// counts per type, the leak signal).
+    pub fn instance(&self) -> &wgpu::Instance {
+        &self.instance
+    }
+
+    pub fn backend(&self) -> wgpu::Backend {
+        self.adapter.get_info().backend
+    }
+
+    /// Perf-monitor PM1 — bytes of the long-lived textures/buffers this
+    /// context owns, sized from their descriptors. Swapchains are estimated
+    /// (format × size × 3 images — the driver owns those allocations).
+    pub fn owned_bytes(&self) -> u64 {
+        use crate::perf::texture_bytes;
+        let swapchain = |c: &wgpu::SurfaceConfiguration| {
+            let block = c.format.block_copy_size(None).unwrap_or(4) as u64;
+            c.width as u64 * c.height as u64 * block * 3
+        };
+        let mut total = texture_bytes(&self.composite_texture)
+            + self.design_texture.as_ref().map_or(0, texture_bytes)
+            + texture_bytes(&self.mask_atlas)
+            + texture_bytes(&self.warp.texture)
+            + self.warp.buffer.size()
+            + self.final_buffer.size()
+            + swapchain(&self.surface_config);
+        if let Some(p) = self.preview.as_ref() {
+            total += swapchain(&p.config) + p.buffer.size();
+        }
+        total
+    }
+
     /// True while the LUT holds undefined contents (freshly allocated or just
     /// resized) and must be rebaked before the final pass reads it.
     pub fn warp_needs_bake(&self) -> bool {

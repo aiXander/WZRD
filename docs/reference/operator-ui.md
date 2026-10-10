@@ -39,7 +39,7 @@ Every scalar now uses the effect descriptor's `min`/`max` (`LayerParams.tsx
 | **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both), inspector (target, effect cards, dials), bottom drawer = **clip grid** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
 | **Align** | §2.8 warp; side panel with the "projector bumped?" recovery hint, test patterns, background (lit-background warning). | `Align.tsx`, `WarpCanvas.tsx`, `state/alignment.ts` |
 | **Perform** | The booth: monitor (native preview, deck-coloured frame, PREVIEW/PROGRAM label), looks bank + auto-pilot, layer stack (mixer) with the compact clip grid under it, selected layer's dials, deck panel (switch, cue monitor, TAKE/CUT/PULL, FADE, BAR/NOW), masters + BLACK/FLASH/FREEZE + room audio. | `Perform.tsx`, `DeckPanel.tsx`, `LayerStack.tsx`, `ClipGrid.tsx compact`, `LayerParams.tsx`, `LooksBank.tsx`, `MastersPanel.tsx` |
-| **Debug** | Engine internals (unchanged content, restyled). | `Debug.tsx` |
+| **Debug** | Engine internals (unchanged content, restyled), plus the plain "Performance (frame profiler)" readout of the `perf` / `perf_spike` channels — headroom, stage p95 table, threads, clips, last spike ([render-engine.md](render-engine.md) §2.9). | `Debug.tsx` |
 
 `TopBar.tsx` is shared: project menu (`ProjectMenu.tsx`), rooms, compact DESIGN|LIVE + TAKE outside Perform,
 tempo (beat lamps from the `transport` channel, BPM double-click/scroll,

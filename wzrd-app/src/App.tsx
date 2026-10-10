@@ -26,6 +26,7 @@ import {
   type AlignmentDoc,
   type ChangeEntry,
   type DeckPayload,
+  type PerfSpike,
 } from './api/ipc';
 import { ingestAlignment } from './state/alignment';
 import { hydrateOverrides, loadLooks, refreshLiveScene, resetActionState } from './state/actions';
@@ -133,6 +134,12 @@ async function hydrate() {
     console.warn('last_payload(deck):', e);
   }
   try {
+    const s = await lastPayload<PerfSpike>('perf_spike');
+    if (s) st.setPerfSpike(s);
+  } catch (e) {
+    console.warn('last_payload(perf_spike):', e);
+  }
+  try {
     const a = await lastPayload<AlignmentDoc>('alignment');
     if (a) st.setAlignment(a);
   } catch (e) {
@@ -203,6 +210,12 @@ export default function App() {
             break;
           case 'frame_stats':
             st.setFrameStats(frame.payload);
+            break;
+          case 'perf':
+            st.setPerf(frame.payload);
+            break;
+          case 'perf_spike':
+            st.setPerfSpike(frame.payload);
             break;
           case 'drivers':
             st.setDrivers(frame.payload?.drivers ?? []);

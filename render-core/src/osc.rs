@@ -101,6 +101,13 @@ impl AudioFeatures {
         self.last_packet_ms.load(Ordering::Relaxed)
     }
 
+    /// Age of the newest OSC packet in ms (`None` until the first one) —
+    /// the perf monitor's `osc→tick` latency, read at tick time.
+    pub fn packet_age_ms(&self) -> Option<u64> {
+        let stamp = self.last_packet_ms.load(Ordering::Relaxed);
+        (stamp != 0).then(|| self.now_ms().saturating_sub(stamp))
+    }
+
     /// `/audio/meta`-reported sample rate. `0` until the audio server sends
     /// one. Diagnostic-only; not used in render math.
     pub fn sample_rate(&self) -> u32 {
@@ -203,7 +210,9 @@ fn spawn(state: Arc<AudioFeatures>, addr: SocketAddr) -> Result<OscListener> {
 fn recv_loop(state: Arc<AudioFeatures>, socket: UdpSocket, stop: Arc<AtomicBool>) {
     let mut buf = [0u8; 8192]; // rosc decode_udp expects a contiguous packet
     let mut was_fresh = false;
+    let mut cpu = crate::perf::ThreadCpu::register("osc-recv");
     while !stop.load(Ordering::Relaxed) {
+        cpu.tick();
         match socket.recv_from(&mut buf) {
             Ok((n, _peer)) => match rosc::decoder::decode_udp(&buf[..n]) {
                 Ok((_, rosc::OscPacket::Message(msg))) => dispatch(&state, &msg),

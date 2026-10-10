@@ -24,6 +24,7 @@ pub mod effects;
 pub mod gpu;
 pub mod osc;
 pub mod pack;
+pub mod perf;
 pub mod probe;
 pub mod rpc;
 pub mod scene;
@@ -96,6 +97,20 @@ pub struct Cli {
     /// throughput.
     #[arg(long, default_value = "240")]
     pub frame_cap_hz: u32,
+
+    /// Always-on frame profiler (`perf` / `perf_spike` channels,
+    /// `perf.snapshot`). `off` removes it from the frame entirely — used to
+    /// measure the monitor's own overhead.
+    #[arg(long, value_enum, default_value = "on")]
+    pub perf: PerfMode,
+}
+
+/// `--perf on|off`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PerfMode {
+    #[default]
+    On,
+    Off,
 }
 
 /// Opt out of macOS App Nap + background timer coalescing for the lifetime

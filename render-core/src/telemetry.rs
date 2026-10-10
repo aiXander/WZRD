@@ -40,6 +40,8 @@ pub const ALL_CHANNELS: &[&str] = &[
     "deck",
     "changes",
     "alignment",
+    "perf",
+    "perf_spike",
 ];
 
 /// Channels whose most recent payload is retained and replayed to new
@@ -63,6 +65,7 @@ pub fn is_sticky(channel: &str) -> bool {
             | "deck"
             | "changes"
             | "alignment"
+            | "perf_spike"
     )
 }
 
@@ -702,6 +705,11 @@ impl PreviewSampler {
         }
     }
 
+    /// Perf-monitor PM1 GPU-MB inventory: the persistent readback buffer.
+    pub fn gpu_bytes(&self) -> u64 {
+        self.buffer.as_ref().map_or(0, |b| b.size())
+    }
+
     /// `texture` is the composite this sampler reads — the design leg's in
     /// two-leg mode (§5.6 blanket leg rule: the JPEG channel is an authoring
     /// surface), the live composite headless. Must match the pack's
@@ -923,6 +931,7 @@ mod sticky_tests {
             "deck",
             "changes",
             "alignment",
+            "perf_spike",
         ] {
             assert!(is_sticky(c), "{c} should be sticky");
             assert!(ALL_CHANNELS.contains(&c), "{c} missing from ALL_CHANNELS");
@@ -946,7 +955,7 @@ mod sticky_tests {
     /// frame would show the operator a composite from minutes ago.
     #[test]
     fn streaming_channels_are_not_retained() {
-        for c in ["preview", "drivers", "audio", "frame_stats", "log"] {
+        for c in ["preview", "drivers", "audio", "frame_stats", "log", "perf"] {
             assert!(!is_sticky(c), "{c} should not be sticky");
         }
     }
