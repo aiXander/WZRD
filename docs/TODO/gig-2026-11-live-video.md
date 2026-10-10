@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a + E1b landed, P1 + P4 done. Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a + E1b landed, P1 + P4 + P3 done. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -73,12 +73,11 @@ doc of its owner.
 [mcp-server.md](../reference/mcp-server.md) "The project folder and its
 locked canvas".
 
-**C2 — provenance sidecar** `<output>.meta.json` next to every file a tool
-writes (owner P3): `{ "schema": 1, "tool", "args" (incl. prompt / refs /
-seed / model), "inputs": [paths], "parent": path|null, "created": ISO,
-"est_usd": float, "region": layer id|null, "source_box": [x0,y0,x1,y1]|null }`.
-Reserved for [vj-toolbox.md](vj-toolbox.md) phase 4: `"rating":
-"favourite"|"reject"`. Readers ignore unknown keys.
+**C2 — provenance sidecar** — landed with P3: `<output>.meta.json` beside
+every media file a tool writes (`tool`, `args`, `inputs`, `parent`,
+`created`, `est_usd`, `region`, `source_box`; `rating` reserved). Contract now
+in [mcp-server.md](../reference/mcp-server.md) "Provenance sidecars and the
+spend cap".
 
 **C3 — clip files** (owner P5): a playable clip is a HAP `.mov` under the
 project's `generated/`, stem shared with its source: `<stem>.mp4` (source),
@@ -92,36 +91,13 @@ without a thumb shows a placeholder.
 `[x0, y0, x1, y1]`, pack pixels, max-exclusive like `bbox`, may extend past
 the canvas. Contract now in [render-engine.md](../reference/render-engine.md) §2.2.
 
-**C5 — clip binding in `scene.json`** (owner E1, written by A2 and the agent):
-
-```jsonc
-{ "id": "clip_fabric_left",
-  "select": { "id": "fabric_left" },
-  "effect": "videoClip",                 // or any effect declaring an `image` input
-  "params": {
-    "image": { "clip": "generated/tf_0412.mov",   // relative to the scene dir
-               "placement": "region",             // "region" (default) | "canvas"
-               "rate": 1.0 } } }
-```
-
-- Descriptor input `{ "name": "image", "type": "image" }`; at most one per
-  effect in v1. WGSL reads it with the prelude accessor **`sample_image(uv)`**
-  (canvas uv in, premultiplied RGBA out; transparent outside the region's box
-  under `"region"`). A binding that resolves to N layers places the clip in
-  each layer's own box.
-- **Playhead is stateless:** `(leg transport time × rate) mod duration` (HAP
-  is all-intra, so any frame is a free seek). Promote already copies
-  transport, so a clip continues across TAKE without a jump, and the speed
-  master bends clips for free. E1 confirms in its design pass; if it
-  changes, it changes here first.
-- Missing file, non-HAP file or no BC support → that binding draws nothing
-  and reports a load error; every other binding keeps playing.
-- **A clip whose aspect differs from its box is fit uniformly, centred
-  ("contain"), never stretched** — the D8 rule (added with P1). Clips are
-  rendered at a model's native aspect from the region's crop, and video
-  models only offer a few (Kling: 16:9 / 9:16 / 1:1), so a tall pillar's
-  clip is close to, not exactly, its box; contain is the exact inverse of
-  the model's cover-crop. `reproject_video` does the same offline.
+**C5 — clip binding in `scene.json`** — landed with E1: an `image`-type
+effect input takes `{clip, placement: "region"|"canvas", rate}`, clip path
+relative to the scene dir; placement is contain-fit, never stretched; the
+playhead is stateless `(leg time × rate) mod duration`; a clip that can't
+open is a per-binding warning, not a load error. Contract now in
+[render-engine.md](../reference/render-engine.md) §2.1 (scene shape) and
+§2.4 (`sample_image`, decode).
 
 **C6 — global library layout** (D16): `library/effects/<name>/{shader.wgsl,
 descriptor.json, preview.jpg}`, `library/recipes/<name>/{recipe.json,
@@ -168,19 +144,16 @@ conformed to the canvas; EXIF orientation applied in the shared loader for
 every tool. **Gate:** an iPhone HEIC shot in portrait lands upright and at
 canvas size.
 
-### P3 — Provenance sidecars + spend cap
+### P3 — Provenance sidecars + spend cap — done 2026-10-10
 
-PY · needs P1 (`project.json`) · `wzrd_mcp/_log.py` (`logged_tool`), the
-generation tools. `logged_tool` writes a C2 sidecar for every local output
-path in a result. Add `est_usd` for Nano Banana, Kling and TextureFlow.
-`texture_flow`, `kling_*` and `nano_banana` gain an optional `region=<layer
-id>`: recorded in the sidecar together with that layer's `source_box` from
-the project's `pack.json`. Spend = sum of `est_usd` over the project's
-sidecars; generation tools warn at 80 % of `spend_cap_usd` and refuse past
-it unless called with `allow_over_cap=True` (the agent asks Xander first).
-No `list_assets` / `mark_asset` yet. **Gate:** a TextureFlow render with
-`region=` produces a sidecar naming region + box; a call past the cap is
-refused with the running total.
+`logged_tool` writes a C2 sidecar for every media output; `nano_banana`,
+`kling_*` and `texture_flow` take `region=<layer id>` (recorded with its box)
+and `allow_over_cap`, and refuse a call that would cross the project's spend
+cap. Gate: a TextureFlow render with `region="region_1"` wrote a sidecar with
+region + box `[-30, 2, 382, 734]` and $0.0122; over the cap → refused with
+"$0.01 of its $0.01 cap". Done — see [mcp-server.md](../reference/mcp-server.md)
+"Provenance sidecars and the spend cap". P5 builds on it: `to_hap` must
+copy `region`/`source_box` into the `.mov` sidecar with `parent` = the mp4.
 
 ### P4 — `source_box` in the pack + starter `scene.json` — done 2026-10-10
 
@@ -214,31 +187,22 @@ still-vs-surface shift check gated at ≈ 0.1 %. Compact JSON, no pixels to
 the LLM. **Gate:** a synthetic 5 Hz strobe fails, a TextureFlow loop passes,
 a keyframe shifted 3 px fails the shift check.
 
-### E1 — Engine video: HAP clips as an effect `image` input (roadmap §5.9)
+### E1 — Engine video: HAP clips as an effect `image` input — DONE (2026-10-10)
 
-ENG · needs C4/C5 only · new `render-core/src/video.rs`, effect registry +
-prelude, `gpu.rs`, compositor; step d touches `wzrd_mcp/engine_tools.py`.
-Read roadmap §5.9 (design + the staging-ring invariant) and reference
-§1b/§2.1/§2.4/§2.6 first. Four steps, each its own commit and gate:
-
-- **a. The `image` input.** Descriptor type `image`, the `sample_image(uv)`
-  accessor, built-in `videoClip`, canvas placement — fed from a still PNG
-  first so the binding layout is proven before any decoding. Gate: headless
-  scene shows a PNG cut by a mask; bad path → load error, rest plays.
-- **b. HAP decode.** MOV demux + snappy + BC upload on a decode thread
-  through the staging ring; `TEXTURE_COMPRESSION_BC` requested only if
-  offered; the C5 stateless playhead. Plain HAP (BC1) required; HAP Q (BC3
-  YCoCg, needs a colour convert) only if cheap; no alpha variant (additive:
-  black is already dark). Gate: seven clips at 60 fps (p95) on the M2, **and
-  a TAKE crossfade that swaps all seven clips holds 60 fps** (both legs
-  decode during the fade).
-- **c. Region placement** from `source_box`, `bbox` fallback. Gate: **six
-  fabric clips + a ceiling clip looping at 60 fps on the M2**, each inside
-  its own region.
-- **d. Agent + docs.** `get_scene_context` shows clip params,
-  `upsert_binding` documents C5; reference §2.1/§2.4/§1b updated, BC
-  exception added to CLAUDE.md. Gate: an external Claude session binds a clip
-  to a named region on design from a plain-language ask.
+Shipped in four commits: (a) the `image` input + `sample_image(uv)` +
+built-in `videoClip`; (b) HAP decode — pure-Rust MOV reader + `snap`, one
+decode thread + 4-slot staging ring per (plan, binding) stream,
+`TEXTURE_COMPRESSION_BC` only if offered; (c) region placement from
+`source_box` (`bbox` fallback), contain-fit; (d) MCP wiring
+(`get_scene_context` lists clips with their sidecar region, warnings in
+apply replies, C5 in `upsert_binding`) + the CLAUDE.md BC exception. All
+gates passed on the M2 (seven clips and a seven-clip TAKE at 60 fps, p95
+≤ 17.2 ms; six fabric + ceiling clips in their regions 60 fps; a cold
+Claude session bound "the clip rendered for the third fabric" by its
+sidecar region). What E2 inherits: a TAKE now opens no streams on live
+(they move with the plan), but design's post-promote rebuild reopens them,
+and a clip's first decoded frame lands one frame after its leg wakes. Done
+— see [render-engine.md](../reference/render-engine.md) §1b / §2.1 / §2.4.
 
 ### E2 — Post-swap probation window (D15, roadmap §5.11)
 

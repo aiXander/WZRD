@@ -64,9 +64,10 @@ idempotent=, open_world=)` — never `@mcp.tool` by hand:
   List results (engine replies, `view_media`) pass through as content blocks
   (`fastmcp.utilities.types.Image` for images). `test.py mcp` fails any tool
   that advertises an output schema.
-- **`logged_tool` owns logging and errors**: call/result/error lines on stderr
-  (never stdout — stdio transport), request timing, and any non-`ToolError`
-  exception re-raised as `ToolError(str(exc))`. Tool bodies carry no
+- **`logged_tool` owns logging, errors and provenance**: call/result/error
+  lines on stderr (never stdout — stdio transport), request timing, any
+  non-`ToolError` exception re-raised as `ToolError(str(exc))`, and the C2
+  sidecars for every dict result (next section). Tool bodies carry no
   try/except/log boilerplate; raise `ToolError` for an actionable refusal.
 - **Annotations** are MCP behaviour hints: `open_world` = paid/remote call
   (nano_banana, kling, texture_flow), `destructive` = deletes or overwrites
@@ -147,6 +148,45 @@ never carries them. The parked Modal image mounts `tools_config.json` and
   reference). Before 2026-10-10 `region_mask` pointed at the crop, so packs
   built from it stretched crops over the whole canvas.
 
+## Provenance sidecars and the spend cap
+
+**Sidecar** (gig contract C2): `<output>.meta.json` next to every media file
+(`.png .jpg .jpeg .webp .gif .mp4 .mov .webm`) a tool call created inside the
+active project — `{ "schema": 1, "tool", "args" (non-null client args +
+tool extras: model, used seed), "inputs": [local paths resolved, URLs],
+"parent": path|null (default: first local input), "created": ISO UTC,
+"est_usd", "region": layer id|null, "source_box": [x0,y0,x1,y1]|null }`.
+Reserved for the post-gig toolbox: `"rating"`. Readers ignore unknown keys;
+the app's clip grid reads `region`, `source_box`, `est_usd`, `tool`,
+`created` and the parent's sidecar (`wzrd-app/src-tauri/src/clips.rs`).
+
+- Written by `logged_tool` → `provenance.write_sidecars` after the body
+  returns, never by tool bodies. An output = an absolute media path in the
+  result, inside the project, modified during the call, not an input.
+  Failure to write is logged, not raised.
+- A tool that knows more returns a private `_provenance` dict (popped before
+  the agent sees the result): `est_usd` **keyed per output path** (so
+  TextureFlow's three preview videos count $0 and the cost lands once, on
+  `output_video`), `args` extras, `region`/`source_box`, `paid`.
+- **`region=<layer id>`** on `nano_banana`, `kling_*`, `texture_flow`:
+  `provenance.region_meta` looks the id up in the pack the project's
+  `scene.json` points at (else the newest `packs/*/pack.json`) and records
+  its `source_box` (else `bbox` — the engine's own fallback). Unknown id or
+  no pack → refused before any spend. The id is only recorded; it doesn't
+  change what the model is asked to do.
+
+**Spend cap (D10)**: `spend_cap_usd` in `project.json` (default $20, also
+for legacy projects; `set_project(spend_cap_usd=…)` — only on Xander's
+word). Spent = sum of `est_usd` over the project's sidecars (rglob per
+call; fine at hundreds of files). Each paid tool calls
+`provenance.check_spend(<pre-estimate>, allow_over_cap)` before its remote
+call and refuses with the running total if it would cross the cap; after
+the call its result carries `spend: "$x of $cap"` plus a `spend_warning`
+from 80 %. Pre-estimates vs recorded cost: Nano Banana tier price ×
+images (recorded: from token usage), Kling list price × seconds (recorded:
+the same), TextureFlow $0.20 / $0.03 without upscales (recorded: billed
+container seconds × $1.95/h L40S). Prices: [hosted-models.md](hosted-models.md).
+
 ## File map
 
 | File | Role |
@@ -158,7 +198,8 @@ never carries them. The parked Modal image mounts `tools_config.json` and
 | `google_tools.py`, `fal_tools.py` | hosted models — [hosted-models.md](hosted-models.md) |
 | `engine_tools.py` | engine authoring slice — [render-engine.md](render-engine.md) §2.7 |
 | `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, `set_project` |
-| `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing; 15 s progress pings during remote calls |
+| `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing + sidecar hook; 15 s progress pings during remote calls |
+| `provenance.py` | C2 sidecars, spend cap, `region=` → pack layer box |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |
 | `file_io.py`, `auth.py`, `modal_app.py`, `upload.py` | input resolution; parked cloud path |
 

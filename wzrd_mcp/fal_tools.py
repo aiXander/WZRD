@@ -24,7 +24,7 @@ import fal_client
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from . import project
+from . import project, provenance
 from ._keepalive import with_keepalive
 from .file_io import resolve_input_async
 from ._log import log_progress
@@ -169,6 +169,21 @@ async def _to_fal_urls(values: list[Optional[str]]) -> list[Optional[str]]:
     return list(await asyncio.gather(*(_to_fal_url(v) for v in values)))
 
 
+# FAL list prices (fal.ai model pages, 2026-10-10).
+_KLING_V25_5S = 0.35
+_KLING_V25_PER_EXTRA_S = 0.07
+_KLING_V3_PER_S = 0.084
+_KLING_V3_PER_S_AUDIO = 0.126
+
+
+def _with_cost(result: dict, usd: float, endpoint: str, region_info: dict) -> dict:
+    """Attach the provenance (cost on the video, model, region) `logged_tool` writes."""
+    video = os.path.realpath(result["output_video"])
+    result["_provenance"] = {"paid": True, "est_usd": {video: usd},
+                             "args": {"model": endpoint}, **region_info}
+    return result
+
+
 def _nearest_aspect(image: str, choices: tuple[str, ...]) -> str:
     """The choice nearest a local image's aspect (log-ratio); first choice for URLs.
 
@@ -242,6 +257,8 @@ async def kling_v25_image_to_video(
     tail_image_url: Optional[str] = None,
     negative_prompt: str = "blur, distort, and low quality",
     cfg_scale: float = 0.5,
+    region: Optional[str] = None,
+    allow_over_cap: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Animate a start frame (optionally into an end frame) as a 5 or 10 s video with Kling v2.5 Turbo Pro via FAL.
@@ -256,7 +273,12 @@ async def kling_v25_image_to_video(
         tail_image_url: Optional URL or local path of an image for the last frame (start→end transition).
         negative_prompt: Things to avoid in the generation.
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
+        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
+        allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
     """
+    region_info = provenance.region_meta(region) if region else {}
+    usd = _KLING_V25_5S + _KLING_V25_PER_EXTRA_S * max(0, int(duration) - 5)
+    provenance.check_spend(usd, allow_over_cap)
     image_url, tail_image_url = await _to_fal_urls([image_url, tail_image_url])
 
     fal_args = {
@@ -269,13 +291,12 @@ async def kling_v25_image_to_video(
     if tail_image_url:
         fal_args["tail_image_url"] = tail_image_url
 
-    return await _run_fal_tool(
-        "kling_v25_image_to_video",
-        "fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
-        fal_args, output_type="video",
-        response_info={"duration": duration},
-        ctx=ctx,
+    endpoint = "fal-ai/kling-video/v2.5-turbo/pro/image-to-video"
+    result = await _run_fal_tool(
+        "kling_v25_image_to_video", endpoint, fal_args, output_type="video",
+        response_info={"duration": duration}, ctx=ctx,
     )
+    return _with_cost(result, usd, endpoint, region_info)
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +312,8 @@ async def kling_v3_image_to_video(
     negative_prompt: str = "blur, distort, and low quality",
     cfg_scale: float = 0.5,
     aspect_ratio: Optional[str] = None,
+    region: Optional[str] = None,
+    allow_over_cap: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Generate a 3-15 second video from a starting image using Kling v3.0 Standard via FAL.
@@ -307,7 +330,12 @@ async def kling_v3_image_to_video(
         negative_prompt: Things to avoid in the generation.
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
         aspect_ratio: "16:9", "9:16" or "1:1". Default: the one nearest the start image's aspect.
+        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
+        allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
     """
+    region_info = provenance.region_meta(region) if region else {}
+    usd = int(duration) * (_KLING_V3_PER_S_AUDIO if generate_audio else _KLING_V3_PER_S)
+    provenance.check_spend(usd, allow_over_cap)
     aspect_ratio = aspect_ratio or _nearest_aspect(start_image_url, ("16:9", "9:16", "1:1"))
     start_image_url, end_image_url = await _to_fal_urls([start_image_url, end_image_url])
 
@@ -323,10 +351,9 @@ async def kling_v3_image_to_video(
     if end_image_url:
         fal_args["end_image_url"] = end_image_url
 
-    return await _run_fal_tool(
-        "kling_v3_image_to_video",
-        "fal-ai/kling-video/v3/standard/image-to-video",
-        fal_args, output_type="video",
-        response_info={"duration": duration, "aspect_ratio": aspect_ratio},
-        ctx=ctx,
+    endpoint = "fal-ai/kling-video/v3/standard/image-to-video"
+    result = await _run_fal_tool(
+        "kling_v3_image_to_video", endpoint, fal_args, output_type="video",
+        response_info={"duration": duration, "aspect_ratio": aspect_ratio}, ctx=ctx,
     )
+    return _with_cost(result, usd, endpoint, region_info)

@@ -108,6 +108,22 @@ def log_overhead(tool_name: str, req_received: float, tool_start: float,
     )
 
 
+def _with_provenance(tool: str, client_args: dict, result: dict, since: float) -> dict:
+    """Write the C2 sidecars for a call's outputs (see `provenance.py`) and,
+    for a paid call, append the project's running spend. A sidecar failure is
+    logged, never fatal — the output itself is already on disk."""
+    from . import provenance
+
+    prov = result.pop("_provenance", None)
+    try:
+        provenance.write_sidecars(tool, client_args, result, since, prov)
+    except Exception as exc:  # noqa: BLE001
+        log_progress(tool, f"provenance sidecar skipped: {exc}")
+    if prov and prov.get("paid"):
+        result.update(provenance.spend_report())
+    return result
+
+
 def logged_tool(fn):
     """Log a tool call end to end and turn any failure into a `ToolError`.
 
@@ -117,6 +133,7 @@ def logged_tool(fn):
     exception is logged and re-raised as `ToolError(str(exc))` so the agent
     sees an actionable message instead of FastMCP's masked "internal error".
     Tool bodies therefore need no try/except/log boilerplate of their own.
+    A dict result also gets its provenance sidecars written here.
 
     Applied by `server.tool()` — never stack it by hand.
     """
@@ -132,6 +149,8 @@ def logged_tool(fn):
             timing["tool_start"] = time.time()
         try:
             result = await fn(*args, **kwargs)
+            if isinstance(result, dict):
+                result = _with_provenance(fn.__name__, client_args, result, t0)
             log_done(fn.__name__, t0, result if isinstance(result, dict) else None)
             return result
         except ToolError as exc:

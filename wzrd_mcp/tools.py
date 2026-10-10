@@ -21,7 +21,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from . import project
+from . import project, provenance
 from ._log import log_progress
 from .file_io import resolve_input_async
 from .server import tool
@@ -456,6 +456,10 @@ async def reproject_video(
 # all validation. Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
+_TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap")  # never sent to the server
+_TF_USD_PER_S = 1.95 / 3600  # Modal L40S list price
+_TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~6 min warm)
+_TF_EST_QUICK_USD = 0.03  # pre-call guess, no upscale passes
 
 
 def _tf_pack_media(args: dict) -> dict[str, bytes]:
@@ -512,6 +516,8 @@ async def texture_flow(
     upscale_esrgan: Optional[bool] = None,
     seed: Optional[int] = None,
     output_codec: Optional[str] = None,
+    region: Optional[str] = None,
+    allow_over_cap: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Render an abstract, morphing, seamlessly flowing animation from 1-6 style images (TextureFlow: SD1.5 + AnimateDiff + IP-Adapter + ControlNet, on WZRD's own Modal GPU).
@@ -547,10 +553,16 @@ async def texture_flow(
         upscale_esrgan: ESRGAN to 1920 px long side (default true; sharp/realistic, less ideal for organic looks). Runs even with use_upscale=false.
         seed: 0-2147483647. Omit for random; the used seed is returned, pass it back to reproduce.
         output_codec: "h264" (default) or "hevc10" (smaller, higher fidelity, not decodable everywhere).
+        region: Optional pack layer id this render is for (e.g. "fabric_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
+        allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
     """
     # First statement on purpose: locals() is exactly the tool's parameters here.
-    args = {k: v for k, v in locals().items() if k != "ctx" and v is not None}
+    args = {k: v for k, v in locals().items() if k not in _TF_LOCAL_ARGS and v is not None}
     import modal
+
+    region_info = provenance.region_meta(region) if region else {}
+    quick = use_upscale is False and upscale_esrgan is False
+    provenance.check_spend(_TF_EST_QUICK_USD if quick else _TF_EST_FULL_USD, allow_over_cap)
 
     files = await asyncio.to_thread(_tf_pack_media, args)
     app_name, env = _tf_target()
@@ -567,6 +579,16 @@ async def texture_flow(
         response[key] = path
     response.update(seed=res["params"].get("seed"), params=res["params"],
                     request_id=res["request_id"], timings=res["timings"])
+    # Cost = billed container seconds on the L40S, all on the main output.
+    t = res["timings"]
+    seconds = (t.get("total_s") or 0) + ((t.get("restore_s") or 0) if t.get("cold_start") else 0)
+    main = response.get("output_video")
+    response["_provenance"] = {
+        "paid": True,
+        "est_usd": {str(Path(main).resolve()): seconds * _TF_USD_PER_S} if main else {},
+        "args": {"seed": res["params"].get("seed"), "model": f"{app_name} (TextureFlow)"},
+        **region_info,
+    }
     return response
 
 

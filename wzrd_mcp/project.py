@@ -124,7 +124,7 @@ def describe() -> dict:
         "project_dir": str(root),
         "exists": root.is_dir(),
         "canvas": meta.get("canvas") if meta else None,
-        "spend_cap_usd": meta.get("spend_cap_usd") if meta else None,
+        "spend_cap_usd": (meta or {}).get("spend_cap_usd", DEFAULT_SPEND_CAP_USD),
         "subdirs": {
             k: str(root / k)
             for k in (SURFACES, GENERATED, VIDEO, REGIONS, CAPTURES, PACKS)
@@ -209,7 +209,10 @@ def canvas() -> tuple[int, int] | None:
 
 
 def _has_content(root: Path) -> bool:
-    return any(p.is_file() and not p.name.startswith(".") for p in root.rglob("*"))
+    return any(
+        p.is_file() and not p.name.startswith(".") and p.name != PROJECT_FILE
+        for p in root.rglob("*")
+    )
 
 
 def lock_canvas(value: str) -> tuple[int, int]:
@@ -227,17 +230,26 @@ def lock_canvas(value: str) -> tuple[int, int]:
                 f"a canvas never changes — start a new project for {size[0]}x{size[1]}"
             )
         return size
-    if meta is None and root.is_dir() and _has_content(root):
+    if root.is_dir() and _has_content(root):
         raise ValueError(
             f"project {active_project()!r} already holds files made without a canvas (a legacy "
             f"project); a canvas is chosen once, for new projects only — start a new project"
         )
     root.mkdir(parents=True, exist_ok=True)
-    data = {"schema": PROJECT_SCHEMA, "canvas": list(size),
-            "spend_cap_usd": DEFAULT_SPEND_CAP_USD, **(meta or {})}
+    data = {"schema": PROJECT_SCHEMA, "spend_cap_usd": DEFAULT_SPEND_CAP_USD, **(meta or {})}
     data["canvas"] = list(size)
     write_project_file(data)
     return size
+
+
+def set_spend_cap(usd: float) -> None:
+    """Change the active project's soft spend cap (writes project.json)."""
+    if usd < 0:
+        raise ValueError("spend_cap_usd must be >= 0")
+    project_dir().mkdir(parents=True, exist_ok=True)
+    data = {"schema": PROJECT_SCHEMA, **(read_project_file() or {})}
+    data["spend_cap_usd"] = float(usd)
+    write_project_file(data)
 
 
 # ---------------------------------------------------------------------------

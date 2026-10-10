@@ -15,6 +15,7 @@ import asyncio
 import functools
 import io
 import os
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import Context
@@ -23,7 +24,7 @@ from google import genai
 from google.genai import errors, types
 from PIL import Image
 
-from . import project
+from . import project, provenance
 from ._keepalive import with_keepalive
 from ._log import log_progress
 from .file_io import resolve_input_async
@@ -52,6 +53,9 @@ _FILTER_REASONS = {
 _USD_PER_M_INPUT = 1.50
 _USD_PER_M_TEXT_OUT = 7.50  # text + thought tokens
 _USD_PER_M_IMAGE_OUT = 30.0
+# Pre-call estimate for the spend cap (the real cost comes from usage after).
+_USD_PER_IMAGE = {"1K": 0.034, "2K": 0.050, "4K": 0.113}
+_USD_PER_REF = 0.002
 
 
 class _NoImage(Exception):
@@ -189,6 +193,8 @@ async def nano_banana(
     enable_web_search: bool = False,
     seed: int = -1,
     thinking_level: str = "medium",
+    region: Optional[str] = None,
+    allow_over_cap: bool = False,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Generate or edit an image with Nano Banana 2.1 (Google). Keyframes on a surface, surface masking, segmentation maps, character poses.
@@ -214,6 +220,8 @@ async def nano_banana(
         enable_web_search: Use Google Search grounding for current events or real-world references.
         seed: Random seed (0-2147483647). It nudges the composition but does not reproduce an image exactly.
         thinking_level: How much the model reasons before drawing. "minimal" (~30% faster, fine for simple edits), "medium" (default), or "high".
+        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
+        allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
     """
     image_urls = image_urls or []
     canvas = project.canvas()
@@ -225,6 +233,11 @@ async def nano_banana(
     if not 1 <= num_images <= 4:
         raise ToolError(f"num_images must be 1-4 (got {num_images})")
     resolution = resolution.upper()
+    region_info = provenance.region_meta(region) if region else {}
+    provenance.check_spend(
+        num_images * (_USD_PER_IMAGE.get(resolution, 0.113) + _USD_PER_REF * len(image_urls)),
+        allow_over_cap,
+    )
     client, backend = _client()
 
     image_config = types.ImageConfig(image_size=resolution)
@@ -252,12 +265,13 @@ async def nano_banana(
     if not ok:
         raise failed[0]
 
-    paths = []
-    for blob, _ in ok:
+    paths, costs = [], {}
+    for blob, usd in ok:
         path = project.output_path("nano_banana", _EXT.get(blob.mime_type, ".png"))
         with open(path, "wb") as f:
             f.write(blob.data)
         paths.append(path)
+        costs[str(Path(path).resolve())] = usd
 
     info = {
         "resolution": resolution, "aspect_ratio": aspect_ratio,
@@ -268,4 +282,8 @@ async def nano_banana(
     }
     if failed:
         info["failed"] = [str(e) for e in failed]
-    return {"output_images": paths, "info": info}
+    return {
+        "output_images": paths, "info": info,
+        "_provenance": {"paid": True, "est_usd": costs,
+                        "args": {"model": _MODEL, "backend": backend}, **region_info},
+    }

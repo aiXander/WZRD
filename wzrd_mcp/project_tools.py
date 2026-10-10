@@ -15,6 +15,7 @@ from .server import tool
 async def set_project(
     name: Optional[str] = None,
     canvas: Optional[str] = None,
+    spend_cap_usd: Optional[float] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Choose the project folder that every subsequent tool writes its output into.
@@ -34,19 +35,29 @@ async def set_project(
     so nothing is ever cropped or stretched. Surface tools conform photos to it
     and build_layerpack authors at it. It can never change afterwards.
 
+    Paid tools (nano_banana, kling_*, texture_flow) count against the
+    project's soft spend cap (default $20): every result reports the running
+    spend, warns at 80 %, and a call past the cap is refused.
+
     Args:
         name: Project name (created if it doesn't exist yet). Omit to just report the active project and list the existing ones.
+        spend_cap_usd: Change the project's spend cap — only when Xander asks for it.
         canvas: New projects only, set once: an aspect ("16:9", "4:3", "1:1", "9:16", "21:9", "3:2", "2:3", "4:5", "5:4", "3:4" → its 1K size) or an exact native size like "2752x1536" (2K).
     """
     if name:
         project.set_project(name)
-    if canvas:
-        try:
+    try:
+        if canvas:
             project.lock_canvas(canvas)
-        except ValueError as exc:
-            raise ToolError(str(exc))
+        if spend_cap_usd is not None:
+            project.set_spend_cap(spend_cap_usd)
+    except ValueError as exc:
+        raise ToolError(str(exc))
+    from . import provenance
+
     return {
         **project.describe(),
+        "spent_usd": round(provenance.spent(), 2),
         "projects_root": str(project.projects_root()),
         "existing_projects": project.list_projects(),
     }

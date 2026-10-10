@@ -112,6 +112,12 @@ wired up. Search grounding (`enable_web_search`) works with image output.
 
 ## Video: Kling on FAL
 
+**Prices** (FAL list, 2026-10-10; the spend cap's constants in
+`fal_tools.py`): v2.5 turbo pro $0.35 per 5 s + $0.07 per extra second; v3
+standard $0.084/s ($0.126/s with audio). **No `FAL_KEY` in `.env` on this
+machine yet** (backlog: own `FAL_KEY`), so the Kling tools fail until one is
+added.
+
 `kling_v3_image_to_video` only knows 16:9 / 9:16 / 1:1; its `aspect_ratio`
 defaults to the one nearest the start frame (a tall region keyframe stays
 tall) instead of a fixed 16:9.
