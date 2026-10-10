@@ -184,6 +184,10 @@ pub struct RpcContext {
     /// `scene.getState { leg: "live" }` so `pull` is verifiable over RPC.
     /// Updated at boot and on every promote completion.
     pub live_scene_state: Arc<parking_lot_lite::SwapValue>,
+    /// The scene file's directory — what C5 clip paths (`image.clip`)
+    /// resolve against. Served on `scene.getState` so an authoring client
+    /// can list the project's clips.
+    pub scene_dir: PathBuf,
     pub effects_dir: Option<PathBuf>,
     pub bus: Bus,
     /// **Live-leg** `ui.slider` values. `param.set` writes here directly (no
@@ -459,6 +463,7 @@ pub fn dispatch(
             Ok(json!({
                 "json": raw,
                 "leg": p.leg.unwrap_or_else(|| "design".into()),
+                "scene_dir": ctx.scene_dir.display().to_string(),
                 "epoch": ctx.changes.epoch(),
                 "rev": ctx.changes.rev(),
             }))

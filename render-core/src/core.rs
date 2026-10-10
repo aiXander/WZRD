@@ -450,6 +450,7 @@ impl Core {
             pack: Arc::new(PackInfoCell::new(PackInfo::from_pack(&pack))),
             changes: Arc::clone(&changes),
             scene_state: Arc::clone(&scene_state),
+            scene_dir: scene_dir(&scene_path).to_path_buf(),
             live_scene_state: Arc::clone(&live_scene_state),
             effects_dir: effects_dir.clone(),
             bus: bus.clone(),

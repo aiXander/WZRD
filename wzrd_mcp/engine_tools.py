@@ -74,10 +74,10 @@ _BINDING_SCHEMA = {
             "type": "object",
             "description": 'Exactly one of {"id": …} | {"tag": …} | {"group": …} | {"all": true}; optional "pick": {"mode": "random_each"|"random_static", "rate": {"driver": "clock.bars", "n": 4}}.',
         },
-        "effect": {"type": "string", "description": "Effect name: built-in (tint, hueCycle, flash, wobble) or project-local (author with upsert_effect)."},
+        "effect": {"type": "string", "description": "Effect name: built-in (tint, hueCycle, flash, wobble, videoClip) or project-local (author with upsert_effect)."},
         "params": {
             "type": "object",
-            "description": 'Effect inputs: a constant ("#ffffff", 1.2) or a driver, e.g. {"driver": "audio.onset", "band": "low", "decay": 0.15}, {"driver": "clock.phase", "rate": 1}, {"driver": "ui.slider", "name": "x", "default": 0.1}.',
+            "description": 'Effect inputs: a constant ("#ffffff", 1.2) or a driver, e.g. {"driver": "audio.onset", "band": "low", "decay": 0.15}, {"driver": "clock.phase", "rate": 1}, {"driver": "ui.slider", "name": "x", "default": 0.1}. An `image`-type input takes a clip: {"clip": "generated/x.mov", "placement": "region"|"canvas", "rate": 1.0} (path relative to the scene dir; HAP .mov or a .png/.jpg still).',
         },
     },
     "required": ["select", "effect"],
@@ -323,6 +323,11 @@ _client = EngineClient(_ENGINE_WS)
 
 
 def _fmt_param(value: Any) -> str:
+    if isinstance(value, dict) and "clip" in value:
+        # C5 image param: {clip, placement?, rate?}
+        rate = value.get("rate", 1)
+        extra = f", rate={rate:g}" if isinstance(rate, (int, float)) and rate != 1 else ""
+        return f"clip({value['clip']}, {value.get('placement', 'region')}{extra})"
     if isinstance(value, dict) and "driver" in value:
         extras = ",".join(f"{k}={v}" for k, v in value.items() if k != "driver")
         return f"{value['driver']}({extras})" if extras else str(value["driver"])
@@ -375,7 +380,10 @@ def _render_layers(pack: dict, depth: str, ids: Optional[list[str]]) -> str:
         )
         if depth == "full":
             tags = ",".join(l.get("tags") or []) or "-"
-            line += f" tags=[{tags}] bbox={l.get('bbox')} mask={l.get('mask_path')}"
+            line += f" tags=[{tags}] bbox={l.get('bbox')}"
+            if l.get("source_box"):
+                line += f" source_box={l['source_box']}"
+            line += f" mask={l.get('mask_path')}"
         lines.append(line)
     if len(lines) == 1:
         lines.append("  (no layers matched)")
@@ -421,6 +429,39 @@ def _render_bindings(
     return "\n".join(lines)
 
 
+def _render_clips(scene_dir: Optional[str], depth: str) -> str:
+    """The project's playable clips (gig plan C3: HAP `.mov` under
+    `generated/`, each with a `<clip>.meta.json` sidecar naming the region it
+    was made for), newest first, as the paths an `image.clip` param takes.
+    Read from this machine's disk — the engine and this server share it."""
+    if not scene_dir or not os.path.isdir(os.path.join(scene_dir, "generated")):
+        return "clips: none (no generated/ folder next to the scene)"
+    gen = os.path.join(scene_dir, "generated")
+    movs = sorted(
+        (f for f in os.listdir(gen) if f.lower().endswith(".mov")),
+        key=lambda f: os.path.getmtime(os.path.join(gen, f)),
+        reverse=True,
+    )
+    if not movs:
+        return "clips: none in generated/ (render, then transcode to HAP)"
+    limit = None if depth == "full" else 12
+    lines = [
+        f"clips ({len(movs)} HAP in generated/, newest first; bind as "
+        f'image.clip="generated/<name>"):'
+    ]
+    for f in movs[:limit]:
+        region = None
+        try:
+            with open(os.path.join(gen, f + ".meta.json")) as fh:
+                region = json.load(fh).get("region")
+        except (OSError, ValueError):
+            pass
+        lines.append(f"  generated/{f}" + (f"  (made for region {region})" if region else ""))
+    if limit and len(movs) > limit:
+        lines.append(f"  … {len(movs) - limit} older (depth='full' lists all)")
+    return "\n".join(lines)
+
+
 def _render_effect_digest(catalog: list[dict]) -> str:
     lines = [f"effects ({len(catalog)}):"]
     for e in sorted(catalog, key=lambda x: x.get("name", "")):
@@ -462,7 +503,12 @@ def _apply_reply_text(result: dict, what: str) -> str:
         )
     else:
         verdict = "probe: not run (no new pipelines — cached shaders reused)"
-    return f"r{rev}: {what} applied to the design leg. {verdict}"
+    text = f"r{rev}: {what} applied to the design leg. {verdict}"
+    # C5 — a clip that fails to open (missing file, not HAP, no BC on this
+    # GPU) doesn't fail the apply: that binding draws nothing.
+    for w in result.get("warnings") or []:
+        text += f"\nWARNING: {w}"
+    return text
 
 
 def _apply_reply(result: dict, what: str) -> list:
@@ -562,6 +608,7 @@ async def get_scene_context(
         sections.append(
             _render_bindings(scene, pack, params.get("overrides", {}), depth, ids)
         )
+        sections.append(_render_clips(state.get("scene_dir"), depth))
 
     if "effects" in scopes:
         if depth == "full":
@@ -633,6 +680,17 @@ async def upsert_binding(
     "params": {...}} — the `id` field is set from the id argument. Check the
     probe verdict in the reply before reporting success; a thumbnail of the
     design composite rides along when shaders were rebuilt.
+
+    Playing a clip on a region (gig plan C5): effect "videoClip" (or any
+    effect declaring an `image` input) with
+    params {"image": {"clip": "generated/tf_0412.mov", "placement": "region",
+    "rate": 1.0}, "gain": 1.0}. `clip` is relative to the scene dir — take it
+    from the clips list get_scene_context prints. "region" (default) fits the
+    clip into each target layer's source_box ("contain", never stretched);
+    "canvas" plays it full-frame cut by the mask. The playhead is the leg's
+    clock × rate, looping. A clip that can't load comes back as a WARNING —
+    that binding draws nothing; fix the path rather than reporting success.
+    Bind on design only; going live stays the operator's TAKE.
     """
     state = await _client.request("scene.getState", {})
     try:
@@ -802,6 +860,10 @@ async def get_preview() -> list:
         "telemetry.subscribe", {"channels": _STANDING_CHANNELS + ["preview"]}
     )
     try:
+        frame = await _client.wait_frame("preview", timeout=6.0)
+        # The subscription itself wakes the demand-gated design leg, so the
+        # first frame can predate its clips' first decoded frame (black
+        # where a clip will be). The next one (~66 ms later) has them.
         frame = await _client.wait_frame("preview", timeout=6.0)
     finally:
         await _client.request("telemetry.subscribe", {"channels": _STANDING_CHANNELS})

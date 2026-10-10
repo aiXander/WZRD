@@ -140,6 +140,15 @@ agents.
   timeout holds even if the render thread wedges — inline methods dispatch
   on the caller.
 
+- **The one GPU-feature exception (gig plan D2, E1b):**
+  `TEXTURE_COMPRESSION_BC` is requested **iff the adapter offers it**
+  (`gpu::GpuContext::bc_supported`) — HAP clips upload as BC1/BC3. Apple
+  Silicon and desktop NVIDIA/AMD/Intel all offer it; without it the engine
+  runs unchanged and every HAP clip fails to open with a named per-binding
+  warning (stills still work). Everything else stays `Features::empty()` /
+  `Limits::default()`. Video decode is pure Rust (hand-written MOV reader +
+  the `snap` crate) — no ffmpeg link, no VideoToolbox.
+
 **The headless agent path is sacred.** `render-core --scene foo.json` with no
 `--ws-addr` runs with no control surface at all: an agent writes `scene.json`
 + `effects/*.wgsl`, the file watcher hot-reloads, the projector updates.
@@ -182,7 +191,8 @@ not "fix" it to alpha blending.
 | `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick(&mut)` (driver eval → uniforms, §5.2 pick re-rolls via `active` flags); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). Owns the stable hashes (`fnv1a`/`seed01`/`pick_choice`) behind layer_seed + pick determinism. |
 | `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `Crossfade` (§5.4 engine-wide crossfade-time master — default promote fade in seconds, 0–30 s); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
 | `session.rs` | §5.3 session sidecar: `SessionFile` load/save (atomic temp+rename), `session_path` (`session.json` next to the scene), the shared dirty stamp the debounced write keys off. |
-| `effects.rs` | Effect registry: built-ins (`tint`, `hueCycle`, `flash`, `wobble`), project-local + inline WGSL, mtime-based rescan. |
+| `effects.rs` | Effect registry: built-ins (`tint`, `hueCycle`, `flash`, `wobble`, `videoClip`), project-local + inline WGSL, mtime-based rescan; the `image` input slot + the C5 `ImageParam` parse (§2.4). |
+| `video.rs` | Image inputs (§2.4): `ImageSource` = a still (PNG/JPEG → `Rgba8UnormSrgb`) or a HAP clip stream — MOV sample-table reader, HAP frame decode (snappy / raw / chunked), per-stream decode thread + 4-slot `MAP_WRITE` staging ring, stateless playhead. Fixtures + decode tests: `render-core/tests/fixtures/*.mov`. |
 | `scene.rs` | `scene.json` parser + selector resolution. |
 | `pack.rs` | Layer-pack loader; per-slice uv geometry (`LayerGeom`) from the manifest or the mask bytes (§5.2); §2.2 identity sidecar (`IdentityFile` lenient load/merge, strict `apply_identity_delta`, atomic `save_identity`). |
 | `osc.rs` | UDP OSC sink for `/audio/lmh` + `/audio/onset/*` → lock-free `AudioFeatures` atomics. `OscListener` drop stops + joins the thread, so the port is free on return (an in-process re-root rebinds it, §1b). |
@@ -252,6 +262,36 @@ static scene value, and live musical energy reaches scenes through
 via `transport.set` (tap tempo, below). Duplicate/empty binding ids are load
 errors.
 
+**Clip bindings — `image` params (gig plan C5, landed 2026-10-10).** An
+effect input of type `image` takes an object, never a driver:
+
+```jsonc
+{ "id": "clip_fabric_left", "select": { "id": "fabric_left" },
+  "effect": "videoClip",                       // or any effect declaring an `image` input
+  "params": { "image": { "clip": "generated/tf_0412.mov",  // relative to the scene dir
+                         "placement": "region",            // "region" (default) | "canvas"
+                         "rate": 1.0 },                    // playhead rate; negative = reverse
+              "gain": 1.0 } }
+```
+
+- `clip` is a HAP `.mov` (Hap1 / Hap5 / HapY; dimensions multiples of 4)
+  or a `.png`/`.jpg` still. Unknown keys / bad placement are load errors.
+- **Placement:** `"region"` targets each resolved layer's `source_box`
+  (§2.2; `bbox` fallback), `"canvas"` the whole frame. Either way the image
+  is fit **uniformly, centred ("contain")**, never stretched — transparent
+  outside (gig plan D8: a model's native-aspect render is close to, not
+  exactly, its box; contain is the inverse of the model's cover-crop). One
+  binding over N layers opens the clip once and places it in each layer's
+  own box.
+- **Playhead is stateless:** `(leg transport seconds × rate) rem_euclid
+  duration` — the speed master bends it, promote's clock copy keeps it
+  continuous across TAKE, and the stream itself moves into live with the
+  plan (it never reopens at TAKE).
+- **A clip that fails to open is a warning, not a load error:** missing
+  file, not HAP, no BC on this GPU → that binding draws nothing, the plan
+  still swaps in, and the reply carries `warnings: [...]` (also the
+  `hot_reload` message, which stays `ok: true`).
+
 **`pick` selectors (§5.2, landed 2026-07-11).** Any selector may add
 `"pick": { "mode": "random_each" | "random_static", "rate": { "driver":
 "clock.bars", "n": 4 } }`. The binding still resolves (and builds passes
@@ -287,7 +327,9 @@ refuses unknown major versions.
 `islands.json` next to the masks, through the same uncrop/scale mapping as
 the mask. It **may extend past the canvas** (negative or > size): the
 padding is real clip frame that falls off-surface, not an error. Absent →
-region placement falls back to `bbox`; empty/inverted → warned, `bbox`.
+region placement falls back to `bbox`; empty/inverted → warned, `bbox`
+(lenient on purpose: never refuse a show over it). `pack.info` serves it
+per layer when present; how clips are placed in it: §2.1.
 
 **Requirement this puts on the authoring tool (v1 §4.1):** stable ids are
 only real if `wzrd.layerpack` can *re-import a new SAM2 segmentation onto an
@@ -320,8 +362,8 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `hello {actor}` | inline | §2.7 — declare this connection's actor (`ui` \| `agent` \| `system`), once per session, never per call. WS connections default `agent`; Tauri direct dispatch is `ui`. Returns `{epoch, rev}`. |
 | `changes.list {since_rev?, epoch?}` | inline | §2.7 — change-ring backfill (`{epoch, rev, entries}`). Epoch mismatch or ring wrap → full ring + explicit `note`, never a silently-partial diff. |
 | `identity.setGroups {groups?, labels?}` | queued | §2.2/§5.13 — per-key delta into the identity sidecar (`null` removes); strict unknown-id errors listing valid ids. Persists, refreshes `pack.info`, re-resolves design selectors. Reply carries the new `pack` + `{epoch, rev}`. |
-| `scene.getState {leg?}` | inline | Last-good scene JSON. §5.6: `leg: "design"` (default — reads follow design) \| `"live"`. Reply carries `{epoch, rev}` so read-modify-write callers can CAS. |
-| `scene.load {json, base_rev?}` | queued | Parse + plan rebuild **on the design leg** (§2.6); new pipelines are probe-gated, so the reply can carry a `probe` report. `base_rev` (§2.7): rejected with "design moved to rev N … re-read and retry" when the design rev moved since the caller's read. On error the previous design plan keeps rendering; live is never touched. Headless single-leg: applies to live as before. |
+| `scene.getState {leg?}` | inline | Last-good scene JSON. §5.6: `leg: "design"` (default — reads follow design) \| `"live"`. Reply carries `{epoch, rev}` so read-modify-write callers can CAS, plus `scene_dir` (what clip paths resolve against — the MCP lists `<scene_dir>/generated/*.mov` from it). |
+| `scene.load {json, base_rev?}` | queued | Parse + plan rebuild **on the design leg** (§2.6); new pipelines are probe-gated, so the reply can carry a `probe` report. `base_rev` (§2.7): rejected with "design moved to rev N … re-read and retry" when the design rev moved since the caller's read. On error the previous design plan keeps rendering; live is never touched. A clip that fails to open doesn't fail the load: the reply adds `warnings` (§2.1). Headless single-leg: applies to live as before. |
 | `scene.reload` | queued | Re-read from disk (same design-leg routing). |
 | `promote {fade_ms?, quantize?}` | queued | §2.6 — crossfade projector live→design over `fade_ms` (default: the §5.4 crossfade-time master, ms), then live adopts design's plan (pointer swap). `quantize: "bar"` (default) starts the fade on the next bar boundary; `"now"` immediately. Pending promote replaced by a newer one; **rejected while a fade is ramping**. |
 | `pull` | queued | §2.6 — hard-copy live's scene back into design. Rejected mid-ramp; cancels a pending promote + any in-flight probe apply. |
@@ -392,6 +434,50 @@ bytes when the manifest omits them (`pack::geom_from_mask`, mirroring
 
 Note: `state.audio_*` / `state.onset_*` arrive **pre-scaled by the
 audio-listen master** (§5.4) — user WGSL and drivers see the same values.
+
+**The `image` input (gig plan E1, landed 2026-10-10).** A descriptor may
+declare **one** input `{ "name": "image", "type": "image" }` (two is a load
+error — the prelude has one image slot). It takes no `f_param` slot; the
+binding's C5 param (§2.1) supplies the texture. WGSL reads it with
+**`sample_image(uv) -> vec4<f32>`**: canvas uv in, premultiplied RGBA out,
+transparent outside the placement rect and when nothing is bound. It
+samples with an explicit LOD, so it is legal in non-uniform control flow and
+at displaced uvs (the seed clip effects lean on that). Plumbing, for anyone
+touching it:
+
+- **Slot:** group 0, binding 4 (`texture_2d<f32>`) + 5 (sampler), in the
+  one layer layout every pass and probe item uses (`gpu::layer_bind_group`
+  is the only constructor); unbound passes get a 1×1 transparent dummy.
+  `LayerParams` grew `image_box` (uv rect, already contain-fitted) and
+  `image_meta` (bound flag, encoding) → 176 bytes, pinned by
+  `layer_params_layout_matches_wgsl`.
+- **Colour:** stills and plain HAP/HAP Alpha use sRGB texture formats
+  (decode to linear on sample); HAP Q's scaled YCoCg sits in a non-sRGB
+  BC3 texture and `sample_image` converts + sRGB-decodes. Measured against
+  the PNG path: all three within ~1/255.
+- **Clip binds late:** a clip pass sets `image_meta.bound` only after its
+  stream uploaded a first frame (a zeroed BC3 texture reads as blue under
+  YCoCg). So the very first frame after a design leg wakes is black where
+  its clips will be — the MCP's `get_preview` skips one frame for this.
+- **Built-in `videoClip`** = `sample_image(uv) × mask × gain` (gain 0–2).
+- **Decode — the staging-ring invariant (canonical here since §5.9 landed):** one
+  decode thread per (plan, binding) stream does all disk I/O + snappy +
+  row padding straight into a mapped slot of a 4-slot `MAP_WRITE` ring; the
+  render thread only encodes one `copy_buffer_to_texture` per new frame
+  (`PassPlan::encode_uploads`, before `encode_composite`) and re-maps used
+  slots after submit (`PassPlan::after_submit`). Decode is demand-driven:
+  a leg that doesn't render (idle design, muted/picked-out bindings) asks
+  for nothing and decodes nothing. Prefetch strides by the observed
+  frames-per-render-frame, so 8× speed still lands. Falling behind = the
+  previous frame stays up. No stream sharing between legs (playheads are
+  per leg); dropping a plan drops its streams and their threads exit on
+  channel disconnect (never joined on the render thread).
+- **Measured (M2, release, 1376×768 @ 30 fps, incl. two incompressible
+  528 KB/frame clips and one HAP Q):** seven clips 60.0 fps p95 17.0 ms; a
+  5 s TAKE swapping all seven (14 streams) 60.0 fps p95 ≤ 17.2 ms; six
+  fabric + one ceiling clip in their regions 60.0 fps p95 17.1 ms, engine
+  ≈ 17 % of one core. 120 design reloads: every old decode thread exits,
+  RSS plateaus ~170 MB.
 
 ### 2.5 Session sidecar + masters (§5.3/§5.4, landed 2026-07-11)
 
@@ -578,6 +664,12 @@ subscribe/frame/unsubscribe so the §2.6 demand gate holds). Every read is
 **self-contained** (status header incl. "engine unreachable since \<ts\>" +
 recent changes ride along); author replies carry the probe verdict **as an
 image content block** — write → see → fix without touching the projector.
+Clips (gig E1d): the `bindings` read also lists the project's HAP clips
+(`<scene_dir>/generated/*.mov`, newest first, with the region from each
+clip's `.meta.json` sidecar) as ready-to-paste `image.clip` paths — read
+from this disk, which the MCP and engine share; apply replies surface clip
+`warnings` as `WARNING:` lines; `get_preview` takes the *second* frame so a
+just-woken design leg's clips have landed (§2.4).
 
 **The engine cluster behind it** (all in `rpc.rs`/`telemetry.rs`/`core.rs`):
 
@@ -967,7 +1059,8 @@ Ranked; none currently show-stopping at 5–20 layers.
 - **Colour banding under stacked additive blends.** Mitigated today by the
   `Rgba16Float` composite; watch it if flash+glow+floodFill stacks get deep.
 - **HMR GPU-resource leaks.** Stale bind groups after a pipeline swap, video
-  staging slots from a closed stream, FBO targets from a deleted slow-path
+  staging slots from a closed stream (checked for E1: 120 reloads plateau,
+  §2.4), FBO targets from a deleted slow-path
   layer, naga handles after effect removal. Swap-on-success gives every
   pipeline a single owner; verify GPU memory *plateaus* under rapid edit/save
   loops rather than climbing.

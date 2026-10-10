@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a + E1b landed, P1 + P4 + P3 done. Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1 + P4 + P3 done. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
