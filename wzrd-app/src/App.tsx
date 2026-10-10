@@ -1,7 +1,8 @@
 // Application root.
 //   - Wires the engine (telemetry → store; status → store).
 //   - Hydrates pack, both legs' scenes, override tables, effect catalog and
-//     looks on first mount (and again whenever the engine comes back).
+//     looks on first mount, and from scratch whenever the engine comes back
+//     (crash restart, project switch — A1 re-roots the engine in-process).
 //   - Renders the top bar + the active room, the keyboard map, toasts.
 //
 // Nothing modal mid-set: errors surface inline or as a toast.
@@ -16,8 +17,10 @@ import {
   masterSet,
   transportSet,
   onEngineStatus,
+  onProject,
   onTelemetry,
   packInfo,
+  projectCurrent,
   readSceneFile,
   sceneGetState,
   type AlignmentDoc,
@@ -25,11 +28,14 @@ import {
   type DeckPayload,
 } from './api/ipc';
 import { ingestAlignment } from './state/alignment';
-import { hydrateOverrides, loadLooks, refreshLiveScene } from './state/actions';
+import { hydrateOverrides, loadLooks, refreshLiveScene, resetActionState } from './state/actions';
+import { dropPendingCommits } from './state/sceneCommit';
+import { useAutopilot } from './state/autopilot';
 import { ensureMasks } from './state/masks';
 import { useShortcuts } from './state/shortcuts';
 import { useAutopilotDriver } from './state/autopilot';
 import { HelpOverlay, Toasts, TopBar } from './components/TopBar';
+import { EngineDownBanner } from './components/ProjectMenu';
 import { Prepare } from './routes/Prepare';
 import { Align } from './routes/Align';
 import { Perform } from './routes/Perform';
@@ -46,10 +52,44 @@ async function loadCatalog() {
   }
 }
 
+/** Run `hydrate` now, or once more after the in-flight one — a re-root
+ *  fires both the status edge and `engine:project`. */
+let hydrating: Promise<void> | null = null;
+let hydrateAgain = false;
+function rehydrate() {
+  if (hydrating) {
+    hydrateAgain = true;
+    return;
+  }
+  hydrating = hydrate().finally(() => {
+    hydrating = null;
+    if (hydrateAgain) {
+      hydrateAgain = false;
+      rehydrate();
+    }
+  });
+}
+
 async function hydrate() {
+  // Everything below belongs to one engine instance: start from scratch so
+  // nothing of a previous project (or a crashed engine) leaks in.
+  dropPendingCommits();
+  resetActionState();
+  const prev = useStore.getState().project;
+  useStore.getState().resetProject();
   const st = useStore.getState();
   try {
-    st.setEngineRunning((await engineStatus()).running);
+    const p = await projectCurrent();
+    st.setProject(p);
+    if (prev && prev.scene_path !== p.scene_path) useAutopilot.getState().setOn(false);
+  } catch (e) {
+    console.warn('project_current:', e);
+  }
+  try {
+    const s = await engineStatus();
+    st.setEngineRunning(s.running);
+    st.setEngineError(s.running ? null : s.last_error);
+    if (!s.running) return;
   } catch (e) {
     console.warn('engine_status:', e);
   }
@@ -137,8 +177,9 @@ export default function App() {
   useEffect(() => {
     let unlistenT: (() => void) | undefined;
     let unlistenS: (() => void) | undefined;
+    let unlistenP: (() => void) | undefined;
     (async () => {
-      await hydrate();
+      rehydrate();
       unlistenT = await onTelemetry((frame) => {
         const st = useStore.getState();
         switch (frame.channel) {
@@ -220,21 +261,28 @@ export default function App() {
             break;
         }
       });
-      unlistenS = await onEngineStatus((s) => {
-        const was = useStore.getState().engineRunning;
-        useStore.getState().setEngineRunning(!!s.running);
-        if (s.running && !was) hydrate();
+      unlistenS = await onEngineStatus((s: { running: boolean; last_error?: string | null }) => {
+        const st = useStore.getState();
+        const was = st.engineRunning;
+        st.setEngineRunning(!!s.running);
+        if (!s.running && s.last_error) st.setEngineError(s.last_error);
+        if (s.running && !was) rehydrate();
       });
+      // Tauri seat: every open/restart, including a failed one that kept
+      // (or re-opened) the previous project.
+      unlistenP = await onProject(() => rehydrate());
     })();
     return () => {
       unlistenT?.();
       unlistenS?.();
+      unlistenP?.();
     };
   }, []);
 
   return (
     <div className="flex flex-col h-full">
       <TopBar />
+      <EngineDownBanner />
       <main className="flex-1 min-h-0 overflow-hidden">
         {route === 'prepare' && <Prepare />}
         {route === 'align' && <Align />}

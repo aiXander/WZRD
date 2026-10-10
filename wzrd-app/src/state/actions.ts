@@ -25,9 +25,11 @@ import {
   pull,
   sceneGetState,
   transportSet,
+  engineRestart,
+  projectOpen,
   type LegName,
 } from '../api/ipc';
-import { commitSceneMutation, commitSceneNow, commitSceneText } from './sceneCommit';
+import { commitSceneMutation, commitSceneNow, commitSceneText, settleCommits } from './sceneCommit';
 import { canonical, isDriver, parseScene, type Binding } from './scene';
 import { useStore, type Masters } from './store';
 
@@ -54,6 +56,43 @@ function throttled(key: string, ms: number, fn: () => void) {
 }
 
 const warn = (what: string) => (e: unknown) => console.warn(what, e);
+
+/** A re-root drops throttled writes still aimed at the previous engine and
+ *  the blackout/flash/freeze memories of the previous room. */
+export function resetActionState() {
+  for (const k of Object.keys(trailing)) {
+    window.clearTimeout(trailing[k]);
+    delete trailing[k];
+  }
+  preBlackout = preFlash = preFreeze = null;
+}
+
+// ---------- projects (A1) ----------
+
+/** Switch projects: settle in-flight scene edits into the old project, then
+ *  re-root the engine. Hydrate follows from the engine coming back (App). */
+export async function openProject(scenePath: string) {
+  const st = useStore.getState();
+  await settleCommits();
+  try {
+    const info = await projectOpen(scenePath);
+    st.toast(`Opened ${info.name} · ${info.elapsed_ms ?? '?'} ms`, 'ok');
+  } catch (e) {
+    st.toast(String(e), 'bad');
+  }
+}
+
+/** Re-boot the engine on the current project — the crash recovery button. */
+export async function restartEngine() {
+  const st = useStore.getState();
+  await settleCommits();
+  try {
+    const info = await engineRestart();
+    st.toast(`Engine restarted · ${info.elapsed_ms ?? '?'} ms`, 'ok');
+  } catch (e) {
+    st.toast(String(e), 'bad');
+  }
+}
 
 export function controlLeg(): LegName {
   return useStore.getState().deck?.preview_source ?? 'design';

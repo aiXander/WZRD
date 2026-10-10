@@ -17,6 +17,7 @@ import type {
   LookEntry,
   PackInfo,
   ProbeReport,
+  ProjectInfo,
 } from '../api/ipc';
 
 export type FpsPayload = {
@@ -121,6 +122,15 @@ interface Store {
   // engine lifecycle
   engineRunning: boolean;
   setEngineRunning: (v: boolean) => void;
+  /** Why the engine is down (boot error / last panic), if it is. */
+  engineError: string | null;
+  setEngineError: (e: string | null) => void;
+
+  // A1 — the open project. Switching re-roots the engine; `resetProject`
+  // drops everything that belonged to the previous engine before hydrate.
+  project: ProjectInfo | null;
+  setProject: (p: ProjectInfo | null) => void;
+  resetProject: () => void;
 
   // pack
   pack: PackInfo | null;
@@ -268,9 +278,45 @@ function initialRoute(): Route {
 }
 const HOT_CAP = 200;
 
+/** Project-scoped state, as it is before the first hydrate. Telemetry pills
+ *  (fps, audio, connectivity), route, log and toasts survive a re-root. */
+const PROJECT_INITIAL = {
+  pack: null,
+  sceneJson: '',
+  sceneDirty: false,
+  activeTab: { kind: 'scene' } as const,
+  effects: [],
+  liveSceneJson: '',
+  transport: null,
+  overrides: { live: {}, design: {} },
+  catalog: {},
+  looks: [],
+  cuedLook: null,
+  liveLook: null,
+  hotReload: null,
+  hotReloadHistory: [],
+  drivers: [],
+  masters: null,
+  deck: null,
+  alignment: null,
+  alignmentError: null,
+  selectedHandle: null,
+  preview: null,
+  selectedBindingId: null,
+  hoveredBindingId: null,
+  selectedLayerId: null,
+  agentEdit: null,
+} satisfies Partial<Store>;
+
 export const useStore = create<Store>((set) => ({
   engineRunning: false,
   setEngineRunning: (v) => set({ engineRunning: v }),
+  engineError: null,
+  setEngineError: (e) => set({ engineError: e }),
+
+  project: null,
+  setProject: (p) => set({ project: p }),
+  resetProject: () => set({ ...PROJECT_INITIAL }),
 
   pack: null,
   setPack: (p) => set({ pack: p }),

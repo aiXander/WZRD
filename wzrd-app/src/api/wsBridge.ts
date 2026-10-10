@@ -1,6 +1,8 @@
 // Browser-mode transport (see transport.ts). Engine methods go over the
-// engine's own WS JSON-RPC; shell-only file commands go to the Vite dev
-// middleware in vite.config.ts (`/__wzrd/<command>`).
+// engine's own WS JSON-RPC; everything the shell does itself (files,
+// projects, clips, engine restart) goes to the shell's debug-only HTTP twin
+// (src-tauri/src/devport.rs) through Vite's `/__shell` proxy, so this seat
+// follows the shell's current project across switches.
 
 type Handler = (payload: any) => void;
 
@@ -50,7 +52,12 @@ const ENGINE: Record<string, (a: any) => [string, Record<string, unknown>]> = {
   effect_remove: (a) => ['effect.remove', { name: a.name }],
 };
 
-const FILE_COMMANDS = new Set([
+const SHELL_COMMANDS = new Set([
+  'engine_status',
+  'projects_list',
+  'project_current',
+  'project_open',
+  'engine_restart',
   'list_effects',
   'read_effect',
   'read_scene_file',
@@ -123,6 +130,8 @@ function ensureOpen(): Promise<void> {
       connected = false;
       opening = null;
       ws = null;
+      // A re-rooted engine replays its own sticky channels on subscribe.
+      sticky.clear();
       pending.forEach((p) => p.reject('engine socket closed'));
       pending.clear();
       if (was) emit('engine:status', { running: false });
@@ -135,23 +144,18 @@ function ensureOpen(): Promise<void> {
 }
 
 export function bridgeCall<T>(cmd: string, args: Record<string, any>): Promise<T> {
-  if (cmd === 'engine_status') {
-    return ensureOpen().then(
-      () => ({ running: connected, ws_addr: WS_URL, last_error: null }) as T
-    );
-  }
   if (cmd === 'last_payload') {
     return ensureOpen().then(() => (sticky.get(args.channel) ?? null) as T);
   }
   if (cmd === 'preview_set_bounds') return Promise.resolve(undefined as T);
-  if (FILE_COMMANDS.has(cmd)) {
-    return fetch(`/__wzrd/${cmd}`, {
+  if (SHELL_COMMANDS.has(cmd)) {
+    return fetch(`/__shell/cmd/${cmd}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(args),
     }).then(async (r) => {
       const body = await r.json();
-      if (!r.ok) throw body.error ?? 'file command failed';
+      if (!r.ok) throw body.error ?? 'shell command failed';
       return body.result as T;
     });
   }

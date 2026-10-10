@@ -20,6 +20,13 @@
 //!   dispatch to the main thread (deadlock risk against sync Tauri
 //!   commands blocking on the render thread); window sizes arrive via the
 //!   `Resized` event instead.
+//!
+//! Re-rooting (gig plan A1, D13): the engine + preview windows live in
+//! `EngineWindows`, created once per app; an `EngineHandle` is one engine
+//! instance on one scene path. A project switch / "restart engine" is
+//! `shutdown()` (same teardown as app exit: session + alignment saved, GPU
+//! context dropped, OSC/WS ports released) followed by a fresh
+//! `start_in_process` on the same windows.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -41,6 +48,10 @@ use tauri::{AppHandle, Emitter};
 /// WS port the in-process engine still binds for external clients (MCP,
 /// remote operator). Fixed for v1, same as the subprocess era.
 pub const DEFAULT_WS_PORT: u16 = 9123;
+
+/// `WZRD_SPIKE` fires once per process, not once per engine — otherwise the
+/// "engine crash → restart" check would crash the restarted engine too.
+static SPIKE_FIRED: AtomicBool = AtomicBool::new(false);
 
 /// Methods that mutate engine state and therefore round-trip through the
 /// render thread (queued `EngineCommand` + blocking reply). Everything else
@@ -104,6 +115,25 @@ struct EngineInner {
     last_payloads: Mutex<HashMap<String, Value>>,
     /// Preview-surface config channel into the render thread.
     preview_tx: crossbeam_channel::Sender<PreviewCmd>,
+}
+
+/// The engine output window + native preview window, created once per app
+/// and reused by every engine instance (A1: project switch / restart).
+pub struct EngineWindows {
+    engine: tauri::Window,
+    preview: tauri::Window,
+    /// Shared with whichever render thread is current; a fresh engine
+    /// starts from `last`.
+    sizes: Arc<SizeState>,
+    /// Stop flag of the current engine — the engine window's `Destroyed`
+    /// handler is registered once and stops whoever is running.
+    current_stop: Mutex<Arc<AtomicBool>>,
+    /// Last preview-slot config from the webview, replayed into a fresh
+    /// engine so the native preview survives a restart without a re-layout.
+    preview_cfg: Mutex<Option<(u32, u32, bool)>>,
+    /// The engine window is sized to the first pack that boots on it; later
+    /// engines keep whatever size/placement the operator gave it.
+    sized: AtomicBool,
     /// AppKit handles for preview placement + child re-attach (main thread
     /// only — see `PreviewNsRefs`).
     #[cfg(target_os = "macos")]
@@ -234,12 +264,154 @@ impl OcclusionProbe {
     }
 }
 
+impl EngineWindows {
+    /// Create the engine output window and the native preview window. Main
+    /// thread only (tauri window creation); the setup hook qualifies. The
+    /// engine window starts at a placeholder size and is sized to the first
+    /// pack that boots on it.
+    pub fn create(app: &AppHandle) -> Result<Arc<Self>> {
+        let engine = build_engine_window(app).context("creating engine output window")?;
+        // Native operator-preview window (collapse Step 3): borderless
+        // child window of the main webview window, positioned by the React
+        // layout over its preview slot. Hidden until the slot mounts.
+        let preview = build_preview_window(app).context("creating preview window")?;
+        #[cfg(target_os = "macos")]
+        let preview_ns = preview_ns_refs(app, &preview);
+        let size = engine.inner_size().context("querying engine window size")?;
+        let sizes = Arc::new(SizeState::default());
+        *sizes.last.lock().expect("size lock") = (size.width.max(1), size.height.max(1));
+
+        let windows = Arc::new(Self {
+            engine,
+            preview,
+            sizes,
+            current_stop: Mutex::new(Arc::new(AtomicBool::new(false))),
+            preview_cfg: Mutex::new(None),
+            sized: AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
+            preview_ns,
+        });
+
+        // Engine-window events: sizes flow to the render thread; closing the
+        // projector window means "quit the app" (parity with WinitHost).
+        // Registered once — handlers would pile up per restart otherwise.
+        {
+            let weak = Arc::downgrade(&windows);
+            let app = app.clone();
+            windows.engine.on_window_event(move |event| {
+                let Some(w) = weak.upgrade() else { return };
+                match event {
+                    tauri::WindowEvent::Resized(s) => {
+                        let dims = (s.width.max(1), s.height.max(1));
+                        *w.sizes.last.lock().expect("size lock") = dims;
+                        *w.sizes.pending.lock().expect("size lock") = Some(dims);
+                    }
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        // Route through the app-exit path so teardown (render
+                        // thread join, session snapshot) happens exactly once.
+                        api.prevent_close();
+                        app.exit(0);
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        w.current_stop
+                            .lock()
+                            .expect("stop lock")
+                            .store(true, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            });
+        }
+        Ok(windows)
+    }
+
+    /// Position the native preview window over the React layout's preview
+    /// slot (CSS px, webview-viewport-relative) — or hide it. Called from
+    /// the `preview_set_bounds` Tauri command on layout/visibility changes.
+    /// The preview window is a child of the main window, so window drags
+    /// track automatically; only layout-relative changes come through here.
+    /// The surface config is remembered (replayed into a restarted engine)
+    /// and forwarded to the running engine, if any.
+    pub fn set_preview_bounds(
+        &self,
+        app: &AppHandle,
+        engine: Option<&EngineHandle>,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        visible: bool,
+    ) -> Result<()> {
+        use tauri::Manager;
+        let preview = &self.preview;
+        let show = visible && width >= 4.0 && height >= 4.0;
+        let cfg = if show {
+            let main = app
+                .get_webview_window("main")
+                .ok_or_else(|| anyhow!("main window missing"))?;
+            let scale = main.scale_factor().unwrap_or(1.0);
+            let pw = ((width * scale).round() as u32).max(1);
+            let ph = ((height * scale).round() as u32).max(1);
+            #[cfg(target_os = "macos")]
+            {
+                // Place + order in via AppKit (see PreviewNsRefs) — never
+                // through tauri show(), which would make the preview the
+                // key window and steal focus from the webview.
+                let _ = preview;
+                if let Some(refs) = self.preview_ns.as_ref() {
+                    refs.place(x, y, width, height);
+                    refs.show();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let origin = main.inner_position().context("main window position")?;
+                let px = origin.x + (x * scale).round() as i32;
+                let py = origin.y + (y * scale).round() as i32;
+                preview
+                    .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                        px, py,
+                    )))
+                    .context("positioning preview window")?;
+                preview
+                    .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(pw, ph)))
+                    .context("sizing preview window")?;
+                preview.show().context("showing preview window")?;
+            }
+            (pw, ph, true)
+        } else {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = preview;
+                if let Some(refs) = self.preview_ns.as_ref() {
+                    refs.hide();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            preview.hide().context("hiding preview window")?;
+            (1, 1, false)
+        };
+        *self.preview_cfg.lock().expect("preview cfg lock") = Some(cfg);
+        if let Some(engine) = engine {
+            engine.send_preview_cfg(cfg);
+        }
+        Ok(())
+    }
+}
+
 impl EngineHandle {
-    /// Boot the engine inside this process: build `Core`, create the engine
-    /// output window, bring up wgpu on it, and start the render thread.
-    /// Must be called on the main thread (tauri window creation + first
-    /// surface attach); the setup hook qualifies.
-    pub fn start_in_process(app: AppHandle, scene_path: PathBuf) -> Result<Self> {
+    /// Boot an engine on `scene_path` inside this process: build `Core`,
+    /// bring up wgpu on the (reused) engine window, attach the preview
+    /// surface, and start the render thread. Must be called on the main
+    /// thread (surface attach + window sizing); the setup hook and sync
+    /// Tauri commands qualify. The previous engine, if any, must already be
+    /// `shutdown()` — the WS/OSC ports are single-owner.
+    pub fn start_in_process(
+        app: AppHandle,
+        windows: &Arc<EngineWindows>,
+        scene_path: PathBuf,
+        log_bus: impl FnOnce(&render_core::telemetry::Bus),
+    ) -> Result<Self> {
         let launch = Instant::now();
         let ws_addr: SocketAddr = format!("127.0.0.1:{DEFAULT_WS_PORT}")
             .parse()
@@ -258,10 +430,17 @@ impl EngineHandle {
         };
         let mut core = Core::new(&cli).context("initialising engine core")?;
         let (ctx, cmd_tx) = core.control_channel();
+        log_bus(&ctx.bus);
 
-        let window = build_engine_window(&app, core.pack().atlas_width, core.pack().atlas_height)
-            .context("creating engine output window")?;
+        let window = windows.engine.clone();
+        if !windows.sized.swap(true, Ordering::Relaxed) {
+            size_engine_window(&window, core.pack().atlas_width, core.pack().atlas_height)
+                .context("sizing engine output window")?;
+        }
         let size = window.inner_size().context("querying engine window size")?;
+        let sizes = Arc::clone(&windows.sizes);
+        *sizes.last.lock().expect("size lock") = (size.width.max(1), size.height.max(1));
+        sizes.pending.lock().expect("size lock").take();
         core.init_gpu(window.clone(), size.width.max(1), size.height.max(1))
             .context("initialising wgpu on the engine window")?;
         log::info!(
@@ -271,12 +450,7 @@ impl EngineHandle {
             size.height
         );
 
-        // Native operator-preview window (collapse Step 3): borderless
-        // child window of the main webview window, positioned by the React
-        // layout over its preview slot. Hidden until the slot mounts.
-        let preview_window = build_preview_window(&app).context("creating preview window")?;
-        #[cfg(target_os = "macos")]
-        let preview_ns = preview_ns_refs(&app, &preview_window);
+        let preview_window = windows.preview.clone();
         if let Err(e) = core.attach_preview_surface(preview_window.clone(), 320, 180) {
             // Non-fatal — the JPEG thumbnail path still works.
             log::error!("could not attach native preview surface: {e:#}");
@@ -284,8 +458,7 @@ impl EngineHandle {
 
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
-        let sizes = Arc::new(SizeState::default());
-        *sizes.last.lock().expect("size lock") = (size.width.max(1), size.height.max(1));
+        *windows.current_stop.lock().expect("stop lock") = Arc::clone(&stop);
 
         #[cfg(target_os = "macos")]
         let occlusion = OcclusionProbe::new(&window);
@@ -293,29 +466,13 @@ impl EngineHandle {
         let preview_occlusion = OcclusionProbe::new(&preview_window);
 
         let (preview_tx, preview_rx) = crossbeam_channel::unbounded::<PreviewCmd>();
-
-        // Engine-window events: sizes flow to the render thread; closing the
-        // projector window means "quit the app" (parity with WinitHost).
-        {
-            let sizes = Arc::clone(&sizes);
-            let stop = Arc::clone(&stop);
-            let app = app.clone();
-            window.on_window_event(move |event| match event {
-                tauri::WindowEvent::Resized(s) => {
-                    let dims = (s.width.max(1), s.height.max(1));
-                    *sizes.last.lock().expect("size lock") = dims;
-                    *sizes.pending.lock().expect("size lock") = Some(dims);
-                }
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // Route through the app-exit path so teardown (render
-                    // thread join, session snapshot) happens exactly once.
-                    api.prevent_close();
-                    app.exit(0);
-                }
-                tauri::WindowEvent::Destroyed => {
-                    stop.store(true, Ordering::Relaxed);
-                }
-                _ => {}
+        // A restarted engine picks up the preview slot where the webview
+        // left it — the React side only re-sends bounds on layout changes.
+        if let Some((width, height, visible)) = *windows.preview_cfg.lock().expect("preview cfg lock") {
+            let _ = preview_tx.send(PreviewCmd::Config {
+                width,
+                height,
+                visible,
             });
         }
 
@@ -329,8 +486,6 @@ impl EngineHandle {
             render_join: Mutex::new(None),
             last_payloads: Mutex::new(HashMap::new()),
             preview_tx,
-            #[cfg(target_os = "macos")]
-            preview_ns,
         });
 
         // Render thread — owns Core for its whole life.
@@ -406,80 +561,12 @@ impl EngineHandle {
         }
     }
 
-    /// Position the native preview window over the React layout's preview
-    /// slot (CSS px, webview-viewport-relative) — or hide it. Called from
-    /// the `preview_set_bounds` Tauri command on layout/visibility changes.
-    /// The preview window is a child of the main window, so window drags
-    /// track automatically; only layout-relative changes come through here.
-    pub fn set_preview_bounds(
-        &self,
-        app: &AppHandle,
-        x: f64,
-        y: f64,
-        width: f64,
-        height: f64,
-        visible: bool,
-    ) -> Result<()> {
-        use tauri::Manager;
-        let preview = app
-            .get_window("preview")
-            .ok_or_else(|| anyhow!("preview window missing"))?;
-        let show = visible && width >= 4.0 && height >= 4.0;
-        if show {
-            let main = app
-                .get_webview_window("main")
-                .ok_or_else(|| anyhow!("main window missing"))?;
-            let scale = main.scale_factor().unwrap_or(1.0);
-            let pw = ((width * scale).round() as u32).max(1);
-            let ph = ((height * scale).round() as u32).max(1);
-            #[cfg(target_os = "macos")]
-            {
-                // Place + order in via AppKit (see PreviewNsRefs) — never
-                // through tauri show(), which would make the preview the
-                // key window and steal focus from the webview.
-                let _ = &preview;
-                if let Some(refs) = self.inner.preview_ns.as_ref() {
-                    refs.place(x, y, width, height);
-                    refs.show();
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let origin = main.inner_position().context("main window position")?;
-                let px = origin.x + (x * scale).round() as i32;
-                let py = origin.y + (y * scale).round() as i32;
-                preview
-                    .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-                        px, py,
-                    )))
-                    .context("positioning preview window")?;
-                preview
-                    .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(pw, ph)))
-                    .context("sizing preview window")?;
-                preview.show().context("showing preview window")?;
-            }
-            let _ = self.inner.preview_tx.send(PreviewCmd::Config {
-                width: pw,
-                height: ph,
-                visible: true,
-            });
-        } else {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = &preview;
-                if let Some(refs) = self.inner.preview_ns.as_ref() {
-                    refs.hide();
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            preview.hide().context("hiding preview window")?;
-            let _ = self.inner.preview_tx.send(PreviewCmd::Config {
-                width: 1,
-                height: 1,
-                visible: false,
-            });
-        }
-        Ok(())
+    fn send_preview_cfg(&self, (width, height, visible): (u32, u32, bool)) {
+        let _ = self.inner.preview_tx.send(PreviewCmd::Config {
+            width,
+            height,
+            visible,
+        });
     }
 
     pub fn last_payload(&self, channel: &str) -> Option<Value> {
@@ -531,7 +618,11 @@ fn render_thread(
     #[cfg(target_os = "macos")] preview_occlusion: Option<OcclusionProbe>,
     launch: Instant,
 ) {
-    let spike = std::env::var("WZRD_SPIKE").unwrap_or_default();
+    let spike = if SPIKE_FIRED.load(Ordering::Relaxed) {
+        String::new()
+    } else {
+        std::env::var("WZRD_SPIKE").unwrap_or_default()
+    };
     if !spike.is_empty() {
         log::warn!("WZRD_SPIKE={spike} armed — will trigger ~5 s after launch");
     }
@@ -586,6 +677,7 @@ fn render_thread(
 
             if spike_armed && launch.elapsed() >= Duration::from_secs(5) {
                 spike_armed = false;
+                SPIKE_FIRED.store(true, Ordering::Relaxed);
                 match spike.as_str() {
                     "panic" => panic!("deliberate Step-2 spike panic (WZRD_SPIKE=panic)"),
                     "device_loss" => core.spike_force_device_loss(),
@@ -696,24 +788,26 @@ fn telemetry_loop(inner: Arc<EngineInner>, app: AppHandle, bus: render_core::tel
     log::info!("engine telemetry fan-in thread exiting");
 }
 
-/// Create the engine output window. Default: a decorated window at pack
-/// resolution (dev parity with the old `--windowed` spawn). With
-/// `WZRD_DISPLAY=<idx>`: borderless, filling that monitor — the projector
-/// deployment shape.
-fn build_engine_window(app: &AppHandle, pack_w: u32, pack_h: u32) -> Result<tauri::Window> {
-    let display: Option<usize> = std::env::var("WZRD_DISPLAY")
-        .ok()
-        .and_then(|s| s.parse().ok());
-
+/// Create the engine output window. Default: a decorated window, sized to
+/// the first pack that boots on it (`size_engine_window`; dev parity with
+/// the old `--windowed` spawn). With `WZRD_DISPLAY=<idx>`: borderless,
+/// filling that monitor — the projector deployment shape.
+fn build_engine_window(app: &AppHandle) -> Result<tauri::Window> {
     let mut builder = tauri::window::WindowBuilder::new(app, "engine")
         .title("WZRD Engine Output")
         .resizable(true);
-    if display.is_some() {
+    if wzrd_display().is_some() {
         builder = builder.decorations(false);
     }
-    let window = builder.build().context("building engine window")?;
+    builder.build().context("building engine window")
+}
 
-    match display {
+fn wzrd_display() -> Option<usize> {
+    std::env::var("WZRD_DISPLAY").ok().and_then(|s| s.parse().ok())
+}
+
+fn size_engine_window(window: &tauri::Window, pack_w: u32, pack_h: u32) -> Result<()> {
+    match wzrd_display() {
         Some(idx) => {
             let monitors = window
                 .available_monitors()
@@ -740,7 +834,7 @@ fn build_engine_window(app: &AppHandle, pack_w: u32, pack_h: u32) -> Result<taur
                 .context("sizing engine window")?;
         }
     }
-    Ok(window)
+    Ok(())
 }
 
 /// Create the native operator-preview window (collapse Step 3): borderless,

@@ -10,6 +10,8 @@ import { adoptAgentScene } from '../state/sceneCommit';
 import { useStore, type Route } from '../state/store';
 import { Dot, Kbd } from '../ui/primitives';
 import { DeckSwitch, TakeButton } from './DeckPanel';
+import { ProjectMenu } from './ProjectMenu';
+import { restartEngine } from '../state/actions';
 
 const ROUTES: { id: Route; label: string; key: string; hint: string }[] = [
   { id: 'prepare', label: 'Prepare', key: '⌘1', hint: 'Build the look: regions, effects, code' },
@@ -31,6 +33,7 @@ export function TopBar() {
         <Logo />
         <span className="text-[13px] font-bold tracking-[0.22em]">WZRD</span>
       </div>
+      <ProjectMenu />
       <nav className="flex items-center gap-0.5 rounded-lg bg-bg border border-line p-[3px]">
         {ROUTES.map((r) => (
           <button
@@ -182,6 +185,7 @@ function Health() {
   const fps = useStore((s) => s.fps);
   const hot = useStore((s) => s.hotReload);
   const running = useStore((s) => s.engineRunning);
+  const engineError = useStore((s) => s.engineError);
   const audioTone = fresh?.state === 'fresh' ? 'ok' : fresh?.state === 'stale' ? 'warn' : fresh ? 'bad' : 'off';
   const fpsTone = !fps ? 'off' : fps.presenting === false ? 'info' : fps.fps > 55 ? 'ok' : fps.fps > 40 ? 'warn' : 'bad';
   const hotTone = !hot ? 'off' : hot.ok ? (hot.probe?.band === 'yellow' ? 'warn' : 'ok') : 'bad';
@@ -221,10 +225,21 @@ function Health() {
           {!hot ? 'Ready' : !hot.ok ? 'Error — kept last good' : hot.probe?.band === 'yellow' ? 'Applied · heavy' : 'Applied'}
         </span>
       </div>
-      <div className="flex items-center gap-1.5 px-2.5 h-full text-[11px] text-fg2" title={running ? 'Engine running' : 'Engine down'}>
-        <Dot tone={running ? 'ok' : 'bad'} />
-        Engine
-      </div>
+      {running ? (
+        <div className="flex items-center gap-1.5 px-2.5 h-full text-[11px] text-fg2" title="Engine running">
+          <Dot tone="ok" />
+          Engine
+        </div>
+      ) : (
+        <button
+          onClick={() => restartEngine()}
+          className="flex items-center gap-1.5 px-2.5 h-full text-[11px] text-bad font-semibold hover:bg-bad/15 rounded-r-lg"
+          title={`Engine down${engineError ? ': ' + engineError : ''}\nClick to restart it on this project`}
+        >
+          <Dot tone="bad" />
+          Engine ↻
+        </button>
+      )}
     </div>
   );
 }

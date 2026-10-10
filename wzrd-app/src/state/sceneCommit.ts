@@ -107,6 +107,41 @@ export function adoptAgentScene(): Promise<void> {
   });
 }
 
+/**
+ * Before the engine re-roots (project switch / restart): push + persist any
+ * edit still in flight, so the old project's last change lands in its own
+ * scene.json instead of being lost — or worse, written into the next one.
+ * A rejected push is dropped, same rule as always: disk stays last-good.
+ */
+export async function settleCommits(): Promise<void> {
+  const hadPush = pushTimer != null;
+  const hadPersist = persistTimer != null;
+  dropPendingTimers();
+  const text = pending;
+  pending = null;
+  if (text == null || (!hadPush && !hadPersist)) return;
+  try {
+    if (hadPush) await sceneLoad(text);
+    await writeSceneFile(text);
+    if (useStore.getState().sceneJson === text) useStore.getState().setSceneDirty(false);
+  } catch (e) {
+    console.warn('settle scene before re-root:', e);
+  }
+}
+
+/** After a re-root: forget anything that was aimed at the previous engine. */
+export function dropPendingCommits() {
+  dropPendingTimers();
+  pending = null;
+}
+
+function dropPendingTimers() {
+  if (pushTimer != null) window.clearTimeout(pushTimer);
+  if (persistTimer != null) window.clearTimeout(persistTimer);
+  pushTimer = null;
+  persistTimer = null;
+}
+
 /** Parse → clone → mutate → commit. No-op when scene.json doesn't parse. */
 export function commitSceneMutation(mutator: (scene: any) => any) {
   const raw = useStore.getState().sceneJson;

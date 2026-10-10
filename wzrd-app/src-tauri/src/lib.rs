@@ -7,16 +7,33 @@
 //! (still alive on 127.0.0.1:9123) serves to external MCP / remote clients.
 //! The headless agent path (`render-core --scene foo.json`, winit-hosted)
 //! is unchanged and lives in the separate `render-core` binary.
+//!
+//! A1 (gig plan D13): the engine re-roots in-process — `projects.rs` swaps
+//! the current `Session` (engine + scene path) on a project switch or an
+//! "engine restart"; the windows outlive every engine.
 
+#[cfg(debug_assertions)]
+mod devport;
 mod engine;
+mod projects;
 mod rpc;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use tauri::Manager;
 
-use crate::engine::EngineHandle;
+use crate::engine::{EngineHandle, EngineWindows};
+
+/// The bus the tee logger forwards to. `render_core::telemetry::global_bus`
+/// is a set-once global — it would keep pointing at the first engine's bus
+/// after a project switch — so the shell keeps its own, re-pointed by every
+/// engine boot.
+static LOG_BUS: Mutex<Option<render_core::telemetry::Bus>> = Mutex::new(None);
+
+pub(crate) fn set_log_bus(bus: &render_core::telemetry::Bus) {
+    *LOG_BUS.lock().expect("log bus lock") = Some(bus.clone());
+}
 
 /// Tee logger: stderr via env_logger + the engine's `log` telemetry channel
 /// once the bus exists (Core::new sets the global). Same shape as the
@@ -35,7 +52,9 @@ impl log::Log for TeeLogger {
     fn log(&self, record: &log::Record) {
         self.inner.log(record);
         if record.level() <= log::Level::Info && self.inner.matches(record) {
-            if let Some(bus) = render_core::telemetry::global_bus() {
+            // Clone out of the lock: emit_log logs at trace internally.
+            let bus = LOG_BUS.lock().ok().and_then(|b| b.clone());
+            if let Some(bus) = bus {
                 bus.emit_log(
                     record.level().as_str().to_ascii_lowercase().as_str(),
                     record.target(),
@@ -51,15 +70,77 @@ impl log::Log for TeeLogger {
 }
 
 pub struct AppState {
-    pub engine: Arc<EngineHandle>,
+    /// Engine + preview windows — outlive every engine instance.
+    pub windows: Arc<EngineWindows>,
+    /// The open project. Swapped whole by `projects::open`; readers clone
+    /// the `Arc` and never hold the lock across an engine call.
+    session: RwLock<Arc<Session>>,
+    /// Serialises project switches / restarts.
+    pub switching: Mutex<()>,
+    /// Audio feature server child, when launched with `--audio` /
+    /// `WZRD_AUDIO=1`. Killed alongside the engine on window close.
+    pub audio_child: Mutex<Option<std::process::Child>>,
+}
+
+/// One engine instance on one scene path. `engine` is `None` when the boot
+/// failed (bad scene, missing pack) — the shell stays up so the operator
+/// can pick another project or retry.
+pub struct Session {
+    pub engine: Option<Arc<EngineHandle>>,
     pub scene_path: PathBuf,
     pub effects_dir: Option<PathBuf>,
     /// Lazily-resolved pack directory (from `pack.info`), cached so mask
     /// loads don't pay an RPC round trip each.
-    pub pack_dir: std::sync::OnceLock<PathBuf>,
-    /// Audio feature server child, when launched with `--audio` /
-    /// `WZRD_AUDIO=1`. Killed alongside the engine on window close.
-    pub audio_child: std::sync::Mutex<Option<std::process::Child>>,
+    pub pack_dir: OnceLock<PathBuf>,
+    /// Why `engine` is `None`.
+    pub boot_error: Option<String>,
+}
+
+impl Session {
+    pub fn new(scene_path: PathBuf, engine: Result<EngineHandle, String>) -> Self {
+        let effects_dir = scene_path
+            .parent()
+            .map(|p| p.join("effects"))
+            .filter(|p| p.exists());
+        let (engine, boot_error) = match engine {
+            Ok(e) => (Some(Arc::new(e)), None),
+            Err(e) => (None, Some(e)),
+        };
+        Self {
+            engine,
+            scene_path,
+            effects_dir,
+            pack_dir: OnceLock::new(),
+            boot_error,
+        }
+    }
+
+    pub fn scene_dir(&self) -> PathBuf {
+        self.scene_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
+
+impl AppState {
+    pub fn session(&self) -> Arc<Session> {
+        Arc::clone(&self.session.read().expect("session lock"))
+    }
+
+    pub fn set_session(&self, s: Session) {
+        *self.session.write().expect("session lock") = Arc::new(s);
+    }
+
+    /// The running engine, or the reason there is none.
+    pub fn engine(&self) -> Result<Arc<EngineHandle>, String> {
+        let s = self.session();
+        s.engine.clone().ok_or_else(|| {
+            s.boot_error
+                .clone()
+                .unwrap_or_else(|| "engine not running".to_string())
+        })
+    }
 }
 
 /// Resolve `--scene` from process args, env var `WZRD_SCENE`, or fall back
@@ -72,7 +153,7 @@ pub struct AppState {
 /// `cargo tauri dev` work with paths like `../render-core/examples/foo.json`
 /// even though cargo silently switches CWD to `wzrd-app/src-tauri/` before
 /// launching the binary.
-fn resolve_scene_path() -> Result<PathBuf, String> {
+fn resolve_scene_path() -> Result<Option<PathBuf>, String> {
     let raw = if let Ok(p) = std::env::var("WZRD_SCENE") {
         Some(p)
     } else {
@@ -87,15 +168,13 @@ fn resolve_scene_path() -> Result<PathBuf, String> {
         }
         found
     };
-    let raw = raw.ok_or_else(|| {
-        "no scene path bound — set WZRD_SCENE or pass --scene <path>".to_string()
-    })?;
+    let Some(raw) = raw else { return Ok(None) };
     let p = PathBuf::from(&raw);
     if p.is_absolute() {
-        return Ok(p);
+        return Ok(Some(p));
     }
     if p.exists() {
-        return Ok(p);
+        return Ok(Some(p));
     }
     // Fallback: interpret relative to the wzrd-app/ root (the parent of the
     // src-tauri manifest dir). Lets users type paths the way they would from
@@ -106,7 +185,7 @@ fn resolve_scene_path() -> Result<PathBuf, String> {
     if let Some(parent) = manifest_parent {
         let candidate = parent.join(&p);
         if candidate.exists() {
-            return Ok(candidate);
+            return Ok(Some(candidate));
         }
     }
     Err(format!(
@@ -166,7 +245,9 @@ fn spawn_audio_server() -> Result<std::process::Child, String> {
 /// thread (Core persists the session and drops the GPU context on that
 /// thread), then kill the audio child. Idempotent.
 fn shutdown_all(state: &AppState) {
-    state.engine.shutdown();
+    if let Some(engine) = state.session().engine.as_ref() {
+        engine.shutdown();
+    }
     if let Ok(mut guard) = state.audio_child.lock() {
         if let Some(mut c) = guard.take() {
             let _ = c.kill();
@@ -193,58 +274,57 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            // Scene: `WZRD_SCENE` / `--scene`, else the most recently opened
+            // project from settings.json (a Finder launch has no env).
             let scene_path = match resolve_scene_path() {
-                Ok(p) => p,
+                Ok(Some(p)) => Some(p),
+                Ok(None) => projects::last_opened(app.handle()),
                 Err(e) => {
                     log::error!("{e}");
                     return Err(e.into());
                 }
             };
-            let scene_path = scene_path
-                .canonicalize()
-                .unwrap_or_else(|_| scene_path.clone());
-            let effects_dir = scene_path
-                .parent()
-                .map(|p| p.join("effects"))
-                .filter(|p| p.exists());
-            log::info!(
-                "scene={} effects_dir={:?} (engine in-process)",
-                scene_path.display(),
-                effects_dir,
-            );
+            let scene_path = scene_path.map(|p| p.canonicalize().unwrap_or(p));
 
-            let handle = match EngineHandle::start_in_process(app.handle().clone(), scene_path.clone())
-            {
-                Ok(h) => Arc::new(h),
-                Err(e) => {
-                    log::error!("could not start in-process engine: {e:#}");
-                    return Err(e.to_string().into());
+            let windows = EngineWindows::create(app.handle()).map_err(|e| {
+                log::error!("could not create engine windows: {e:#}");
+                e.to_string()
+            })?;
+            app.manage(AppState {
+                windows,
+                session: RwLock::new(Arc::new(Session::new(
+                    scene_path.clone().unwrap_or_default(),
+                    Err("no project open — pick one from the project menu".into()),
+                ))),
+                switching: Mutex::new(()),
+                audio_child: Mutex::new(None),
+            });
+
+            // A failed boot keeps the shell up (engine down + the reason),
+            // so the operator can pick another project instead of facing a
+            // dead app.
+            if let Some(scene_path) = scene_path {
+                log::info!("scene={} (engine in-process)", scene_path.display());
+                if let Err(e) = projects::open(app.handle(), &app.state::<AppState>(), scene_path) {
+                    log::error!("could not start in-process engine: {e}");
                 }
-            };
+            } else {
+                log::warn!("no scene bound (WZRD_SCENE / --scene / recent project) — starting without an engine");
+            }
 
-            let audio_child = if audio_requested() {
+            if audio_requested() {
                 match spawn_audio_server() {
                     Ok(c) => {
                         log::info!("spawned audio server pid {}", c.id());
-                        Some(c)
+                        *app.state::<AppState>().audio_child.lock().expect("audio lock") = Some(c);
                     }
-                    Err(e) => {
-                        // Non-fatal: the shell is fully usable without audio.
-                        log::error!("could not start audio server: {e}");
-                        None
-                    }
+                    // Non-fatal: the shell is fully usable without audio.
+                    Err(e) => log::error!("could not start audio server: {e}"),
                 }
-            } else {
-                None
-            };
+            }
 
-            app.manage(AppState {
-                engine: handle,
-                scene_path,
-                effects_dir,
-                pack_dir: std::sync::OnceLock::new(),
-                audio_child: std::sync::Mutex::new(audio_child),
-            });
+            #[cfg(debug_assertions)]
+            devport::spawn(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -283,6 +363,10 @@ pub fn run() {
             rpc::look_read,
             rpc::look_write,
             rpc::look_delete,
+            projects::projects_list,
+            projects::project_current,
+            projects::project_open,
+            projects::engine_restart,
         ])
         .on_window_event(|window, event| {
             // The engine window has its own handler (engine.rs); closing the

@@ -266,6 +266,38 @@ export const previewSetBounds = (
   visible: boolean
 ) => invoke<void>('preview_set_bounds', { x, y, width, height, visible });
 
+// ---------- projects (A1: re-root the in-process engine) ----------
+
+/** One openable scene: a project folder's scene.json, or a recent scene file. */
+export type ProjectEntry = {
+  name: string;
+  scene_path: string;
+  dir: string | null;
+  /** Last opened on this machine (settings.json `recent`), unix ms. */
+  opened_ms: number | null;
+  current: boolean;
+  /** Under the projects root (vs. a recent scene elsewhere). */
+  in_root: boolean;
+};
+/** The open project + whether its engine runs (and why not). */
+export type ProjectInfo = {
+  name: string;
+  scene_path: string;
+  dir: string;
+  running: boolean;
+  error: string | null;
+  elapsed_ms?: number;
+};
+export const projectsList = () =>
+  invoke<{ root: string; projects: ProjectEntry[] }>('projects_list');
+export const projectCurrent = () => invoke<ProjectInfo>('project_current');
+/** Tear the engine down and boot it on another scene (a folder or a file).
+ *  On failure the shell re-opens the previous project and throws. */
+export const projectOpen = (scenePath: string) =>
+  invoke<ProjectInfo>('project_open', { scenePath });
+/** Re-boot the engine on the current scene — crash recovery. */
+export const engineRestart = () => invoke<ProjectInfo>('engine_restart');
+
 // ---------- events ----------
 
 export type TelemetryFrame = {
@@ -281,4 +313,10 @@ export function onEngineStatus(
   handler: (s: { running: boolean; ws_addr?: string }) => void
 ): Promise<UnlistenFn> {
   return listenEvent<{ running: boolean; ws_addr?: string }>('engine:status', handler);
+}
+
+/** Shell-only: fired after every project open / restart (Tauri seat). The
+ *  browser seat sees the same switch as an engine-socket reconnect. */
+export function onProject(handler: (p: ProjectInfo) => void): Promise<UnlistenFn> {
+  return listenEvent<ProjectInfo>('engine:project', handler);
 }
