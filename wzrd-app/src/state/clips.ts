@@ -81,11 +81,7 @@ export function useClipsPoller() {
   }, []);
 }
 
-export function isNew(path: string): boolean {
-  return !useClips.getState().seen.has(path);
-}
-
-export function markSeen(path: string) {
+function markSeen(path: string) {
   const seen = useClips.getState().seen;
   if (seen.has(path)) return;
   useClips.setState({ seen: new Set(seen).add(path) });
