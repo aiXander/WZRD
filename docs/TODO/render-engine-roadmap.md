@@ -281,12 +281,9 @@ single-process relaunch-with-restore meets it. Defense in depth, in order:
   the engine thread, not the webview; `engine:status` reports it), state
   files stayed byte-identical through both crash modes, and measured
   relaunch-to-light was ~160–290 ms — the ≤20 s contract has huge margin.
-  Still open here: an in-app "restart engine" button (today: quit +
-  relaunch) — **gig package A1**, built with the project switcher, which
-  re-roots the engine with the same respawn
-  ([gig-2026-11-live-video.md](gig-2026-11-live-video.md) D13) — and the
-  post-crash wart that SIGTERM is a no-op (reference §1b), which stays in
-  this hardening pass.
+  The in-app "Restart engine" button landed with the project switcher
+  (gig A1, 2026-10-10; reference §1b "Re-rooting"). Still open here: the
+  post-crash wart that SIGTERM is a no-op (reference §1b).
 - Engine startup is already last-good-tolerant (bad scene → previous plan);
   extend to "scene fails at boot → black composite + hot-reload watch"
   instead of exit.

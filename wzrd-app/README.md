@@ -60,7 +60,13 @@ WZRD_SCENE=../render-core/examples/phase3_smoke.scene.json \
 
 No separate engine build step — `render-core` compiles in as a Cargo path
 dependency. The scene path comes from `WZRD_SCENE` env var or
-`--scene <path>` passed through to `wzrd-app`. `WZRD_DISPLAY=<idx>` puts the
+`--scene <path>` passed through to `wzrd-app`; with neither, the app opens
+the most recently opened project (per-machine `settings.json` in the app
+config dir). Switch projects or restart a crashed engine from the TopBar
+project menu — the engine re-roots in-process in a few hundred ms.
+`uv run python wzrd-app/scripts/fixture_projects.py` (from the repo root)
+builds two test projects with HAP clips for the project menu and the clip
+grid. `WZRD_DISPLAY=<idx>` puts the
 engine window borderless-fullscreen on that monitor;
 `WZRD_SPIKE=panic|device_loss` deliberately crashes the render thread ~5 s
 in (crash-containment test hook).
@@ -75,8 +81,10 @@ logged and non-fatal.
 ## Driving it from a browser (dev)
 
 With `pnpm tauri dev` running, open `http://localhost:1420` in Chrome: the
-same UI talks to the engine's WebSocket plus a dev-only Vite file
-middleware (details in `operator-ui.md`, "Browser bridge"). Handy for
+same UI talks to the engine's WebSocket plus the shell's debug-only HTTP
+port (`src-tauri/src/devport.rs`, 127.0.0.1:9124, behind Vite's `/__shell`
+proxy) for files, projects and clips — details in `operator-ui.md`,
+"Browser bridge". Handy for
 scripted UI testing and screenshots; the native preview is replaced by the
 JPEG design feed there.
 

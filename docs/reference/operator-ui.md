@@ -164,9 +164,13 @@ project switches (the old Vite file middleware was pinned to
 reconnect → hydrate. Use it to drive and screenshot the UI with browser
 tooling while `pnpm tauri dev` runs. Two seats are independent: edits from
 one aren't mirrored into the other's store (both declare actor `ui`).
-Browser-tooling trap: CDP's synthetic mouse drag doesn't fire HTML5
-drag-and-drop — exercise the clip grid's drop handlers with dispatched
-`DragEvent`s.
+Browser-tooling traps (Claude in Chrome): CDP's synthetic mouse drag
+doesn't fire HTML5 drag-and-drop — exercise the clip grid's drop handlers
+with dispatched `DragEvent`s; and the screenshot's coordinate frame can
+differ from the page's CSS viewport (seen: 1456 vs 1543 px), so
+coordinate clicks miss — click via element refs (`find`). In dev, the
+modules are importable from the page (`await import('/src/state/store.ts')`)
+to read store state as evidence.
 
 ## Traps
 

@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a landed. Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1a + E1b landed. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -274,10 +274,11 @@ click + T. See [../reference/operator-ui.md](../reference/operator-ui.md)
 "Clip grid".
 
 **Still open — the real end-to-end gate:** agent render → on the wall in
-< 2 min, hands on design only. Run it once **E1 b/c are committed** (HAP
-decode + region placement; uncommitted on 2026-10-10) and **P5** lands
-(`to_hap` + thumbnails written by the MCP): one `texture_flow(region=…)`
-render from an external Claude session, then click + T. Fixtures:
+< 2 min, hands on design only. HAP decode (E1b) landed after the grid
+(`d03e78e`); run the gate once **E1c** (region placement from
+`source_box`; in progress on 2026-10-10) and **P5** (`to_hap` +
+thumbnails written by the MCP) land: one `texture_flow(region=…)` render
+from an external Claude session, then click + T. Fixtures:
 `uv run python wzrd-app/scripts/fixture_projects.py`.
 
 ### F1 — Seed clip effects (D14)
@@ -319,11 +320,11 @@ APP, after A2 · only if weeks 1–3 landed on time. Spec:
 
 ## If something slips, cut in this order
 
-MIDI, the "new from agent" strip (NEW flags in the grid still show fresh
-renders), the recipe tools (the agent can read a recipe folder without
-dedicated tools), seed effects beyond the first four, the probation window,
-then the project switcher (fallback: relaunch with `WZRD_SCENE`). The engine
-video path, the aspect fix, the starter scene and the clip grid can't slip.
+MIDI, the recipe tools (the agent can read a recipe folder without
+dedicated tools), seed effects beyond the first four, the probation window.
+(The project switcher and the "new from agent" strip already landed.) The
+engine video path, the aspect fix, the starter scene and the clip grid
+can't slip.
 
 ## After the gig
 

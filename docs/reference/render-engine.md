@@ -185,9 +185,9 @@ not "fix" it to alpha blending.
 | `effects.rs` | Effect registry: built-ins (`tint`, `hueCycle`, `flash`, `wobble`), project-local + inline WGSL, mtime-based rescan. |
 | `scene.rs` | `scene.json` parser + selector resolution. |
 | `pack.rs` | Layer-pack loader; per-slice uv geometry (`LayerGeom`) from the manifest or the mask bytes (§5.2); §2.2 identity sidecar (`IdentityFile` lenient load/merge, strict `apply_identity_delta`, atomic `save_identity`). |
-| `osc.rs` | UDP OSC sink for `/audio/lmh` + `/audio/onset/*` → lock-free `AudioFeatures` atomics. |
+| `osc.rs` | UDP OSC sink for `/audio/lmh` + `/audio/onset/*` → lock-free `AudioFeatures` atomics. `OscListener` drop stops + joins the thread, so the port is free on return (an in-process re-root rebinds it, §1b). |
 | `rpc.rs` | JSON-RPC dispatch: inline read-only + live-tuning methods (`param.set` both forms, `master.set`, `hello`, `changes.list`) + queued `EngineCommand`s for mutations (`scene.load` incl. `base_rev` CAS, `effect.*`, `identity.setGroups`, `session.save`); `wgsl.validate` with user-source line remapping; §2.7 `Actor` (per-connection identity) + `PackInfoCell` (swappable `pack.info` snapshot). |
-| `ws.rs` | tungstenite server, thread-per-connection, telemetry fan-out. |
+| `ws.rs` | tungstenite server, thread-per-connection, telemetry fan-out. `ServerHandle` drop joins the accept loop and closes every connection — port free on return, clients reconnect to the next engine (§1b re-rooting). |
 | `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay + `subscriber_count`), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (non-blocking composite readback → JPEG @ ~15 fps — **demand-gated since Step 3**: capture only runs with ≥1 `preview` subscriber), §2.7 `ChangeLog` (design rev + boot epoch + change ring), payload types. |
 | `watch.rs` | notify-based watcher over the scene file + effects dir. |
 
@@ -978,7 +978,12 @@ All **§5.x** references in this doc resolve there (numbering preserved).
   built by `python ../test.py layerpack`. Then the shell:
   `cd wzrd-app && WZRD_SCENE=... pnpm tauri dev` (the engine compiles in as
   a library — no separate render-core build step for the shell since the
-  collapse).
+  collapse; without `WZRD_SCENE` it opens the most recent project).
+- **Anything a `Core` owns must die with it.** The shell re-roots the
+  engine in-process (project switch / restart, §1b), so a new thread,
+  socket, watcher or global a `Core` creates must stop and release on
+  drop — a set-once global (like `telemetry::global_bus`) keeps pointing
+  at the dead engine.
 - **Never block the render thread** — not on swapchains of possibly-hidden
   windows (this now covers *two* swapchains: engine window and native
   preview), not on buffer maps (`PreviewSampler` shows the non-blocking
