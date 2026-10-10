@@ -182,10 +182,62 @@ ready slot. If decode falls behind, reuse the last good slot — a stutter,
 never a frame-stall. Watch the HMR/cleanup failure mode (reference §4
 safety/scaling risks): staging slots from a closed stream must drop.
 
-**Design-pass choices left to E1:** the demuxer (prefer a pure-Rust MOV
-reader + the `snap` crate over linking ffmpeg, for the Linux build); how a
-stream is shared when design and live bind the same clip; the bind-group
-slot for the image texture.
+**E1 design pass (2026-10-10, before step b):**
+
+- **Demuxer: a hand-written ISO-BMFF/QuickTime sample-table reader** in
+  `video.rs` (~250 lines: `moov/trak/mdia` → `mdhd` timescale, `hdlr` =
+  `vide`, `stsd` fourcc + width/height, `stts`/`stsc`/`stsz`/`stco|co64` →
+  one (offset, size, start time) per frame) + the pure-Rust **`snap`**
+  crate. No ffmpeg link (Linux build), and not the `mp4` crate — it only
+  models the sample entries it knows (`avc1`, `hev1`, …) and HAP's
+  `Hap1`/`HapY` are not among them. HAP frames are parsed per the Vidvox
+  spec: section header (3-byte size + type, 0 → 4-byte extended size),
+  compressor none/snappy/chunked ("complex": decode-instruction container
+  with per-chunk compressor + size tables). Accepted: `Hap1` (BC1, sRGB),
+  `Hap5` (HAP Alpha, BC3 sRGB — same code path, so it comes free), `HapY`
+  (HAP Q: non-sRGB BC3, scaled-YCoCg → RGB → linear in `sample_image`).
+  Refused with a named error: `HapM`/`HapA`/`Hap7`, any other codec, and
+  dimensions that aren't a multiple of 4 (BC blocks; P5 pads).
+- **No stream sharing between legs.** A stream belongs to one *(plan,
+  binding)*; the N passes of a multi-layer binding share its one frame
+  texture, each placed in its own box. Why: playheads are per leg (per-leg
+  clocks + speed masters, §2.6), so live and design can want different
+  frames of the same file; the gate's worst case (a TAKE that swaps all
+  seven clips) has nothing to share anyway; and because the plan owns its
+  streams, the promote pointer swap carries them into live — a clip never
+  reopens or jumps at TAKE. Design's post-promote rebuild opens fresh
+  streams that cost nothing until design renders (decode is
+  demand-driven, below). Cost accepted: duplicate decode while design
+  *renders* the same clip live is showing.
+- **Bind-group slot (landed in step a):** group 0, binding 4
+  `texture_2d<f32>` + binding 5 sampler, in the one layer layout every
+  pass and probe item uses; passes without an image bind a 1×1
+  transparent dummy. Placement rect + encoding ride `LayerParams`
+  (`image_box`, `image_meta`).
+- **Staging ring per stream:** N = 4 `MAP_WRITE | COPY_SRC` buffers,
+  rows padded to 256 B. Slot cycle: *free* (mapped, decode thread writes
+  it, unmaps, sends `ready{slot, frame}`) → *ready* (render thread holds
+  it) → one `copy_buffer_to_texture` into the stream's frame texture →
+  after submit, `map_async` → callback hands it back as *free*. Stale
+  ready slots recycle the same way without a copy.
+- **Demand-driven decode:** each rendered frame the render thread computes
+  the wanted frame and `try_send`s `want{frame, step}` (bounded channel —
+  never blocks); the decode thread decodes `frame, frame+step, frame+2·step`
+  into free slots, where `step` is the observed frames-per-render-frame
+  (≥ 1, signed by rate) so 8× speed still prefetches the right frames. No
+  wants → no work: a design leg nobody watches decodes nothing. Upload
+  picks the ready slot nearest the wanted frame without passing it; none
+  → keep the current frame (a stutter, never a stall).
+- **Playhead (C5 confirmed as written):** `frame = sample at ((leg
+  transport seconds × rate) rem_euclid duration)`, read from the leg's own
+  integrated clock, so the speed master bends clips and promote's clock
+  copy keeps them continuous across TAKE.
+- **BC:** `TEXTURE_COMPRESSION_BC` is requested iff the adapter offers it
+  (`GpuContext::bc_supported`); without it every HAP open fails with a
+  named per-binding warning and stills keep working.
+- **Teardown:** dropping a stream drops its channels; the decode thread
+  exits on disconnect and is never joined on the render thread; it holds
+  the staging buffers, so they drop with it.
 
 **Later, not scheduled:** H.264/HEVC hardware decode (VideoToolbox / NVDEC /
 VAAPI) for single-stream content; stills and pack `references/` through the
