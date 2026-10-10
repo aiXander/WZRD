@@ -134,6 +134,10 @@ pub struct LayerParamsGpu {
     /// 8 scalar slots packed as two vec4 lanes.
     pub params_f: [[f32; 4]; 2],
     pub params_c: [[f32; 4]; MAX_COLOR_PARAMS],
+    /// C5 image placement rect, uv (min_x, min_y, max_x, max_y).
+    pub image_box: [f32; 4],
+    /// (bound, encoding, _, _) — see `ImageEncoding`.
+    pub image_meta: [f32; 4],
 }
 
 impl LayerParamsGpu {
@@ -163,6 +167,35 @@ impl LayerParamsGpu {
             bbox_uv: identity.bbox_uv,
             params_f,
             params_c,
+            image_box: [0.0, 0.0, 1.0, 1.0],
+            image_meta: [0.0; 4],
+        }
+    }
+
+    /// Bind this pass's image: placement rect (uv) + texel encoding.
+    pub fn with_image(mut self, image_box: [f32; 4], encoding: ImageEncoding) -> Self {
+        self.image_box = image_box;
+        self.image_meta = [1.0, encoding.as_f32(), 0.0, 0.0];
+        self
+    }
+}
+
+/// How `sample_image` must interpret the texels of a bound image. The
+/// texture *format* already handles sRGB decode for stills and plain HAP;
+/// HAP Q's scaled YCoCg needs a colour convert in the shader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageEncoding {
+    /// sRGB-format texture, straight alpha (PNG/JPEG stills, HAP, HAP Alpha).
+    Rgba,
+    /// Scaled YCoCg in a non-sRGB BC3 texture (HAP Q).
+    YCoCg,
+}
+
+impl ImageEncoding {
+    fn as_f32(self) -> f32 {
+        match self {
+            ImageEncoding::Rgba => 0.0,
+            ImageEncoding::YCoCg => 1.0,
         }
     }
 }
@@ -326,6 +359,11 @@ pub struct GpuContext {
     pub mask_atlas_view: wgpu::TextureView,
     pub mask_sampler: wgpu::Sampler,
 
+    /// C5 image input: the shared bilinear clamp sampler, and the 1×1
+    /// transparent texture every pass without an image binds in slot 4.
+    pub image_sampler: wgpu::Sampler,
+    pub dummy_image_view: wgpu::TextureView,
+
     pub layer_bind_group_layout: wgpu::BindGroupLayout,
     pub layer_pipeline_layout: wgpu::PipelineLayout,
 
@@ -431,6 +469,17 @@ impl GpuContext {
 
         let (mask_atlas, mask_atlas_view, mask_sampler) = upload_mask_atlas(&device, &queue, pack);
 
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image input sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let dummy_image_view = create_dummy_image(&device, &queue);
+
         let layer_bind_group_layout = create_layer_bind_group_layout(&device);
         let layer_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("layer pipeline layout"),
@@ -488,6 +537,8 @@ impl GpuContext {
             mask_atlas,
             mask_atlas_view,
             mask_sampler,
+            image_sampler,
+            dummy_image_view,
             layer_bind_group_layout,
             layer_pipeline_layout,
             pipeline_cache,
@@ -828,8 +879,93 @@ fn create_layer_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
                 },
                 count: None,
             },
+            // 4: C5 image input (HAP frame / still; 1×1 dummy when unbound)
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // 5: image sampler
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
         ],
     })
+}
+
+/// The layer bind group: shared mask atlas + frame state, the pass's own
+/// uniform, and its image (or the dummy). The one constructor every pass
+/// and probe item goes through, so the slot layout lives in one place.
+pub fn layer_bind_group(
+    gpu: &GpuContext,
+    label: &str,
+    frame_state: &wgpu::Buffer,
+    layer_params: &wgpu::Buffer,
+    image: Option<&wgpu::TextureView>,
+) -> wgpu::BindGroup {
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: &gpu.layer_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&gpu.mask_atlas_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&gpu.mask_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: frame_state.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: layer_params.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(
+                    image.unwrap_or(&gpu.dummy_image_view),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(&gpu.image_sampler),
+            },
+        ],
+    })
+}
+
+fn create_dummy_image(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let texture = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some("image input dummy (1×1 transparent)"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        &[0, 0, 0, 0],
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 fn create_composite(
@@ -1013,10 +1149,13 @@ mod tests {
 
     /// The Rust struct must byte-match the WGSL `LayerParams` uniform:
     /// 16 (u32 header) + 8 (seed + pad) + 8 (centroid vec2) + 16 (bbox vec4)
-    /// + 32 (params_f) + 64 (params_c) = 144, and 16-aligned throughout.
+    /// + 32 (params_f) + 64 (params_c) + 16 (image_box) + 16 (image_meta)
+    /// = 176, and 16-aligned throughout.
     #[test]
     fn layer_params_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<LayerParamsGpu>(), 144);
+        assert_eq!(std::mem::size_of::<LayerParamsGpu>(), 176);
+        assert_eq!(std::mem::offset_of!(LayerParamsGpu, image_box), 144);
+        assert_eq!(std::mem::offset_of!(LayerParamsGpu, image_meta), 160);
         assert_eq!(std::mem::offset_of!(LayerParamsGpu, centroid_uv), 24);
         assert_eq!(std::mem::offset_of!(LayerParamsGpu, bbox_uv), 32);
         assert_eq!(std::mem::offset_of!(LayerParamsGpu, params_f), 48);
@@ -1046,6 +1185,28 @@ mod tests {
     /// The output-side shaders only ever compile on a real device, which is
     /// exactly where a typo is most expensive to discover (mid-show, on a
     /// ladder). naga parses + validates them here for free.
+    #[test]
+    fn builtin_effect_shader_parses_and_validates() {
+        // The prelude (incl. `sample_image`) + built-ins + main, exactly as
+        // the device compiles them at boot — and a user body that calls
+        // `sample_image` from non-uniform control flow, which only the
+        // explicit-LOD sample keeps legal.
+        let user = "fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32> {\n\
+                    if (mask > 0.5) { return sample_image(uv * 2.0); }\n\
+                    return vec4<f32>(0.0);\n}";
+        for (name, body) in [("builtin", BUILTIN_BODY_WGSL), ("user", user)] {
+            let composed = compose_shader(body);
+            let module = naga::front::wgsl::parse_str(&composed)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&composed)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name} failed validation: {e:?}"));
+        }
+    }
+
     #[test]
     fn output_shaders_parse_and_validate() {
         for (name, src) in [

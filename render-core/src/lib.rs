@@ -29,6 +29,7 @@ pub mod rpc;
 pub mod scene;
 pub mod session;
 pub mod telemetry;
+pub mod video;
 pub mod watch;
 pub mod ws;
 

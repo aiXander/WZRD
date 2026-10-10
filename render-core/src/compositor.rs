@@ -14,14 +14,18 @@
 use anyhow::{anyhow, Result};
 use wgpu::util::DeviceExt;
 
+use std::path::Path;
+
 use crate::drivers::{FrameContext, ParamOverrides, PickRate, ScalarValue};
 use crate::telemetry::DriverRow;
 use crate::effects::{
-    EffectBinding, EffectDef, EffectKind, EffectRegistry, InlineEffectSpec,
+    EffectBinding, EffectDef, EffectKind, EffectRegistry, ImagePlacement, InlineEffectSpec,
 };
 use crate::gpu::{
-    FrameStateGpu, GpuContext, LayerIdentity, LayerParamsGpu, BUILTIN_PIPELINE_KEY,
+    layer_bind_group, FrameStateGpu, GpuContext, ImageEncoding, LayerIdentity, LayerParamsGpu,
+    BUILTIN_PIPELINE_KEY,
 };
+use crate::video::ImageSource;
 use crate::pack::LoadedPack;
 use crate::scene::{resolve_selector, BindingSpec, EffectRef, PickMode, SceneFile};
 
@@ -55,9 +59,18 @@ pub struct LayerPass {
     /// Operator layer fader for this frame, folded from the `@opacity` /
     /// `@mute` / `@solo` overrides in [`PassPlan::tick`]. `0` skips the draw.
     pub opacity: f32,
+    /// C5 image placement for this pass (uv rect + texel encoding) when its
+    /// binding has an opened image; `None` = `sample_image` is transparent.
+    pub image: Option<([f32; 4], ImageEncoding)>,
 
     pub layer_buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
+}
+
+/// An opened image input and the binding that reads it.
+pub struct BindingImage {
+    pub binding_id: String,
+    pub source: ImageSource,
 }
 
 /// §5.2 pick state for one binding. All member passes stay in the plan;
@@ -81,6 +94,13 @@ pub struct PassPlan {
     pub layer_passes: Vec<LayerPass>,
     pub picks: Vec<PickGroup>,
     pub clear_color: wgpu::Color,
+    /// C5 image inputs, one per binding that opened one. Owned by the plan
+    /// so they travel through the promote pointer swap with it.
+    pub images: Vec<BindingImage>,
+    /// Non-fatal build problems (an image that failed to open: that binding
+    /// draws nothing, the rest of the plan plays). Surfaced by `Core` in the
+    /// apply reply + `hot_reload`.
+    pub warnings: Vec<String>,
     /// Per-plan FrameState uniform (§5.6 full-control-switch): the two legs
     /// tick with *different* contexts (own transport speed, own audioListen),
     /// so the buffer can't be shared on the GpuContext — and it must travel
@@ -95,14 +115,19 @@ impl PassPlan {
     ///
     /// On error the caller keeps the previous plan rendering (§3.6
     /// swap-on-success); see `main.rs::rebuild_plan`.
+    ///
+    /// `scene_dir` resolves the relative clip paths of C5 `image` params.
     pub fn build(
         gpu: &mut GpuContext,
         pack: &LoadedPack,
         scene: &SceneFile,
         registry: &EffectRegistry,
+        scene_dir: &Path,
     ) -> Result<Self> {
         let mut passes: Vec<LayerPass> = Vec::new();
         let mut picks: Vec<PickGroup> = Vec::new();
+        let mut images: Vec<BindingImage> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
 
         let frame_state = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("plan frame state uniform"),
@@ -125,12 +150,36 @@ impl PassPlan {
                 .iter()
                 .filter_map(|i| match i {
                     crate::effects::InputSlot::Scalar { name, .. } => Some(name.clone()),
-                    crate::effects::InputSlot::Color { .. } => None,
+                    _ => None,
                 })
                 .collect();
 
             let slices = resolve_selector(&binding.select, pack)?;
             let sibling_count = slices.len() as u32;
+
+            // C5 — open the binding's image once; every resolved layer
+            // samples the same texture, each placed in its own box. A bad
+            // clip is a warning, never a plan failure.
+            let image = resolved.image.as_ref().and_then(|param| {
+                let path = scene_dir.join(&param.clip);
+                match ImageSource::open(gpu, &path) {
+                    Ok(source) => {
+                        let encoding = source.encoding();
+                        images.push(BindingImage {
+                            binding_id: binding.id.clone(),
+                            source,
+                        });
+                        Some((images.len() - 1, param.placement, encoding))
+                    }
+                    Err(e) => {
+                        warnings.push(format!(
+                            "binding {:?}: image {:?} not loaded, binding draws nothing: {e:#}",
+                            binding.id, param.clip
+                        ));
+                        None
+                    }
+                }
+            });
 
             // §5.2 pick — one group per picked binding. Members start
             // inactive; the first tick() runs the initial pick.
@@ -170,13 +219,19 @@ impl PassPlan {
                     centroid_uv: geom.centroid_uv,
                     bbox_uv: geom.bbox_uv,
                 };
-                let initial = LayerParamsGpu::build(
+                let pass_image = image.map(|(_, placement, encoding)| {
+                    (image_box(placement, &identity), encoding)
+                });
+                let mut initial = LayerParamsGpu::build(
                     slice,
                     effect_id,
                     &identity,
                     &vec![0.0; resolved.scalars.len()],
                     &resolved.colors,
                 );
+                if let Some((b, enc)) = pass_image {
+                    initial = initial.with_image(b, enc);
+                }
                 let layer_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(&format!(
                         "layer params [{} slice {}]",
@@ -185,28 +240,13 @@ impl PassPlan {
                     contents: bytemuck::bytes_of(&initial),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
-                let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&format!("layer bg [{} slice {}]", binding.id, slice)),
-                    layout: &gpu.layer_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&gpu.mask_atlas_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&gpu.mask_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: frame_state.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: layer_buffer.as_entire_binding(),
-                        },
-                    ],
-                });
+                let bind_group = layer_bind_group(
+                    gpu,
+                    &format!("layer bg [{} slice {}]", binding.id, slice),
+                    &frame_state,
+                    &layer_buffer,
+                    image.map(|(i, _, _)| images[i].source.view()),
+                );
 
                 passes.push(LayerPass {
                     binding_id: binding.id.clone(),
@@ -223,6 +263,7 @@ impl PassPlan {
                     // Picked passes start dark until the first tick() picks.
                     active: pick_group.is_none(),
                     opacity: 1.0,
+                    image: pass_image,
                     layer_buffer,
                     bind_group,
                 });
@@ -244,6 +285,8 @@ impl PassPlan {
             layer_passes: passes,
             picks,
             clear_color: wgpu::Color::BLACK,
+            images,
+            warnings,
             frame_state,
         })
     }
@@ -344,6 +387,9 @@ impl PassPlan {
                 &pass.colors,
             );
             params.opacity = pass.opacity;
+            if let Some((b, enc)) = pass.image {
+                params = params.with_image(b, enc);
+            }
             gpu.queue
                 .write_buffer(&pass.layer_buffer, 0, bytemuck::bytes_of(&params));
         }
@@ -464,6 +510,15 @@ pub(crate) fn layer_opacity(overrides: &ParamOverrides, binding: &str, any_solo:
         .get(binding, LAYER_OPACITY)
         .map(|v| v.clamp(0.0, 1.0))
         .unwrap_or(1.0)
+}
+
+/// C5 placement rect (uv) for one pass: the whole canvas, or the layer's
+/// own box so one clip fits whichever region it is bound to.
+fn image_box(placement: ImagePlacement, identity: &LayerIdentity) -> [f32; 4] {
+    match placement {
+        ImagePlacement::Canvas => [0.0, 0.0, 1.0, 1.0],
+        ImagePlacement::Region => identity.bbox_uv,
+    }
 }
 
 /// Shared by plan build and the §5.6 probe pre-analysis (which needs to know

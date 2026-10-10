@@ -36,6 +36,7 @@ pub mod builtin_id {
     pub const HUE_CYCLE: u32 = 1;
     pub const FLASH: u32 = 2;
     pub const WOBBLE: u32 = 3;
+    pub const VIDEO_CLIP: u32 = 4;
 }
 
 /// §5.5 UI metadata on a scalar input — lets the UI/agent render a control
@@ -78,12 +79,17 @@ pub enum InputSlot {
         /// Widget hint ("palette" | "color"). Advisory only.
         widget: Option<String>,
     },
+    /// Gig plan C5 — a texture input (HAP clip or still) read in WGSL via
+    /// `sample_image(uv)`. Takes no uniform slot; at most one per effect.
+    Image { name: String },
 }
 
 impl InputSlot {
     pub fn name(&self) -> &str {
         match self {
-            InputSlot::Scalar { name, .. } | InputSlot::Color { name, .. } => name,
+            InputSlot::Scalar { name, .. }
+            | InputSlot::Color { name, .. }
+            | InputSlot::Image { name } => name,
         }
     }
 
@@ -115,7 +121,71 @@ impl InputSlot {
                 "default": default,
                 "widget": widget,
             }),
+            InputSlot::Image { name } => serde_json::json!({
+                "name": name,
+                "type": "image",
+                "default": null,
+            }),
         }
+    }
+}
+
+/// C5 placement: where the image lands on the canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePlacement {
+    /// Scaled into each resolved layer's padded `source_box` (`bbox`
+    /// fallback) — one clip reusable across regions. The C5 default.
+    Region,
+    /// Full-canvas image, cut by the mask.
+    Canvas,
+}
+
+/// The parsed `image` param of a binding (gig plan C5):
+/// `{ "clip": "<path rel. to scene dir>", "placement"?, "rate"? }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageParam {
+    pub clip: String,
+    pub placement: ImagePlacement,
+    /// Playhead rate (stateless: `(leg time × rate) mod duration`). Ignored
+    /// for stills.
+    pub rate: f32,
+}
+
+impl ImageParam {
+    pub fn parse(v: &Value) -> Result<Self> {
+        let Value::Object(m) = v else {
+            bail!(
+                "image param must be an object {{\"clip\": \"generated/x.mov\", \"placement\"?: \
+                 \"region\"|\"canvas\", \"rate\"?: number}}, got {v}"
+            );
+        };
+        for k in m.keys() {
+            if !matches!(k.as_str(), "clip" | "placement" | "rate") {
+                bail!("image param has no key {k:?}; expected clip / placement / rate");
+            }
+        }
+        let clip = match m.get("clip") {
+            Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+            _ => bail!("image param needs a non-empty string \"clip\" (path relative to the scene dir)"),
+        };
+        let placement = match m.get("placement") {
+            None | Some(Value::Null) => ImagePlacement::Region,
+            Some(Value::String(s)) if s == "region" => ImagePlacement::Region,
+            Some(Value::String(s)) if s == "canvas" => ImagePlacement::Canvas,
+            Some(other) => bail!("image placement must be \"region\" or \"canvas\", got {other}"),
+        };
+        let rate = match m.get("rate") {
+            None | Some(Value::Null) => 1.0,
+            Some(r) => match r.as_f64() {
+                Some(x) if x.is_finite() => x as f32,
+                _ => bail!("image rate must be a finite number, got {r}"),
+            },
+        };
+        Ok(Self {
+            clip,
+            placement,
+            rate,
+        })
     }
 }
 
@@ -163,6 +233,9 @@ pub struct EffectBinding {
     pub def: EffectDef,
     pub scalars: Vec<ScalarValue>,
     pub colors: Vec<[f32; 4]>,
+    /// The C5 `image` param when the effect declares an image input and the
+    /// binding sets it. `None` = the input samples transparent black.
+    pub image: Option<ImageParam>,
 }
 
 impl EffectBinding {
@@ -194,6 +267,7 @@ impl EffectBinding {
 
         let mut scalars = Vec::new();
         let mut colors = Vec::new();
+        let mut image = None;
         for input in &def.inputs {
             match input {
                 InputSlot::Scalar { name, default, .. } => {
@@ -213,6 +287,16 @@ impl EffectBinding {
                         None => *default,
                     };
                     colors.push(resolved);
+                }
+                InputSlot::Image { name } => {
+                    if let Some(value) = params_obj.and_then(|m| m.get(name)) {
+                        if !value.is_null() {
+                            image = Some(
+                                ImageParam::parse(value)
+                                    .with_context(|| format!("parsing image param {name:?}"))?,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -236,6 +320,7 @@ impl EffectBinding {
             def,
             scalars,
             colors,
+            image,
         })
     }
 }
@@ -305,6 +390,7 @@ impl DescriptorInput {
                     widget: self.widget,
                 })
             }
+            "image" => Ok(InputSlot::Image { name: self.name }),
             other => bail!("unsupported input type {other:?} for {:?}", self.name),
         }
     }
@@ -453,12 +539,7 @@ impl EffectRegistry {
     /// spec. Doesn't touch the registry — inline effects are one-shot.
     pub fn resolve_inline(&self, spec: &InlineEffectSpec) -> Result<EffectDef> {
         let pipeline_key = format!("inline:{}", short_hash(&spec.wgsl));
-        let inputs = spec
-            .inputs
-            .iter()
-            .cloned()
-            .map(|i| i.into_slot())
-            .collect::<Result<Vec<_>>>()?;
+        let inputs = parse_inputs(spec.inputs.clone())?;
         Ok(EffectDef {
             name: spec.name.clone().unwrap_or_else(|| pipeline_key.clone()),
             kind: EffectKind::User {
@@ -497,6 +578,23 @@ fn describe_def(def: &EffectDef) -> Value {
     })
 }
 
+/// Descriptor inputs → slots, enforcing the v1 limit of one `image` input
+/// per effect (the prelude exposes a single image texture binding).
+fn parse_inputs(inputs: Vec<DescriptorInput>) -> Result<Vec<InputSlot>> {
+    let slots = inputs
+        .into_iter()
+        .map(|i| i.into_slot())
+        .collect::<Result<Vec<_>>>()?;
+    let images = slots
+        .iter()
+        .filter(|s| matches!(s, InputSlot::Image { .. }))
+        .count();
+    if images > 1 {
+        bail!("an effect may declare at most one `image` input (found {images})");
+    }
+    Ok(slots)
+}
+
 fn combined_mtime(shader: &Path, descriptor: &Path) -> Option<SystemTime> {
     let m1 = fs::metadata(shader).and_then(|m| m.modified()).ok()?;
     let m2 = fs::metadata(descriptor).and_then(|m| m.modified()).ok();
@@ -514,11 +612,7 @@ fn load_user_effect(name: &str, shader_path: &Path, descriptor_path: &Path) -> R
             .with_context(|| format!("reading {}", descriptor_path.display()))?;
         let parsed: DescriptorFile = serde_json::from_str(&raw)
             .with_context(|| format!("parsing {}", descriptor_path.display()))?;
-        parsed
-            .inputs
-            .into_iter()
-            .map(|i| i.into_slot())
-            .collect::<Result<Vec<_>>>()?
+        parse_inputs(parsed.inputs)?
     } else {
         Vec::new()
     };
@@ -616,6 +710,22 @@ fn built_in_defs() -> Vec<EffectDef> {
                 color("color", [0.8, 0.4, 0.9, 1.0]),
             ],
         },
+        EffectDef {
+            name: "videoClip".into(),
+            kind: EffectKind::BuiltIn { effect_id: VIDEO_CLIP },
+            // C5 reference clip player: the `image` input (HAP clip or still)
+            // cut by the mask, params_f[0] = gain.
+            inputs: vec![
+                InputSlot::Image {
+                    name: "image".into(),
+                },
+                InputSlot::Scalar {
+                    name: "gain".into(),
+                    default: 1.0,
+                    meta: ScalarMeta::range(0.0, 2.0, 0.01),
+                },
+            ],
+        },
     ]
 }
 
@@ -675,6 +785,55 @@ mod tests {
         let all = r.describe(None).unwrap();
         assert!(all["effects"].as_array().unwrap().len() >= 4);
         assert!(r.describe(Some("nope")).is_err());
+    }
+
+    #[test]
+    fn parses_image_param() {
+        let r = EffectRegistry::new(None);
+        let def = r.resolve_named("videoClip").unwrap();
+        let b = EffectBinding::from_params(
+            def.clone(),
+            &json!({ "image": { "clip": "generated/a.mov" }, "gain": 0.5 }),
+        )
+        .unwrap();
+        let img = b.image.unwrap();
+        assert_eq!(img.clip, "generated/a.mov");
+        assert_eq!(img.placement, ImagePlacement::Region); // C5 default
+        assert_eq!(img.rate, 1.0);
+        assert_eq!(b.scalars.len(), 1); // the image takes no uniform slot
+
+        let b = EffectBinding::from_params(
+            def.clone(),
+            &json!({ "image": { "clip": "x.png", "placement": "canvas", "rate": -0.5 } }),
+        )
+        .unwrap();
+        let img = b.image.unwrap();
+        assert_eq!((img.placement, img.rate), (ImagePlacement::Canvas, -0.5));
+
+        assert!(EffectBinding::from_params(def.clone(), &json!({})).unwrap().image.is_none());
+        for bad in [
+            json!({ "image": "x.mov" }),
+            json!({ "image": { "clip": "" } }),
+            json!({ "image": { "clip": "x.mov", "placment": "canvas" } }),
+            json!({ "image": { "clip": "x.mov", "placement": "fill" } }),
+        ] {
+            assert!(EffectBinding::from_params(def.clone(), &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn descriptor_allows_one_image_input() {
+        let one: Vec<DescriptorInput> =
+            serde_json::from_value(json!([{ "name": "image", "type": "image" }])).unwrap();
+        let slots = parse_inputs(one).unwrap();
+        assert!(matches!(&slots[0], InputSlot::Image { name } if name == "image"));
+        assert_eq!(slots[0].describe()["type"], "image");
+        let two: Vec<DescriptorInput> = serde_json::from_value(json!([
+            { "name": "a", "type": "image" },
+            { "name": "b", "type": "image" }
+        ]))
+        .unwrap();
+        assert!(parse_inputs(two).is_err());
     }
 
     #[test]

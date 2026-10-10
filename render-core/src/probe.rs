@@ -322,28 +322,13 @@ impl ProbeSession {
             contents: bytemuck::bytes_of(&spec.layer_params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(&format!("probe bg [{}]", spec.label)),
-            layout: &gpu.layer_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&gpu.mask_atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&gpu.mask_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: frame_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: layer_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let bind_group = crate::gpu::layer_bind_group(
+            gpu,
+            &format!("probe bg [{}]", spec.label),
+            frame_buf,
+            &layer_buffer,
+            None,
+        );
         ProbeItem {
             key: spec.key,
             label: spec.label,

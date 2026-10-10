@@ -598,10 +598,11 @@ impl Core {
                     pack,
                     registry,
                     scene,
+                    scene_path,
                     ..
                 } = self;
                 gpu.as_mut()
-                    .and_then(|g| match PassPlan::build(g, pack, scene, registry) {
+                    .and_then(|g| match PassPlan::build(g, pack, scene, registry, scene_dir(scene_path)) {
                         Ok(p) => Some(p),
                         Err(e) => {
                             log::error!("design leg initial build failed: {e:#}");
@@ -674,16 +675,23 @@ impl Core {
             return Ok(());
         };
         let started = Instant::now();
-        match PassPlan::build(gpu, &self.pack, &self.scene, &self.registry) {
+        match PassPlan::build(
+            gpu,
+            &self.pack,
+            &self.scene,
+            &self.registry,
+            scene_dir(&self.scene_path),
+        ) {
             Ok(plan) => {
                 log::info!("scene plan built ({} layer passes)", plan.layer_passes.len());
+                let warnings = plan_warnings(&plan);
                 self.plan = Some(plan);
                 self.gc_pipelines();
                 self.emit_hot(
                     "scene",
                     true,
                     started.elapsed().as_secs_f32() * 1000.0,
-                    None,
+                    warnings,
                     None,
                     Actor::System,
                 );
@@ -1013,7 +1021,7 @@ impl Core {
                 .iter()
                 .filter_map(|i| match i {
                     InputSlot::Scalar { meta, .. } => Some(meta.max),
-                    InputSlot::Color { .. } => None,
+                    _ => None,
                 })
                 .collect();
             let scalar_names: Vec<&str> = def
@@ -1021,7 +1029,7 @@ impl Core {
                 .iter()
                 .filter_map(|i| match i {
                     InputSlot::Scalar { name, .. } => Some(name.as_str()),
-                    InputSlot::Color { .. } => None,
+                    _ => None,
                 })
                 .collect();
             let scalars: Vec<f32> = resolved
@@ -1170,10 +1178,11 @@ impl Core {
                 gpu,
                 pack,
                 registry,
+                scene_path,
                 ..
             } = self;
             let gpu = gpu.as_mut().expect("apply_design_scene checked gpu");
-            PassPlan::build(gpu, pack, &scene, registry)
+            PassPlan::build(gpu, pack, &scene, registry, scene_dir(scene_path))
         };
         match build {
             Ok(plan) => {
@@ -1181,6 +1190,10 @@ impl Core {
                     "design plan built ({} layer passes)",
                     plan.layer_passes.len()
                 );
+                let warnings = plan.warnings.clone();
+                for w in &warnings {
+                    log::warn!("{w}");
+                }
                 let binding_count = scene.bindings.len();
                 let design = self.design.as_mut().expect("two-leg checked");
                 design.scene = scene;
@@ -1224,18 +1237,24 @@ impl Core {
                     target_label,
                     true,
                     started.elapsed().as_secs_f32() * 1000.0,
-                    None,
+                    (!warnings.is_empty()).then(|| warnings.join("; ")),
                     probe_report,
                     actor,
                 );
                 if let Some(r) = reply {
-                    let _ = r.send(Ok(serde_json::json!({
+                    let mut body = serde_json::json!({
                         "ok": true,
                         "leg": "design",
                         "probe": probe_json,
                         "epoch": self.changes.epoch(),
                         "rev": rev,
-                    })));
+                    });
+                    // C5 — a clip that failed to open doesn't fail the apply
+                    // (that binding draws nothing); the caller still hears.
+                    if !warnings.is_empty() {
+                        body["warnings"] = serde_json::json!(warnings);
+                    }
+                    let _ = r.send(Ok(body));
                 }
             }
             Err(e) => {
@@ -1476,10 +1495,12 @@ impl Core {
                 gpu,
                 pack,
                 registry,
+                scene_path,
                 ..
             } = self;
             let gpu = gpu.as_mut().ok_or_else(|| "engine not ready".to_string())?;
-            PassPlan::build(gpu, pack, &live_scene, registry).map_err(|e| format!("{e:#}"))?
+            PassPlan::build(gpu, pack, &live_scene, registry, scene_dir(scene_path))
+                .map_err(|e| format!("{e:#}"))?
         };
         let design = self
             .design
@@ -1654,11 +1675,12 @@ impl Core {
                 pack,
                 registry,
                 design,
+                scene_path,
                 ..
             } = self;
             let design = design.as_mut().expect("checked above");
             gpu.as_mut().and_then(
-                |g| match PassPlan::build(g, pack, &design.scene, registry) {
+                |g| match PassPlan::build(g, pack, &design.scene, registry, scene_dir(scene_path)) {
                     Ok(p) => Some(p),
                     Err(e) => {
                         log::error!("design rebuild after promote failed: {e:#}");
@@ -2440,6 +2462,20 @@ fn load_alignment(path: &std::path::Path, legacy: Option<[[f32; 3]; 3]>) -> Alig
     }
 
     AlignmentState::identity()
+}
+
+/// The directory C5 clip paths resolve against (the scene file's own).
+fn scene_dir(scene_path: &std::path::Path) -> &std::path::Path {
+    scene_path.parent().unwrap_or(std::path::Path::new("."))
+}
+
+/// A plan's non-fatal build warnings as one `hot_reload` message (logged
+/// too, so a headless run shows them).
+fn plan_warnings(plan: &PassPlan) -> Option<String> {
+    for w in &plan.warnings {
+        log::warn!("{w}");
+    }
+    (!plan.warnings.is_empty()).then(|| plan.warnings.join("; "))
 }
 
 /// §5.6 design-leg autosave location: `<scene_dir>/.wzrd/design.scene.json`.

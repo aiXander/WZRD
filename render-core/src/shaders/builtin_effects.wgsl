@@ -58,12 +58,21 @@ fn effect_wobble(uv: vec2<f32>, mask: f32) -> vec4<f32> {
     return vec4<f32>(c.rgb * a, a);
 }
 
+// Clip player (gig plan C5): the binding's `image` input — a HAP clip or a
+// still — cut by the mask. gain (f_param(0)) scales the light; above 1 it
+// overdrives into the float composite like any additive layer.
+fn effect_video_clip(uv: vec2<f32>, mask: f32) -> vec4<f32> {
+    let gain = max(f_param(0u), 0.0);
+    return sample_image(uv) * (mask * gain);
+}
+
 fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32> {
     switch (layer.effect_id) {
         case 0u: { return effect_tint(uv, mask); }
         case 1u: { return effect_hue_cycle(uv, mask); }
         case 2u: { return effect_flash(uv, mask); }
         case 3u: { return effect_wobble(uv, mask); }
+        case 4u: { return effect_video_clip(uv, mask); }
         default: {
             // Magenta = "unknown effect_id". Premultiplied so additive
             // blending stays sane even on the failure path.

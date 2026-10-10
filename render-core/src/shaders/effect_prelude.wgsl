@@ -48,12 +48,23 @@ struct LayerParams {
     params_f: array<vec4<f32>, 2>,
     // 4 colour slots.
     params_c: array<vec4<f32>, 4>,
+    // Gig plan C5 image placement: the uv rect the image is stretched into
+    // (min_x, min_y, max_x, max_y) — the layer's source box under
+    // "region", the whole canvas under "canvas".
+    image_box: vec4<f32>,
+    // (bound 0|1, encoding 0 = sRGB-decoded RGBA (straight alpha) | 1 =
+    // scaled YCoCg (HAP Q), _, _).
+    image_meta: vec4<f32>,
 };
 
 @group(0) @binding(0) var mask_atlas: texture_2d_array<f32>;
 @group(0) @binding(1) var mask_sampler: sampler;
 @group(0) @binding(2) var<uniform> state: FrameState;
 @group(0) @binding(3) var<uniform> layer: LayerParams;
+// The binding's `image` input (a HAP clip frame or a still). Passes without
+// one bind a 1×1 transparent texture, so `sample_image` is always legal.
+@group(0) @binding(4) var image_tex: texture_2d<f32>;
+@group(0) @binding(5) var image_sampler: sampler;
 
 // Helper accessors so effect code reads `f_param(0u)` instead of unpacking
 // vec4 lanes by hand.
@@ -89,4 +100,30 @@ fn layer_bbox() -> vec4<f32> { return layer.bbox_uv; }
 // pixel falls inside the semantic region.
 fn sample_mask(uv: vec2<f32>) -> f32 {
     return textureSample(mask_atlas, mask_sampler, uv, i32(layer.slice)).r;
+}
+
+// Sample the binding's `image` input at canvas uv. Returns premultiplied
+// RGBA, transparent outside the image's placement box (and everywhere when
+// no image is bound). Uses an explicit LOD so it is legal in non-uniform
+// control flow — call it from any branch, at any displaced uv.
+fn sample_image(uv: vec2<f32>) -> vec4<f32> {
+    let b = layer.image_box;
+    let local = (uv - b.xy) / max(b.zw - b.xy, vec2<f32>(1e-6));
+    let inside = all(local >= vec2<f32>(0.0)) && all(local <= vec2<f32>(1.0));
+    if (layer.image_meta.x < 0.5 || !inside) {
+        return vec4<f32>(0.0);
+    }
+    let t = textureSampleLevel(image_tex, image_sampler, local, 0.0);
+    if (layer.image_meta.y > 0.5) {
+        // Scaled YCoCg in DXT5 (HAP Q): rgba = (Co, Cg, scale, Y), values
+        // sRGB-encoded — convert, then decode to linear light.
+        let scale = t.z * (255.0 / 8.0) + 1.0;
+        let co = (t.x - 0.5 * 256.0 / 255.0) / scale;
+        let cg = (t.y - 0.5 * 256.0 / 255.0) / scale;
+        let enc = clamp(vec3<f32>(t.w + co - cg, t.w + cg, t.w - co - cg), vec3<f32>(0.0), vec3<f32>(1.0));
+        let lo = enc / 12.92;
+        let hi = pow((enc + 0.055) / 1.055, vec3<f32>(2.4));
+        return vec4<f32>(select(hi, lo, enc <= vec3<f32>(0.04045)), 1.0);
+    }
+    return vec4<f32>(t.rgb * t.a, t.a);
 }
