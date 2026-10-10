@@ -1,6 +1,6 @@
 """FAL model shootout, Part A (image): Nano Banana Pro vs Nano Banana 2.1.
 
-Plan: docs/TODO/fal-model-shootout.md. Runs the same WZRD-shaped edit tasks
+Results: docs/reference/hosted-models.md. Runs the same WZRD-shaped edit tasks
 through both endpoints (same prompt, reference order, seed, 1K), downloads
 into projects/fal-shootout/<task>/<model>/, logs every call to results.json
 and writes a blind contact sheet (index.html) next to them.

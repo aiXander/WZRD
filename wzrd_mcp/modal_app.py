@@ -4,7 +4,7 @@ PARKED — the server is local-first now. Tools write into a project folder on
 the host machine (`project.py`), which in a Modal container is ephemeral
 scratch that nothing can read afterwards. Deploying this again means giving the
 cloud path its own durable output sink (a Modal Volume, or reviving
-`file_io.upload` against a self-owned bucket). See docs/TODO/eden-decoupling.md.
+`file_io.upload` against a self-owned bucket). See docs/TODO/backlog.md.
 
 Deploy with:
     modal deploy wzrd_mcp/modal_app.py

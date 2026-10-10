@@ -4,8 +4,8 @@
 > deployment (`wzrd-textureflow`, env `wzrd`), boots fast, and stays
 > reproducible. Phases 1–3 are **done**; only the optional Phase 4 is open.
 > Current state, contract, traps and numbers: [reference/textureflow.md](../reference/textureflow.md).
-> Teardown of the old Eden / `aixander/main` apps lives in
-> [eden-decoupling.md](eden-decoupling.md) (needs Xander's OK).
+> The old Eden / `aixander/main` leftovers are listed there too (hands off
+> without Xander's OK).
 
 ## Phase 4 — Modernize (later, optional, open)
 

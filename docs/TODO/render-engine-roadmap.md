@@ -14,12 +14,14 @@
 > 2026-07-22**; **§5.14 alignment layer LANDED 2026-08-12** — contracts in
 > [../reference/render-engine.md](../reference/render-engine.md)
 > §1/§1b/§2.2/§2.6/§2.7/§2.8.
-> **Next up, in order: §5.11's post-swap probation window** (elevated — MCP
-> authoring multiplies shader churn and yellow-verdict shaders can still be
-> promoted), the §5.5 **`#import` preprocessor** (same reason — an
-> authoring agent re-implements helpers in every effect), then the §5.6
-> auto-pilot playlist follow-up (thin scheduler over existing verbs) or
-> §5.7 (layer object).
+> **This file holds engine designs; it does not schedule them.** Order and
+> hand-off packages live in two plans: **gig (Nov 2026)** —
+> [gig-2026-11-live-video.md](gig-2026-11-live-video.md): §5.9 video, then
+> §5.11's probation window, plus the §5.11 "restart engine" button with the
+> project switcher; **post-gig** — [vj-toolbox.md](vj-toolbox.md): §5.5
+> `#import` → §5.15 chains → §5.16 feedback + `post` → §5.17 TAKE
+> transitions → the §5.6 auto-pilot playlist. §5.7 (layer object), §5.8 and
+> the rest of §5.11 / §5.12 are unscheduled.
 
 ### 5.1 Live transport: music-locked BPM — DROPPED (2026-07-11)
 
@@ -155,24 +157,39 @@ deck reads in surface-language").
   `frame_stats`; adaptive frame cap (drop to 30 Hz when no audio + no
   clock-driven bindings are active).
 
-### 5.9 Video layers (v1 Phase 5, unchanged in spirit)
+### 5.9 Video layers — scope decided 2026-10-10, built as gig package E1
 
-Two paths: **HAP/HAP-Q** for many concurrent 1080p layers (disk-bandwidth-
-bound; FFI to hap-cpp or a small Rust port — the fallback if FFI hurts is a
-compute-shader DXT decoder), and **H.264/HEVC hardware decode** (VideoToolbox
-/ NVDEC / VAAPI via `ffmpeg-next` + wgpu interop) for single-stream content.
-ProRes out of scope; software decode "won't hit 60 Hz for >1 stream."
+**Scope (gig plan D1–D6):** **HAP only** — plain HAP (BC1) required, HAP Q
+if cheap, no alpha variant; no H.264/HEVC path and **no compute-shader DXT
+fallback**. Request `TEXTURE_COMPRESSION_BC` only when the adapter offers it;
+without it `videoClip` refuses with a clear error and the rest of the engine
+runs (the one documented exception to `Features::empty()`, recorded in
+reference §1b when it lands). Video is an effect **`image` input** read via
+`sample_image(uv)`, so any WGSL effect can modulate it; two per-binding
+placements, **canvas** (full-frame clip cut by the mask) and **region** (clip
+scaled into the layer's padded `source_box`, `bbox` fallback). MP4 → HAP
+transcode is MCP-side, never in the engine. The scene/pack shapes (clip
+binding, stateless playhead, `source_box`) are pinned as contracts **C4/C5**
+in [gig-2026-11-live-video.md](gig-2026-11-live-video.md); build steps and
+gates are its package **E1**.
 
-The load-bearing invariant (v1 §3.8 has the full design — it remains correct):
-each stream owns a **ring of N mapped `wgpu::Buffer` staging slots**
-(N≈3, allocated at stream-open, recycled). A **decode thread** does all FFI +
-disk I/O and pushes "slot ready" over a lock-free channel; the render thread's
+**The load-bearing invariant** (v1 §3.8, still correct): each stream owns a
+**ring of N mapped `wgpu::Buffer` staging slots** (N≈3, allocated at
+stream-open, recycled). A **decode thread** does all demux, snappy and disk
+I/O and pushes "slot ready" over a lock-free channel; the render thread's
 only contact with video is one `copy_buffer_to_texture` from the freshest
 ready slot. If decode falls behind, reuse the last good slot — a stutter,
-never a frame-stall. Entry point: a `videoClip` effect whose descriptor
-declares an `image` input bound to a `VideoSource`. Watch the HMR/cleanup
-failure mode (reference §4 safety/scaling risks): staging slots from a
-closed stream must drop.
+never a frame-stall. Watch the HMR/cleanup failure mode (reference §4
+safety/scaling risks): staging slots from a closed stream must drop.
+
+**Design-pass choices left to E1:** the demuxer (prefer a pure-Rust MOV
+reader + the `snap` crate over linking ffmpeg, for the Linux build); how a
+stream is shared when design and live bind the same clip; the bind-group
+slot for the image texture.
+
+**Later, not scheduled:** H.264/HEVC hardware decode (VideoToolbox / NVDEC /
+VAAPI) for single-stream content; stills and pack `references/` through the
+same `image` input. ProRes out of scope.
 
 ### 5.10 Authoring MCP — the AI scene/shader co-author — LANDED (2026-07-22)
 
@@ -213,16 +230,20 @@ single-process relaunch-with-restore meets it. Defense in depth, in order:
   files stayed byte-identical through both crash modes, and measured
   relaunch-to-light was ~160–290 ms — the ≤20 s contract has huge margin.
   Still open here: an in-app "restart engine" button (today: quit +
-  relaunch), and the post-crash wart that SIGTERM is a no-op (reference
-  §1b) — both fold into this hardening pass.
+  relaunch) — **gig package A1**, built with the project switcher, which
+  re-roots the engine with the same respawn
+  ([gig-2026-11-live-video.md](gig-2026-11-live-video.md) D13) — and the
+  post-crash wart that SIGTERM is a no-op (reference §1b), which stays in
+  this hardening pass.
 - Engine startup is already last-good-tolerant (bad scene → previous plan);
   extend to "scene fails at boot → black composite + hot-reload watch"
   instead of exit.
 - Headless autostart recipe (launchd/systemd) documented for installations.
 - ~~Slider/master state snapshot on SIGTERM~~ — **done** (landed with §5.3,
   2026-07-11: `signal-hook` flag → sidecar snapshot → graceful exit).
-- **Post-swap probation window — elevated 2026-07-22: schedule immediately
-  after §5.10.** The MCP multiplies AI shader churn by an order of
+- **Post-swap probation window — pulled into the gig as package E2**
+  ([gig-2026-11-live-video.md](gig-2026-11-live-video.md) D15, which adds the
+  TAKE-crossfade false-positive trap). The MCP multiplies AI shader churn by an order of
   magnitude, and yellow-verdict shaders can still be promoted to live —
   the probe gates *entry to design*, the probation window is the only
   live-side net. `naga` proves a shader *compiles*; a
@@ -255,8 +276,11 @@ Layer deck panel in Perform — **landed 2026-10-09** with the UI redesign
 (see [../reference/operator-ui.md](../reference/operator-ui.md)), as did a
 looks bank (saved scenes) standing in for "scene save-as + chooser".
 Still open: MIDI controller mapping (WKWebView has no Web MIDI — needs a
-Rust-side bridge); virtualized log list; region renaming +
-`identity.json` editing in Prepare (→ §5.13); AI co-author chat panel (with §5.10).
+Rust-side bridge; full spec in [midi-controller.md](midi-controller.md));
+virtualized log list; region renaming + `identity.json` editing (→ §5.13,
+delivered inside the Site room, vj-toolbox phase 5). In-app AI chat is
+parked — §5.10 settled Claude Code as the author; revisit on top of
+[vj-toolbox.md](vj-toolbox.md) phase 4's MCP client.
 
 ### 5.13 Identity sidecar: group authoring + region renaming — ENGINE SLICE LANDED (2026-07-22)
 
@@ -271,7 +295,8 @@ via the §5.10 `set_groups`/`set_labels` MCP tools.
 accumulates a selection; pixel-accurate picking already exists) → "New group
 from selection" → commits via `identity.setGroups`; region renaming in
 Prepare writes `labels` the same way. Distinct from `sceneCommit.ts` — this
-writes the sidecar, not the scene.
+writes the sidecar, not the scene. Built as the "name + group" step of the
+Site room ([vj-toolbox.md](vj-toolbox.md) phase 5), reusable from Prepare.
 
 Non-goals: no group nesting, no per-group colour/metadata beyond membership,
 no offline `wzrd.layerpack` group-reconciliation (that rides the broader
@@ -300,3 +325,92 @@ skeleton in `render-core/tools/align_drag.py`); a warped native preview
 toggle if the unwarped one proves confusing on the Align tab;
 multi-projector / edge blending. The default handle radius (0.35) wants one
 real projector session to tune — see the corner-drift caveat in §2.8.
+
+### 5.15 Per-binding effect chains (added 2026-10-10)
+
+Today one binding = one effect over its regions; stacking two bindings on a
+region only *adds* light, it can't *process* (no "clip → kaleido → strobe").
+Add a short **linear chain per binding** — the "flat per-layer stacks" the
+v1 D5 decision always allowed (reference §7 rejects a DAG, not this).
+
+- **Scene shape:** `"effect"` may become an array of stages, each
+  `{ "effect": <name|inline>, "params": {…}, "id": <stable stage id> }`;
+  the single-effect form stays valid (a one-stage chain). Stage 0 is a
+  *source* (a generator or `videoClip`), later stages are *filters*.
+- **Filter contract:** filters implement the same `fn effect(uv, mask)` but
+  get a prelude accessor `sample_prev(uv)` — the previous stage's output.
+  Descriptors gain `"kind": "source" | "filter" | "transition"` (§5.17
+  uses the third) so UI, MCP and library can tell them apart; a filter at
+  stage 0 is a load error.
+- **Gig clip effects migrate here:** gig package F1's ten clip effects read
+  the clip themselves via `sample_image` (one effect per binding). With
+  chains they become `kind: "filter"` stages — swap `sample_image` →
+  `sample_prev` and move the clip to a `videoClip` stage 0. Old one-effect
+  clip bindings stay valid (a source that reads an image).
+- **Execution — decide in the design pass, leaning (a):** (a) each stage
+  renders into a pooled per-leg intermediate texture (region `source_box`-
+  sized when the binding is region-placed, canvas-sized otherwise), the
+  last stage composites additively with the mask as today — predictable
+  cost, each stage keeps its own uniform block and its own probe; (b)
+  compile-time fusion (stages renamed `stage_k`, `sample_prev` rewritten to a
+  call of `stage_{k-1}` at a displaced uv) — no textures, but cost multiplies
+  with every tap a filter takes. (a) is also the FBO machinery the unbuilt
+  `layerRef` slow path (reference §4 item 6) needs; build it once.
+- **Live knobs per stage:** overrides key on `(binding id, stage id,
+  param)`; a reserved per-stage `@bypass` override (like `@mute`, reference
+  §2.5) toggles a stage with zero rebuild. Content-hashed pipeline keys,
+  probe and the cross-leg GC (reference §2.6) apply per stage unchanged.
+- **MCP:** `upsert_binding` accepts the chain form; `get_scene_context`
+  digests it. Skill `live-engine` teaches source vs filter.
+
+Gate: a region-placed clip → kaleido → strobe chain on 7 regions at 60 fps
+on the M2; bypassing a stage mid-show is glitch-free; headless loads the
+same scene.
+
+### 5.16 Feedback texture + the global `post` chain (added 2026-10-10)
+
+Two primitives most classic VJ effects need. Both build on §5.15's filter
+contract.
+
+- **Feedback:** a chain may opt in (`"feedback": true` on the binding) to a
+  per-binding, **per-leg** previous-frame texture, read via
+  `sample_feedback(uv)` in any stage. Enables trails, echo, smear, slit-scan.
+  One extra texture per opted-in binding; cleared on plan rebuild of that
+  binding. Trap to settle: on promote, live's feedback continues from its own
+  history (not design's) — note it in reference §2.6 when it lands.
+- **`post` chain:** `scene.json`'s `post: []` is parsed but never consumed
+  (reference §4 item 6). Consume it as a chain of filters over each leg's
+  composite, run before the final pass (live×design mix → masters → warp),
+  so masters still sit on top and stay operator-owned. **Dark stays dark:**
+  post output is multiplied by the union of all region masks unless an
+  effect's descriptor opts out (`"spill": true`) — a blur or glow must not
+  light the wall between regions by default. Per leg like everything else;
+  TAKE copies design's post chain live.
+- The probe covers post stages exactly like binding stages.
+
+Gate: trails on one fabric region + a global glow post, dark gaps between
+regions measured black (`check_frames` lit-fraction unchanged within 0.1 %).
+
+### 5.17 TAKE transitions (added 2026-10-10)
+
+The only transition today is the promote crossfade: the final pass lerps
+live × design by the promote mix (reference §2.6). Generalise the lerp into
+a **transition shader**: `fn transition(uv, mix) -> vec4` with
+`sample_live(uv)` / `sample_design(uv)` accessors, chosen per TAKE.
+
+- **Region-aware by default** — the point of doing this in WZRD rather than
+  as a generic wipe: the transition can read the mask atlas + per-layer
+  geometry (centroid, bbox, seed) so "each region reveals from its centroid"
+  or "regions flip one by one in seed order" are expressible. Only pixels
+  whose design and live values differ need to animate; unchanged regions
+  stay put.
+- Ships with: dissolve (today's lerp, the default), luma wipe, region
+  cascade, centroid reveal. Transitions are `kind: "transition"` effect files
+  — library items, AI-writable, probe-gated like any effect.
+- **Operator control:** the transition is an engine-wide master next to the
+  §5.4 FADE master (never per leg, never copied on promote/pull), with an
+  optional per-`promote` override so a look in the looks bank can carry its
+  own transition. `promote {transition?}` param; `deck` channel reports it.
+
+Gate: CUT, dissolve and region cascade all bar-quantized at 60 fps; a broken
+transition shader falls back to dissolve, never a black wall.

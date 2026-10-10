@@ -97,8 +97,7 @@ wired up. Search grounding (`enable_web_search`) works with image output.
 `fal_tools.py` plumbing: `_fal_subscribe` (retry/backoff + keepalive),
 `_to_fal_url` (uploads local inputs to FAL's CDN just in time — FAL's workers
 can't read this disk), `_run_fal_tool` (downloads results into the project's
-`generated/`). The video shootout (Kling v2.5 vs MiniMax H3 Max) is still a
-plan: `docs/TODO/fal-model-shootout.md`.
+`generated/`).
 
 ## Re-running the comparisons
 

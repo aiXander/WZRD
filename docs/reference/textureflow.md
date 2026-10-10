@@ -36,6 +36,13 @@ by hand and keep them in sync. No secrets.
 client lookup `environment_name="wzrd"`; without it the lookup silently lands in
 the wrong environment and fails.
 
+**Leftovers outside `aixander/wzrd` — hands off without Xander's OK.** Nothing
+in WZRD calls them. In `edenartlab/main`: `comfyui-wzrd-STAGE` (Eden's old
+TextureFlow endpoint) and a stale `wzrd-mcp` app, kept on purpose (2026-10-09);
+never touch Eden's `comfy-downloads` volume. In `aixander/main`: the dead
+`comfy-textureflow` app's `comfy-models-cache` volume; `stitchly-comfyui` is
+unrelated.
+
 ## The `render` contract
 
 `TextureFlow.render(args: dict, files: dict[str, bytes] | None) -> dict`
@@ -68,6 +75,8 @@ the wrong environment and fails.
 
 ## Load-bearing decisions and traps
 
+- **Keep all three base checkpoints** in the volume (Xander, 2026-10-09) —
+  don't prune one to save space or boot time.
 - **Reproduce, don't modernize.** ComfyUI `a7a6335b` + node packs at the hashes
   in `workflow/snapshot.json`, `git clone` + `checkout` (comfy-cli can't pin
   core hashes). Torch stack pinned exactly in `constraints.txt`
