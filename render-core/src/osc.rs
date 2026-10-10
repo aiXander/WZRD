@@ -10,10 +10,12 @@
 //! down. Restart in either direction is invisible to the rest of the
 //! engine — the only side-effect is a single watchdog log line per
 //! fresh ↔ stale transition (see `audio_refactor_plan.md` §3.1).
+//! Dropping the `OscListener` stops the thread and releases the port, so an
+//! embedding host can tear one engine down and boot another in-process.
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -148,8 +150,19 @@ impl AudioBand {
 /// itself runs the OS event loop on UDP recv and never exits during normal
 /// operation — we rely on process exit to clean it up.
 pub struct OscListener {
-    #[allow(dead_code)]
-    join: JoinHandle<()>,
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl Drop for OscListener {
+    /// Stop + join (≤ one 250 ms read tick) so the UDP port is free when
+    /// this returns — a re-rooted in-process engine binds it again.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 /// Bind the UDP socket + spawn the recv thread. Failure is informational:
@@ -174,18 +187,23 @@ fn spawn(state: Arc<AudioFeatures>, addr: SocketAddr) -> Result<OscListener> {
         .set_read_timeout(Some(Duration::from_millis(250)))
         .context("setting socket read timeout")?;
 
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_c = Arc::clone(&stop);
     let join = thread::Builder::new()
         .name("osc-recv".into())
-        .spawn(move || recv_loop(state, socket))
+        .spawn(move || recv_loop(state, socket, stop_c))
         .context("spawning osc-recv thread")?;
 
-    Ok(OscListener { join })
+    Ok(OscListener {
+        stop,
+        join: Some(join),
+    })
 }
 
-fn recv_loop(state: Arc<AudioFeatures>, socket: UdpSocket) {
+fn recv_loop(state: Arc<AudioFeatures>, socket: UdpSocket, stop: Arc<AtomicBool>) {
     let mut buf = [0u8; 8192]; // rosc decode_udp expects a contiguous packet
     let mut was_fresh = false;
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         match socket.recv_from(&mut buf) {
             Ok((n, _peer)) => match rosc::decoder::decode_udp(&buf[..n]) {
                 Ok((_, rosc::OscPacket::Message(msg))) => dispatch(&state, &msg),

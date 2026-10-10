@@ -28,15 +28,21 @@ use tungstenite::{accept, Message};
 use crate::rpc::{self, EngineCommand, JsonRpcRequest, RpcContext, RpcError};
 use crate::telemetry::TelemetryFrame;
 
-/// Stops the listen + accept loop when dropped.
+/// Stops the listen + accept loop when dropped, and closes every open
+/// connection: the port is free when drop returns (≤ one 50 ms accept tick)
+/// and clients see a disconnect instead of talking to a dead engine — so an
+/// embedding host can tear one engine down and boot another in-process.
 pub struct ServerHandle {
     shutdown: Arc<AtomicBool>,
-    _join: thread::JoinHandle<()>,
+    join: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -65,7 +71,7 @@ pub fn serve(
 
     Ok(ServerHandle {
         shutdown,
-        _join: join,
+        join: Some(join),
     })
 }
 
@@ -94,9 +100,10 @@ fn accept_loop(
                 };
                 let cmd_tx = cmd_tx.clone();
                 let ctx = ctx.clone();
+                let shutdown = Arc::clone(&shutdown);
                 thread::Builder::new()
                     .name(format!("ws-conn-{peer}"))
-                    .spawn(move || conn_loop(ws, cmd_tx, ctx))
+                    .spawn(move || conn_loop(ws, cmd_tx, ctx, shutdown))
                     .ok();
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -115,6 +122,7 @@ fn conn_loop(
     mut ws: tungstenite::WebSocket<std::net::TcpStream>,
     cmd_tx: Sender<EngineCommand>,
     ctx: RpcContext,
+    shutdown: Arc<AtomicBool>,
 ) {
     // Subscription identity for this connection — starts unsubscribed.
     let mut subscription: Option<(u64, crossbeam_channel::Receiver<TelemetryFrame>)> = None;
@@ -127,6 +135,11 @@ fn conn_loop(
     }
 
     loop {
+        if shutdown.load(Ordering::Relaxed) {
+            let _ = ws.close(None);
+            let _ = ws.flush();
+            break;
+        }
         // Drain inbound requests.
         match ws.read() {
             Ok(Message::Text(text)) => {
