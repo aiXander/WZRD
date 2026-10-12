@@ -17,7 +17,13 @@ way on 2026-10-12 (M2, on battery, 5 agents building in parallel).
   A source tree exported into an old `target/` keeps the old binary
   (timestamps) — `touch` the sources or check the build actually ran.
 - Run the full gate and `--update-baseline --reason` only when the machine is
-  quiet (`uptime` load < ~3, on the charger), once, after all merges.
+  quiet (`uptime` load < ~3), once, after all merges.
+- A p95 FAIL that survives a quiet machine: A/B the *before* binary on that
+  scenario first. The baseline stores the best of 3 runs, so it can be an
+  outlier (layers-heavy's 1.61 was; the original binary read 2.35). A pass
+  whose p50 drops but p95 rises after a whole-pass speedup is usually the
+  GPU downclocking on less total work: isolate the one change (build with
+  only it reverted) before blaming it (warp_bake 2026-10-12: −10 % on both).
 
 ## Bench report fields worth reading
 
