@@ -45,7 +45,10 @@ export function SurfaceMap({
   armed?: boolean;
 }) {
   const pack = useStore((s) => s.pack);
-  const preview = useStore((s) => s.preview);
+  const native = nativeUnderlay();
+  // Underlay: the engine draws the light beneath — ignore JPEG frames
+  // another consumer may be pulling.
+  const preview = useStore((s) => (native ? null : s.preview));
   const selectedBinding = useStore((s) => s.selectedBindingId);
   const hoveredBinding = useStore((s) => s.hoveredBindingId);
   const selectedRegion = useStore((s) => s.selectedLayerId);
@@ -56,7 +59,6 @@ export function SurfaceMap({
   const [backdrop, setBackdrop] = useState<Backdrop>('both');
   const [overlays, setOverlays] = useState(true);
   const [img, setImg] = useState<HTMLImageElement | null>(null);
-  const native = nativeUnderlay();
   usePreviewJpegDemand(!native && backdrop !== 'photo');
 
   // Decode JPEG frames off the paint path.
@@ -77,11 +79,15 @@ export function SurfaceMap({
   const box = useAspectFit(wrap, pack ? pack.width / pack.height : 4 / 3);
 
   const sel = useMemo(() => byBinding(bindings, selectedBinding, pack), [bindings, selectedBinding, pack]);
+  // Keyed on the hovered *region*, not the hover object: the tooltip moves
+  // with every mousemove, the pack-res canvas only redraws when the region
+  // under the pointer changes.
+  const hoverId = hover?.id ?? null;
   const hot = useMemo(() => {
     const s = byBinding(bindings, hoveredBinding, pack);
-    if (hover) s.add(hover.id);
+    if (hoverId) s.add(hoverId);
     return s;
-  }, [bindings, hoveredBinding, hover, pack]);
+  }, [bindings, hoveredBinding, hoverId, pack]);
 
   useEffect(() => {
     const c = canvasRef.current;

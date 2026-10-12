@@ -21,7 +21,6 @@ import { Panel } from '../ui/primitives';
 export function Perform() {
   const leg = useStore((s) => s.deck?.preview_source ?? 'design');
   const pack = useStore((s) => s.pack);
-  const fps = useStore((s) => s.fps);
   return (
     <div className="h-full min-h-0 grid grid-cols-[minmax(0,1fr)_316px] gap-2 p-2">
       <div className="min-h-0 min-w-0 grid grid-rows-[minmax(0,1fr)_112px_minmax(250px,36%)] gap-2">
@@ -46,7 +45,7 @@ export function Perform() {
             </span>
             <div className="flex-1" />
             {pack && <span className="num text-[10px] text-fg3">{pack.width}×{pack.height}</span>}
-            {fps && <span className="num text-[10px] text-fg3">{Math.round(fps.fps)} fps</span>}
+            <FpsLabel />
           </div>
           <div className="flex-1 min-h-0 p-2">
             <NativePreview />
@@ -109,4 +108,12 @@ export function Perform() {
       </div>
     </div>
   );
+}
+
+/** The monitor header's fps readout — its own component so the 2 Hz `fps`
+ *  channel re-renders this label, not the whole room. */
+function FpsLabel() {
+  const fps = useStore((s) => (s.fps ? Math.round(s.fps.fps) : null));
+  if (fps == null) return null;
+  return <span className="num text-[10px] text-fg3">{fps} fps</span>;
 }

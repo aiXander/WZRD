@@ -431,12 +431,12 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 
 | Channel | Rate | Payload |
 |---|---|---|
-| `preview` | ~15 fps | 320px JPEG of a composite, base64 — the **design** composite in two-leg mode (§2.6 blanket leg rule), live headless. **Demand-gated**: captured only while ≥1 subscriber listens. GPU-downscaled (smooth, not point-sampled), encoded off the render thread. Consumers: MCP `get_preview`, the browser build, remote operators, and in the app only Perform's small CUED·DESIGN monitor (the shell subscribes on demand via `preview_jpeg_demand`, never by default). Every in-app room view uses the native underlay (§1b). |
+| `preview` | ~15 fps | 320px JPEG of a composite, base64 — the **design** composite in two-leg mode (§2.6 blanket leg rule), live headless. **Demand-gated**: captured only while ≥1 subscriber listens. GPU-downscaled (smooth, not point-sampled), encoded off the render thread. Consumers: MCP `get_preview`, the browser build, remote operators, and in the app only Perform's small CUED·DESIGN monitor, which *samples* it (one-shot grabs ≈1 Hz + on design change, full rate only on hover — [operator-ui.md](operator-ui.md)). The shell subscribes only on webview demand (`telemetry_demand`), never by default. Every in-app room view uses the native underlay (§1b). |
 | `fps` | 2 Hz | Honest throughput (frames/wall-second) + p50 frame time. |
 | `frame_stats` | 2 Hz | p50/p95/p99 + mask-slice / pipeline / pass counts (counts follow the **design** plan in two-leg mode — §2.6). |
-| `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). Rows come from the **design** plan in two-leg mode. |
-| `audio` | 30 Hz | L/M/H bands + onset envelopes. |
-| `transport` | 30 Hz | `{live: {bpm, beats}, design: {bpm, beats}}` — musical position for the UI's beat lamps and the auto-pilot's bar boundaries. Not sticky. |
+| `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). Rows come from the **design** plan in two-leg mode. Built only while ≥1 subscriber listens. |
+| `audio` | 30 Hz | L/M/H bands + onset envelopes. Built only while ≥1 subscriber listens. |
+| `transport` | 30 Hz | `{live: {bpm, beats}, design: {bpm, beats}}` — musical position for the UI's beat lamps and the auto-pilot's bar boundaries. Not sticky; built only while ≥1 subscriber listens. |
 | `audio_freshness` | 1 Hz + edges | fresh/stale/down (sticky). |
 | `connectivity` | 1 Hz | osc / file_watcher / ws status cells (sticky). |
 | `hot_reload` | on event | target, ok, elapsed, message, **`probe`** (§2.6 — `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts[]}` when a pre-flight probe ran; sticky), plus the §2.7 correlation stamp `{epoch, rev, actor}` (for push consumers — author verdicts arrive in the RPC reply, never via sticky replay). |

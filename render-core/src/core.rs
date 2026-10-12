@@ -2477,38 +2477,48 @@ impl Core {
 
     /// Periodic telemetry the UI depends on: `drivers` (~10 Hz), `audio`
     /// (~30 Hz), `connectivity` (piggybacks on the 1 Hz audio pill).
+    /// `audio` / `transport` / `drivers` are built only while someone
+    /// subscribes (the operator UI demands them per visible control —
+    /// `wzrd-app` `telemetry_demand`); none is sticky, so a skipped emit
+    /// loses nothing a late subscriber would replay.
     fn emit_periodic_telemetry(&mut self, connectivity_heartbeat: bool) {
         if self.last_audio_emit.elapsed() >= Duration::from_millis(33) {
-            self.bus.emit_audio(AudioSnapshot {
-                band_low: self.audio_state.band(crate::osc::AudioBand::Low),
-                band_mid: self.audio_state.band(crate::osc::AudioBand::Mid),
-                band_high: self.audio_state.band(crate::osc::AudioBand::High),
-                onset_low: self
-                    .audio_state
-                    .onset_envelope(crate::osc::AudioBand::Low, 0.18),
-                onset_mid: self
-                    .audio_state
-                    .onset_envelope(crate::osc::AudioBand::Mid, 0.15),
-                onset_high: self
-                    .audio_state
-                    .onset_envelope(crate::osc::AudioBand::High, 0.10),
-            });
+            if self.bus.subscriber_count("audio") > 0 {
+                self.bus.emit_audio(AudioSnapshot {
+                    band_low: self.audio_state.band(crate::osc::AudioBand::Low),
+                    band_mid: self.audio_state.band(crate::osc::AudioBand::Mid),
+                    band_high: self.audio_state.band(crate::osc::AudioBand::High),
+                    onset_low: self
+                        .audio_state
+                        .onset_envelope(crate::osc::AudioBand::Low, 0.18),
+                    onset_mid: self
+                        .audio_state
+                        .onset_envelope(crate::osc::AudioBand::Mid, 0.15),
+                    onset_high: self
+                        .audio_state
+                        .onset_envelope(crate::osc::AudioBand::High, 0.10),
+                });
+            }
             // Musical clock for the UI's beat lamps + BPM readout, both legs
             // (their grids can drift while design speed differs).
-            self.bus.emit(
-                "transport",
-                serde_json::json!({
-                    "live": { "bpm": self.transport.bpm(), "beats": self.transport.beats() },
-                    "design": {
-                        "bpm": self.design_transport.bpm(),
-                        "beats": self.design_transport.beats(),
-                    },
-                }),
-            );
+            if self.bus.subscriber_count("transport") > 0 {
+                self.bus.emit(
+                    "transport",
+                    serde_json::json!({
+                        "live": { "bpm": self.transport.bpm(), "beats": self.transport.beats() },
+                        "design": {
+                            "bpm": self.design_transport.bpm(),
+                            "beats": self.design_transport.beats(),
+                        },
+                    }),
+                );
+            }
             self.last_audio_emit = Instant::now();
         }
 
-        if self.last_drivers_emit.elapsed() >= Duration::from_millis(100) {
+        if self.last_drivers_emit.elapsed() >= Duration::from_millis(100)
+            && self.bus.subscriber_count("drivers") > 0
+        {
             // §5.6 full-control-switch: the driver rack reads whichever leg
             // the deck toggle selects, evaluated with that leg's own
             // transport/knobs/overrides.

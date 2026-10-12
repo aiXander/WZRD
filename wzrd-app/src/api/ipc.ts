@@ -348,14 +348,6 @@ export const writeSceneFile = (contents: string) =>
 export const readMaskPng = (maskPath: string) =>
   invoke<string>('read_mask_png', { maskPath });
 /**
- * Refcounted demand for the JPEG `preview` channel (true on mount, false on
- * unmount). The app only receives `preview` frames while a consumer is
- * mounted — an always-on subscription kept the engine's JPEG readback and
- * design-leg render running in every room. Use `usePreviewJpegDemand`.
- */
-export const previewJpegDemand = (on: boolean) =>
-  invoke<void>('preview_jpeg_demand', { on });
-/**
  * What the native preview shows (engine `PreviewParams`). Omitted fields take
  * Perform's defaults: the deck-toggle leg, no warp, no photo, no dim.
  */
@@ -461,8 +453,14 @@ export type TelemetryFrame = {
   payload: any;
 };
 
+/** `engine:telemetry` carries a batch (the shell flushes at most every
+ *  ~33 ms — one webview eval per batch); `handler` sees one frame at a time,
+ *  in order. Streaming channels arrive only while demanded
+ *  (`api/telemetryDemand.ts`). */
 export function onTelemetry(handler: (frame: TelemetryFrame) => void): Promise<UnlistenFn> {
-  return listenEvent<TelemetryFrame>('engine:telemetry', handler);
+  return listenEvent<TelemetryFrame[]>('engine:telemetry', (batch) => {
+    for (const frame of batch) handler(frame);
+  });
 }
 
 export function onEngineStatus(

@@ -15,6 +15,7 @@
 
 import { useMemo, useState } from 'react';
 import { paramSet, type LegName } from '../api/ipc';
+import { useTelemetryDemand } from '../api/telemetryDemand';
 import {
   MOD_SOURCES,
   modSourceOf,
@@ -154,15 +155,20 @@ function ScalarRow({
   const raw = binding.params?.[input.name];
   const def = Number(input.default ?? 0) || 0;
   const pinned = useStore((s) => s.overrides[leg][binding.id]?.[input.name]);
-  const row = useStore((s) =>
-    s.drivers.find((d) => d.binding_id === binding.id && d.param_name === input.name)
-  );
-  const [menu, setMenu] = useState<HTMLElement | null>(null);
-  const label = prettify(input.name) + (input.unit ? ` (${input.unit})` : '');
-
   const driver = isDriver(raw) ? raw : null;
   const slider = driver?.driver === 'ui.slider' ? driver : null;
   const modded = driver && !slider;
+  // The live driver value, as a primitive: the `drivers` channel replaces
+  // its rows every frame (10 Hz), so selecting the row object re-rendered
+  // every scalar row each frame. Only driven rows ask for the channel.
+  useTelemetryDemand('drivers', !!driver);
+  const liveValue = useStore((s) =>
+    driver
+      ? s.drivers.find((d) => d.binding_id === binding.id && d.param_name === input.name)?.value
+      : undefined
+  );
+  const [menu, setMenu] = useState<HTMLElement | null>(null);
+  const label = prettify(input.name) + (input.unit ? ` (${input.unit})` : '');
   const range: [number, number] | null = modded
     ? Array.isArray(driver!.range)
       ? [driver!.range[0], driver!.range[1]]
@@ -179,7 +185,7 @@ function ScalarRow({
     control = (
       <Fader
         label={label}
-        value={row?.value ?? slider.default ?? 0}
+        value={liveValue ?? slider.default ?? 0}
         min={min}
         max={hi}
         color="rgb(var(--deck))"
@@ -195,7 +201,7 @@ function ScalarRow({
         to={range![1]}
         min={min}
         max={hi}
-        live={row?.value ?? null}
+        live={liveValue ?? null}
         disabled={!structural}
         onChange={(f, t) => setModRange(binding.id, input.name, f, t)}
         title={
@@ -223,7 +229,7 @@ function ScalarRow({
     );
   } else {
     // Pin path (perform): zero-rebuild live knob on the leg your hands are on.
-    const value = pinned ?? (modded ? row?.value ?? sceneVal : sceneVal);
+    const value = pinned ?? (modded ? liveValue ?? sceneVal : sceneVal);
     control = (
       <Fader
         label={

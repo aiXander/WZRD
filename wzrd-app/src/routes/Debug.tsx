@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { probeGetThresholds, probeSetThresholds, type PerfPayload, type PerfSpike } from '../api/ipc';
 import { useStore } from '../state/store';
+import { useTelemetryDemand } from '../api/telemetryDemand';
 
 function Panel({
   title,
@@ -41,6 +42,10 @@ function statusDot(s: string | undefined) {
 }
 
 export function DebugRoute() {
+  // The streaming channels only this room shows.
+  useTelemetryDemand('frame_stats');
+  useTelemetryDemand('drivers');
+  useTelemetryDemand('perf');
   const connectivity = useStore((s) => s.connectivity);
   const frameStats = useStore((s) => s.frameStats);
   const fps = useStore((s) => s.fps);

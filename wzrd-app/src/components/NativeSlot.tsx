@@ -42,35 +42,51 @@ export function NativeSlot({
     if (!el) return;
     const p: PreviewParams = JSON.parse(paramsKey);
     let raf = 0;
-    const push = () => {
+    // Last rect sent: the capture-phase scroll listener fires for *any*
+    // scrolling element on the page (a layer list, the log), and each push
+    // is a main-thread Tauri command — only send when the slot moved.
+    let last = '';
+    let forcePending = false;
+    const push = (force = false) => {
+      forcePending ||= force;
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
+        const force = forcePending;
+        forcePending = false;
         const r = el.getBoundingClientRect();
-        previewSetSlot({
+        const slot = {
           x: r.left,
           y: r.top,
           width: r.width,
           height: r.height,
           visible: r.width > 4 && r.height > 4,
-          params: p,
-        }).catch(() => {});
+        };
+        const key = `${slot.x},${slot.y},${slot.width},${slot.height},${slot.visible}`;
+        if (!force && key === last) return;
+        last = key;
+        previewSetSlot({ ...slot, params: p }).catch(() => {
+          last = ''; // retry on the next event
+        });
       });
     };
-    push();
-    const ro = new ResizeObserver(push);
+    const onMove = () => push();
+    // Always send on window resize (the backend maps CSS px through the
+    // window's current geometry) and focus (the `window`-mode child window
+    // detaches after minimize / display changes; every push re-attaches).
+    const onForce = () => push(true);
+    push(true);
+    const ro = new ResizeObserver(onMove);
     ro.observe(el);
-    window.addEventListener('resize', push);
-    window.addEventListener('scroll', push, true);
-    // The child window (`window` mode) detaches after minimize / display
-    // changes; the backend re-attaches on every push.
-    if (previewMode() === 'window') window.addEventListener('focus', push);
+    window.addEventListener('resize', onForce);
+    window.addEventListener('scroll', onMove, true);
+    if (previewMode() === 'window') window.addEventListener('focus', onForce);
     if (import.meta.env.DEV && previewMode() === 'underlay') checkHole(el);
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
-      window.removeEventListener('resize', push);
-      window.removeEventListener('scroll', push, true);
-      window.removeEventListener('focus', push);
+      window.removeEventListener('resize', onForce);
+      window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener('focus', onForce);
       previewSetSlot({ x: 0, y: 0, width: 0, height: 0, visible: false }).catch(() => {});
     };
   }, [native, paramsKey]);

@@ -184,32 +184,42 @@ export function Dot({ tone }: { tone: 'ok' | 'warn' | 'bad' | 'off' | 'info' }) 
   return <span className={'inline-block w-[7px] h-[7px] rounded-full ' + c} />;
 }
 
-/** Vertical level meter (0..1). */
+/** Vertical level meter (0..1). Updated at the `audio` rate (30 Hz): the
+ *  bar is a full-height layer scaled with `transform` — no layout, no
+ *  repaint, no transition (a height transition re-laid-out every frame). */
 export function Meter({ value, color, className = '' }: { value: number; color: string; className?: string }) {
-  const pct = Math.min(1, Math.max(0, value)) * 100;
+  const v = Math.min(1, Math.max(0, value));
   return (
     <div className={'relative w-2 rounded-sm bg-panel2 overflow-hidden ' + className}>
       <div
-        className="absolute left-0 right-0 bottom-0 transition-[height] duration-[60ms] ease-linear"
-        style={{ height: `${pct}%`, background: color }}
+        className="absolute inset-0 origin-bottom will-change-transform"
+        style={{ transform: `scaleY(${v})`, background: color }}
       />
     </div>
   );
 }
 
-/** Onset lamp — lights with the envelope. */
+/** Onset lamp — lights with the envelope. Ring, fill and glow are separate
+ *  layers whose *opacity* follows the envelope; the glow's blur is painted
+ *  once at full size (a per-frame box-shadow radius repainted the blur). */
 export function Lamp({ value, color, label }: { value: number; color: string; label: string }) {
   const v = Math.min(1, Math.max(0, value));
   return (
     <div className="flex flex-col items-center gap-1">
-      <div
-        className="w-5 h-5 rounded-full border border-line2"
-        style={{
-          background: v > 0.04 ? color : 'transparent',
-          opacity: 0.25 + v * 0.75,
-          boxShadow: v > 0.2 ? `0 0 ${6 + v * 14}px ${color}` : undefined,
-        }}
-      />
+      <div className="relative w-5 h-5">
+        <div
+          className="absolute inset-0 rounded-full will-change-[opacity]"
+          style={{ boxShadow: `0 0 20px ${color}`, opacity: v > 0.2 ? (v - 0.2) / 0.8 : 0 }}
+        />
+        <div
+          className="absolute inset-0 rounded-full will-change-[opacity]"
+          style={{ background: color, opacity: v > 0.04 ? 0.25 + v * 0.75 : 0 }}
+        />
+        <div
+          className="absolute inset-0 rounded-full border border-line2 will-change-[opacity]"
+          style={{ opacity: 0.25 + v * 0.75 }}
+        />
+      </div>
       <div className="text-[9px] font-semibold tracking-wider text-fg3">{label}</div>
     </div>
   );

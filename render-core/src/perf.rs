@@ -441,7 +441,9 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
-fn enabled() -> bool {
+/// Hosts guard their own probe work with this (e.g. the Tauri fan-in's
+/// `json_len` before `count_telemetry`).
+pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 

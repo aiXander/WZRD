@@ -356,7 +356,7 @@ pub fn run() {
             rpc::last_payload,
             rpc::preview_set_slot,
             rpc::preview_mode,
-            rpc::preview_jpeg_demand,
+            rpc::telemetry_demand,
             rpc::list_effects,
             rpc::read_effect,
             rpc::read_scene_file,
