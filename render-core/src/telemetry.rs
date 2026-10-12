@@ -678,6 +678,8 @@ pub struct PreviewSampler {
     last_capture: Instant,
     downscaler: Option<crate::gpu::Downscaler>,
     stream: Option<Readback>,
+    /// The last stream readback buffer, unmapped, for the next capture.
+    spare: Option<wgpu::Buffer>,
     snapshots: Vec<(Readback, SnapshotReply)>,
     worker: Option<EncodeWorker>,
 }
@@ -769,6 +771,7 @@ impl PreviewSampler {
             last_capture: Instant::now() - Duration::from_secs(1),
             downscaler: None,
             stream: None,
+            spare: None,
             snapshots: Vec::new(),
             worker: None,
         }
@@ -778,6 +781,7 @@ impl PreviewSampler {
     pub fn gpu_bytes(&self) -> u64 {
         self.downscaler.as_ref().map_or(0, |d| d.gpu_bytes())
             + self.stream.as_ref().map_or(0, |r| r.buffer.size())
+            + self.spare.as_ref().map_or(0, |b| b.size())
             + self.snapshots.iter().map(|(r, _)| r.buffer.size()).sum::<u64>()
     }
 
@@ -785,6 +789,24 @@ impl PreviewSampler {
     /// no `preview` subscriber (a snapshot, or a stream frame mid-map).
     pub fn busy(&self) -> bool {
         self.stream.is_some() || !self.snapshots.is_empty()
+    }
+
+    /// A stream capture would kick off if `maybe_capture` ran now with
+    /// `stream` set: none in flight and the ~15 Hz interval has elapsed.
+    /// `Core` asks this at frame start so a design composite that only
+    /// feeds the JPEG stream renders on capture frames alone.
+    pub fn capture_due(&self) -> bool {
+        self.stream.is_none() && self.interval_up()
+    }
+
+    /// The interval is up, judged at frame *start* with a little lead so a
+    /// capture lands on a steady frame count (4 frames at 60 Hz) instead of
+    /// slipping a frame whenever the start-of-frame check falls just short.
+    /// A steady cadence keeps a sparsely rendered design leg's clip
+    /// prefetch stride exact (no stale frames).
+    fn interval_up(&self) -> bool {
+        const LEAD: Duration = Duration::from_millis(8);
+        self.last_capture.elapsed() + LEAD >= self.interval
     }
 
     fn worker(&mut self, bus: &Bus) -> &EncodeWorker {
@@ -809,7 +831,9 @@ impl PreviewSampler {
     /// Per-frame driver. `texture` is the composite the stream samples —
     /// the design leg's in two-leg mode (§5.6 blanket leg rule: the JPEG
     /// channel is an authoring surface), the live composite headless.
-    /// `stream` = someone subscribes to `preview` right now.
+    /// `stream` = someone subscribes to `preview` right now **and**
+    /// `texture` was rendered this frame (a demand-gated composite that sat
+    /// out this frame must not be captured stale — see `capture_due`).
     pub fn maybe_capture(
         &mut self,
         gpu: &GpuContext,
@@ -820,24 +844,20 @@ impl PreviewSampler {
         // Fire any completed map callbacks. Non-blocking.
         gpu.device.poll(wgpu::Maintain::Poll);
 
-        if let Some(rb) = self.stream.as_ref() {
-            match rb.take() {
-                None => {}
-                Some(res) => {
-                    let (w, h) = (rb.width, rb.height);
-                    self.stream = None;
-                    if let Ok(pixels) = res {
-                        let job = EncodeJob {
-                            pixels,
-                            width: w,
-                            height: h,
-                            bgra: false,
-                            snapshot: None,
-                        };
-                        // Busy worker → drop the frame; the next one is 66 ms away.
-                        let _ = self.worker(bus).stream_tx.try_send(job);
-                    }
-                }
+        if let Some(res) = self.stream.as_ref().and_then(Readback::take) {
+            let rb = self.stream.take().expect("checked above");
+            if let Ok(pixels) = res {
+                let job = EncodeJob {
+                    pixels,
+                    width: rb.width,
+                    height: rb.height,
+                    bgra: false,
+                    snapshot: None,
+                };
+                // Busy worker → drop the frame; the next one is 66 ms away.
+                let _ = self.worker(bus).stream_tx.try_send(job);
+                // `take` unmapped it: the next capture copies into it.
+                self.spare = Some(rb.buffer);
             }
         }
 
@@ -865,7 +885,7 @@ impl PreviewSampler {
             }
         }
 
-        if !stream || self.stream.is_some() || self.last_capture.elapsed() < self.interval {
+        if !stream || self.stream.is_some() || !self.interval_up() {
             return;
         }
         self.last_capture = Instant::now();
@@ -883,7 +903,8 @@ impl PreviewSampler {
             .downscaler
             .get_or_insert_with(|| crate::gpu::Downscaler::new(&gpu.device));
         let thumb = downscaler.encode(&gpu.device, &mut enc, texture, w, h);
-        let (buffer, bytes_per_row) = gpu.encode_readback(&mut enc, thumb, w, h);
+        let (buffer, bytes_per_row) =
+            gpu.encode_readback_reusing(&mut enc, thumb, w, h, self.spare.take());
         gpu.queue.submit(std::iter::once(enc.finish()));
         self.stream = Some(Readback::start(buffer, bytes_per_row, w, h, false));
     }

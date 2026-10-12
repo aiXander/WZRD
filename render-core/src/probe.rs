@@ -325,8 +325,8 @@ impl ProbeSession {
         let bind_group = crate::gpu::layer_bind_group(
             gpu,
             &format!("probe bg [{}]", spec.label),
-            frame_buf,
-            &layer_buffer,
+            frame_buf.as_entire_buffer_binding(),
+            layer_buffer.as_entire_buffer_binding(),
             None,
         );
         ProbeItem {

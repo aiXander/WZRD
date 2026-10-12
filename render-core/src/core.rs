@@ -252,6 +252,11 @@ pub struct Core {
 
     fps: FpsAccumulator,
     preview: PreviewSampler,
+    /// What the final-pass / native-preview uniform buffers last received —
+    /// re-uploaded only on change (every `write_buffer` is a staging
+    /// allocation). Reset whenever those buffers are recreated.
+    last_final_uniforms: Option<FinalPassUniforms>,
+    last_preview_uniforms: Option<(PreviewInput, FinalPassUniforms, PreviewExtraUniforms)>,
     audio_was_fresh: Option<bool>,
     last_audio_pill: Instant,
 
@@ -611,6 +616,8 @@ impl Core {
             watcher: None,
             fps: FpsAccumulator::new(),
             preview: PreviewSampler::new(),
+            last_final_uniforms: None,
+            last_preview_uniforms: None,
             audio_was_fresh: None,
             last_audio_pill: Instant::now(),
             sliders,
@@ -710,6 +717,8 @@ impl Core {
         self.alignment.set_output(lut_w, lut_h);
         self.bus.emit_alignment(self.alignment.to_json());
         self.gpu = Some(gpu);
+        self.last_final_uniforms = None;
+        self.last_preview_uniforms = None;
         // The atlas now lives on the GPU; drop the CPU-side copy.
         self.pack.mask_atlas = Vec::new();
         self.pack.mask_atlas.shrink_to_fit();
@@ -1883,24 +1892,47 @@ impl Core {
 
     /// §5.6 — is anything consuming the design composite this frame? Both
     /// legs tick every frame (cheap; keeps transport/pick state coherent),
-    /// but design's render passes only run on demand: the preview toggle
-    /// sits on DESIGN, a WS `preview` subscriber exists, or a promote is
-    /// pending/ramping (both composites must be current while the final
-    /// pass lerps).
-    fn design_demand(&self) -> bool {
+    /// but design's render passes only run on demand: every frame while the
+    /// native preview shows DESIGN or a promote is pending/ramping (both
+    /// composites must be current while the final pass lerps); and on
+    /// `jpeg_wants` frames only when the JPEG `preview` stream (~15 Hz) is
+    /// the sole consumer — rendering it every frame for a thumbnail sampled
+    /// every ~66 ms was most of a design-leg GPU frame wasted.
+    fn design_demand(&self, jpeg_subscribed: bool) -> bool {
         if !self.two_leg {
             return false;
         }
-        if self.design.as_ref().and_then(|d| d.plan.as_ref()).is_none() {
+        let Some(plan) = self.design.as_ref().and_then(|d| d.plan.as_ref()) else {
             return false;
-        }
+        };
         matches!(
             self.promote,
             PromotePhase::Pending { .. } | PromotePhase::Ramping { .. }
         ) || (self.preview_visible
             && !self.preview_params.program
             && self.preview_leg() == Leg::Design)
-            || self.bus.subscriber_count("preview") > 0
+            || self.jpeg_wants(jpeg_subscribed, plan)
+    }
+
+    /// Occluded path only — is anything consuming the **live** composite?
+    /// While the projector window is buried nothing presents it, so it
+    /// renders only for the native preview (LIVE, or the program view,
+    /// which samples it through the final pass) or the single-leg JPEG
+    /// stream (headless samples live). The first visible `redraw`
+    /// re-renders it from scratch, so skipping leaves nothing stale behind.
+    fn live_demand_occluded(&self, jpeg_subscribed: bool) -> bool {
+        (self.preview_visible
+            && (self.preview_params.program || self.preview_leg() == Leg::Live))
+            || (!self.two_leg
+                && self.plan.as_ref().is_some_and(|p| self.jpeg_wants(jpeg_subscribed, p)))
+    }
+
+    /// Does the JPEG `preview` stream need `plan` (the leg it samples)
+    /// rendered this frame? Only on capture frames (subscriber, interval up,
+    /// nothing in flight) — except a plan drawing clips renders every frame
+    /// while subscribed, since its decoders need a per-frame playhead.
+    fn jpeg_wants(&self, subscribed: bool, plan: &PassPlan) -> bool {
+        subscribed && (plan.draws_clips() || self.preview.capture_due())
     }
 
     /// The leg the native preview samples when it isn't the program view:
@@ -2009,6 +2041,7 @@ impl Core {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("attach_preview_surface before init_gpu"))?;
         gpu.attach_preview(target, width, height)?;
+        self.last_preview_uniforms = None;
         // The surface photo only ever feeds the preview (Prepare's PHOTO /
         // BOTH backdrops), so it loads here, not on headless runs. Missing
         // or unreadable → the 1×1 black default, i.e. photo weight is moot.
@@ -2079,8 +2112,15 @@ impl Core {
         let Some(gpu) = self.gpu.as_ref() else { return };
         let p = self.preview_params;
         let extra = PreviewExtraUniforms::new(p.dim, p.photo_weight, p.light_weight);
+        // Upload only on change (masters, mix, params move rarely).
+        let write = !self.last_preview_uniforms.is_some_and(|(i, u, x)| {
+            i == input
+                && bytemuck::bytes_of(&u) == bytemuck::bytes_of(&uniforms)
+                && bytemuck::bytes_of(&x) == bytemuck::bytes_of(&extra)
+        });
+        self.last_preview_uniforms = Some((input, uniforms, extra));
         let ts = self.gpu_timer.as_mut().and_then(|t| t.writes(GpuPass::Preview));
-        if let Err(e) = gpu.render_preview(input, uniforms, extra, ts) {
+        if let Err(e) = gpu.render_preview(input, uniforms, extra, write, ts) {
             log::warn!("preview present failed: {e}");
         }
     }
@@ -2091,10 +2131,13 @@ impl Core {
         }
         let leg = self.preview_leg();
         let uniforms = match leg {
+            // The promote mix (0 outside a TAKE) so a LIVE monitor shows
+            // the crossfade the projector gets, not the old look until the
+            // swap. Design renders every frame while a promote ramps.
             Leg::Live => FinalPassUniforms::new(
                 self.masters.brightness(),
                 self.masters.saturation(),
-                0.0,
+                self.mix,
             ),
             Leg::Design => FinalPassUniforms::identity(),
         };
@@ -2103,9 +2146,11 @@ impl Core {
 
     /// §5.6 blanket leg rule: the JPEG `preview` channel is an authoring
     /// surface, so it samples the design composite in two-leg mode. Also
-    /// drives in-flight `preview.snapshot` readbacks.
-    fn capture_preview_jpeg(&mut self) {
-        let stream = self.bus.subscriber_count("preview") > 0;
+    /// drives in-flight `preview.snapshot` readbacks. `fresh` = the sampled
+    /// composite was rendered this frame; a stream capture only kicks off
+    /// then (demand-gated legs sit frames out).
+    fn capture_preview_jpeg(&mut self, subscribed: bool, fresh: bool) {
+        let stream = subscribed && fresh;
         if !stream && !self.preview.busy() {
             return;
         }
@@ -2233,7 +2278,7 @@ impl Core {
     /// full-control-switch: own transport/speed, own knobs, own overrides,
     /// own audioListen — shared raw audio signal). Both tick every frame;
     /// rendering the design composite is demand-gated separately.
-    fn tick_legs(&mut self) {
+    fn tick_legs(&mut self, render_live: bool, render_design: bool) {
         self.perf.before_tick(self.audio_state.packet_age_ms());
         let Self {
             perf,
@@ -2255,7 +2300,7 @@ impl Core {
         let span = perf.begin();
         if let Some(plan) = plan.as_mut() {
             let ctx = transport.frame_context(audio_state, sliders, masters.audio_listen());
-            plan.tick(gpu, &ctx, overrides);
+            plan.tick(gpu, &ctx, overrides, render_live);
         }
         let span = perf.lap(Stage::TickLive, span);
         if let Some(d) = design.as_mut() {
@@ -2265,20 +2310,30 @@ impl Core {
                     design_sliders,
                     design_masters.audio_listen(),
                 );
-                p.tick(gpu, &ctx, design_overrides);
+                p.tick(gpu, &ctx, design_overrides, render_design);
             }
         }
         perf.end(Stage::TickDesign, span);
     }
 
-    /// Hand both legs' consumed clip staging slots back to their decoders.
-    fn after_submit_legs(&mut self) {
+    /// Hand the rendered legs' consumed clip staging slots back to their
+    /// decoders, then fire completed map callbacks with **one** non-blocking
+    /// poll for the frame (an unrendered leg consumed nothing).
+    fn after_submit_legs(&mut self, live_rendered: bool, design_rendered: bool) {
         let Some(gpu) = self.gpu.as_ref() else { return };
-        if let Some(p) = self.plan.as_mut() {
-            p.after_submit(gpu);
+        let mut clips = false;
+        if live_rendered {
+            if let Some(p) = self.plan.as_mut() {
+                clips |= p.after_submit();
+            }
         }
-        if let Some(p) = self.design.as_mut().and_then(|d| d.plan.as_mut()) {
-            p.after_submit(gpu);
+        if design_rendered {
+            if let Some(p) = self.design.as_mut().and_then(|d| d.plan.as_mut()) {
+                clips |= p.after_submit();
+            }
+        }
+        if clips {
+            gpu.device.poll(wgpu::Maintain::Poll);
         }
     }
 
@@ -2300,8 +2355,11 @@ impl Core {
         if self.gpu.is_none() || self.plan.is_none() {
             return Ok(());
         }
-        self.tick_legs();
-        let design_demand = self.design_demand();
+        // Demand first: an unrendered design leg still ticks (clock, picks)
+        // but skips its uniform upload.
+        let jpeg_subscribed = self.bus.subscriber_count("preview") > 0;
+        let design_demand = self.design_demand(jpeg_subscribed);
+        self.tick_legs(true, design_demand);
 
         let gpu = self.gpu.as_ref().expect("checked above");
         let plan = self.plan.as_mut().expect("checked above");
@@ -2341,6 +2399,7 @@ impl Core {
         // 2) Design leg → design composite, only when something consumes it.
         //    An idle design leg asks its clips for nothing, so they decode
         //    nothing.
+        let mut design_rendered = false;
         if design_demand {
             if let (Some(d), Some(view)) = (self.design.as_mut(), gpu.design_view.as_ref()) {
                 if let Some(p) = d.plan.as_mut() {
@@ -2351,13 +2410,21 @@ impl Core {
                         view,
                         timer_writes(&mut self.gpu_timer, GpuPass::CompositeDesign),
                     );
+                    design_rendered = true;
                 }
             }
         }
         // 3) Final pass: live × design lerped by the promote mix → masters
         //    → alignment warp → swapchain. Brightness/saturation refresh per
         //    presented frame so a master move lands next frame.
-        gpu.write_final_pass(&self.final_pass_uniforms());
+        let final_uniforms = self.final_pass_uniforms();
+        if !self
+            .last_final_uniforms
+            .is_some_and(|u| bytemuck::bytes_of(&u) == bytemuck::bytes_of(&final_uniforms))
+        {
+            gpu.write_final_pass(&final_uniforms);
+            self.last_final_uniforms = Some(final_uniforms);
+        }
         gpu.encode_final(&mut encoder, frame.view(), timer_writes(&mut self.gpu_timer, GpuPass::Final));
         let commands = encoder.finish();
         let span = self.perf.lap(Stage::Encode, span);
@@ -2366,7 +2433,7 @@ impl Core {
         gpu.present(frame, submitted);
         let span = self.perf.lap(Stage::Present, span);
         self.perf.after_submit();
-        self.after_submit_legs();
+        self.after_submit_legs(true, design_rendered);
         if let Some(t) = self.gpu_timer.as_mut() {
             t.after_submit(&mut self.perf);
         }
@@ -2383,10 +2450,22 @@ impl Core {
         // §6.4 demand-gated capture: the JPEG readback path only runs
         // when someone actually subscribes to the `preview` channel
         // (remote WS clients; the webview's Prepare canvas underlay).
-        self.capture_preview_jpeg();
+        let fresh = self.jpeg_source_fresh(true, design_rendered);
+        self.capture_preview_jpeg(jpeg_subscribed, fresh);
         self.perf.end(Stage::PreviewJpeg, span);
         self.perf.end_frame(true, self.changes.rev());
         Ok(())
+    }
+
+    /// Did the composite the JPEG stream samples render this frame? Design
+    /// in two-leg mode (a missing design plan leaves nothing to wait for,
+    /// so its texture is captured as is), live headless.
+    fn jpeg_source_fresh(&self, live_rendered: bool, design_rendered: bool) -> bool {
+        if self.two_leg {
+            design_rendered || self.design.as_ref().and_then(|d| d.plan.as_ref()).is_none()
+        } else {
+            live_rendered
+        }
     }
 
     /// One frame with no swapchain interaction — used while occluded so the
@@ -2405,8 +2484,11 @@ impl Core {
         if self.gpu.is_none() || self.plan.is_none() {
             return;
         }
-        self.tick_legs();
-        let design_demand = self.design_demand();
+        let jpeg_subscribed = self.bus.subscriber_count("preview") > 0;
+        let design_demand = self.design_demand(jpeg_subscribed);
+        let live_demand = self.live_demand_occluded(jpeg_subscribed);
+        self.tick_legs(live_demand, design_demand);
+        let mut design_rendered = false;
         let span = self.perf.begin();
         {
             let gpu = self.gpu.as_ref().expect("checked above");
@@ -2428,13 +2510,17 @@ impl Core {
                 gpu.write_warp_uniforms(&self.alignment.bake_uniforms());
                 gpu.encode_warp_bake(&mut encoder, timer_writes(&mut self.gpu_timer, GpuPass::WarpBake));
             }
-            plan.encode_uploads(&mut encoder);
-            plan.encode_composite(
-                gpu,
-                &mut encoder,
-                &gpu.composite_view,
-                timer_writes(&mut self.gpu_timer, GpuPass::CompositeLive),
-            );
+            // Nothing presents the live composite while buried: it renders
+            // only for a preview / JPEG consumer (`live_demand_occluded`).
+            if live_demand {
+                plan.encode_uploads(&mut encoder);
+                plan.encode_composite(
+                    gpu,
+                    &mut encoder,
+                    &gpu.composite_view,
+                    timer_writes(&mut self.gpu_timer, GpuPass::CompositeLive),
+                );
+            }
             if design_demand {
                 if let (Some(d), Some(view)) = (self.design.as_mut(), gpu.design_view.as_ref()) {
                     if let Some(p) = d.plan.as_mut() {
@@ -2445,6 +2531,7 @@ impl Core {
                             view,
                             timer_writes(&mut self.gpu_timer, GpuPass::CompositeDesign),
                         );
+                        design_rendered = true;
                     }
                 }
             }
@@ -2455,7 +2542,7 @@ impl Core {
         }
         let span = self.perf.begin();
         self.perf.after_submit();
-        self.after_submit_legs();
+        self.after_submit_legs(live_demand, design_rendered);
         if let Some(t) = self.gpu_timer.as_mut() {
             t.after_submit(&mut self.perf);
         }
@@ -2470,7 +2557,8 @@ impl Core {
         let counts = self.frame_counts();
         self.fps.mark(&self.bus, counts, false);
         let span = self.perf.lap(Stage::Telemetry, span);
-        self.capture_preview_jpeg();
+        let fresh = self.jpeg_source_fresh(live_demand, design_rendered);
+        self.capture_preview_jpeg(jpeg_subscribed, fresh);
         self.perf.end(Stage::PreviewJpeg, span);
         self.perf.end_frame(false, self.changes.rev());
     }
@@ -2685,9 +2773,15 @@ impl Core {
             let bytes = self.gpu_bytes();
             self.perf.set_slow_inputs(resources, bytes);
         }
-        let last_change = self.changes.recent(1).pop().map(|e| {
-            serde_json::json!({ "epoch": e.epoch, "rev": e.rev, "actor": e.actor, "facet": e.facet })
-        });
+        // Only the 2 Hz aggregate reads it — skip the ring lock + clones on
+        // the other frames.
+        let last_change = if self.perf.emit_due() {
+            self.changes.recent(1).pop().map(|e| {
+                serde_json::json!({ "epoch": e.epoch, "rev": e.rev, "actor": e.actor, "facet": e.facet })
+            })
+        } else {
+            None
+        };
         self.perf.emit(&self.bus, last_change);
     }
 
