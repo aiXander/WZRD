@@ -211,8 +211,10 @@ Still out:
 ## Example
 
 Two scenes ship here, both targeting the layer pack built by
-`uv run python test.py layerpack` (`test_results/layerpack/pack/`). Its
-five regions are named after the test photo (a Moroccan kasbah) —
+`uv run python test.py layerpack` (`test_results/layerpack/pack/`, 1376×768:
+`test_imgs/segmap.jpeg` over the photo it was drawn from,
+`test_imgs/aligned.jpg`). Its five regions are named after that photo (a
+Moroccan kasbah wall) —
 `background`, `main_facade`, `left_tower`, `right_wing`, `base_wall`, with
 a `towers` group and `facade` / `tower` / `wall` tags — because those ids
 are what a scene selects on and what the operator reads in the inspector.
@@ -220,10 +222,12 @@ The names are authored in `test.py::test_layerpack`'s tags file; without a
 tags entry a region falls back to its islands mask stem
 (`region_mask_003_color_fefd00`), which is unusable in a binding list:
 
-- `examples/phase3_smoke.scene.json` — the full exercise: built-in effects,
-an inline WGSL effect, clock + audio drivers, and the project-local
-effects under `examples/effects/` (`bloom`, `drift`, `flow_noise`,
-`vbars`).
+- `examples/phase3_smoke.scene.json` — the showcase: one generative
+project-local effect per region (`silk` facade, `embers` tower, `contours`
+wing, `scanwave` wall; background left dark), each lightly audio-reactive.
+The same four bindings are `fixture-a`'s scene
+(`wzrd-app/scripts/fixture_projects.py`). `examples/effects/` also holds
+older demos (`bloom`, `drift`, `flow_noise`, `vbars`).
 - `examples/tint_smoke.scene.json` — minimal `tint`-only scene; the
 fastest way to confirm the pack loads and the compositor is alive.
 

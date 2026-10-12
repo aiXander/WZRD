@@ -1,0 +1,10 @@
+{
+  "inputs": [
+    { "name": "count",  "type": "float", "default": 5,   "min": 1, "max": 12 },
+    { "name": "amp",    "type": "float", "default": 0.5, "min": 0, "max": 1 },
+    { "name": "speed",  "type": "float", "default": 1,   "min": 0, "max": 4 },
+    { "name": "bright", "type": "float", "default": 1.1, "min": 0, "max": 3 },
+    { "name": "colorA", "type": "color", "default": "#7cff4f" },
+    { "name": "colorB", "type": "color", "default": "#22d3ff" }
+  ]
+}

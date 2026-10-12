@@ -1,0 +1,10 @@
+{
+  "inputs": [
+    { "name": "scale",  "type": "float", "default": 2.5, "min": 0.5, "max": 10 },
+    { "name": "lines",  "type": "float", "default": 18,  "min": 2,   "max": 40 },
+    { "name": "speed",  "type": "float", "default": 1,   "min": 0,   "max": 4 },
+    { "name": "bright", "type": "float", "default": 1.2, "min": 0,   "max": 3 },
+    { "name": "line",   "type": "color", "default": "#2ee6c8" },
+    { "name": "sweep",  "type": "color", "default": "#e8fff9" }
+  ]
+}

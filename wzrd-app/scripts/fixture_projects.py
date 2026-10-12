@@ -8,7 +8,9 @@ example pack from `python test.py layerpack`) with a few clips in
 sidecars (`<stem>.mp4.meta.json`, `<stem>.mov.meta.json`). One clip has no
 region (the "unassigned" row), one has no thumbnail (placeholder). Every
 library clip effect (`library/effects/`, gig plan C6) is copied into the
-project's `effects/` — a copy, never a link, as a real project gets them.
+project's `effects/` — a copy, never a link, as a real project gets them —
+plus the generative example effects (`render-core/examples/effects/`) the
+scenes bind one per region.
 
     uv run python wzrd-app/scripts/fixture_projects.py              # (re)build both
     uv run python wzrd-app/scripts/fixture_projects.py --add-clip fixture-a --region left_tower
@@ -33,16 +35,27 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 PACK_SRC = REPO / "test_results" / "layerpack" / "pack"
 LIBRARY_FX = REPO / "library" / "effects"
+EXAMPLE_FX = REPO / "render-core" / "examples" / "effects"
 H264 = "h264_videotoolbox" if sys.platform == "darwin" else "libx264"
 
 SCENES = {
     "fixture-a": {
         "bpm": 120,
+        # One generative shader per region (render-core/examples/effects);
+        # background stays dark — additive, unchanged areas project nothing.
         "bindings": [
-            {"id": "facade_hue", "select": {"id": "main_facade"}, "effect": "hueCycle",
-             "params": {"phase": {"driver": "clock.bars", "n": 4}}},
-            {"id": "tower_tint", "select": {"id": "left_tower"}, "effect": "tint",
-             "params": {"color": "#ff6a00"}},
+            {"id": "facade_silk", "select": {"id": "main_facade"}, "effect": "silk",
+             "params": {"scale": 2.2, "speed": 1, "bright": 1.2,
+                        "colorA": "#3a5cff", "colorB": "#ff4fd8"}},
+            {"id": "tower_embers", "select": {"id": "left_tower"}, "effect": "embers",
+             "params": {"density": 9, "rise": 1, "bright": 1.3,
+                        "hot": "#ffe2a0", "cool": "#ff3a0a"}},
+            {"id": "wing_contours", "select": {"id": "right_wing"}, "effect": "contours",
+             "params": {"scale": 2.5, "lines": 18, "speed": 1, "bright": 1.2,
+                        "line": "#2ee6c8", "sweep": "#e8fff9"}},
+            {"id": "wall_scanwave", "select": {"id": "base_wall"}, "effect": "scanwave",
+             "params": {"count": 5, "amp": 0.5, "speed": 1, "bright": 1.1,
+                        "colorA": "#7cff4f", "colorB": "#22d3ff"}},
         ],
         # (stem, region, hue shift, thumb?)
         "clips": [
@@ -55,9 +68,17 @@ SCENES = {
     },
     "fixture-b": {
         "bpm": 96,
+        # Same shaders, re-cast, so the project switcher visibly changes.
         "bindings": [
-            {"id": "wing_tint", "select": {"id": "right_wing"}, "effect": "tint",
-             "params": {"color": "#2a7bff"}},
+            {"id": "facade_contours", "select": {"id": "main_facade"}, "effect": "contours",
+             "params": {"scale": 1.6, "lines": 18, "speed": 0.6, "bright": 1.1,
+                        "line": "#ffb347", "sweep": "#fff4e0"}},
+            {"id": "towers_silk", "select": {"group": "towers"}, "effect": "silk",
+             "params": {"scale": 3.0, "speed": 0.7, "bright": 1.0,
+                        "colorA": "#00c2ff", "colorB": "#7a2cff"}},
+            {"id": "wall_embers", "select": {"id": "base_wall"}, "effect": "embers",
+             "params": {"density": 22, "rise": 0.6, "bright": 1.2,
+                        "hot": "#d6f7ff", "cool": "#2a7bff"}},
         ],
         "clips": [
             ("tf_b01", "right_wing", 180, True),
@@ -116,6 +137,7 @@ def build(name: str, spec: dict) -> None:
         shutil.rmtree(project)
     shutil.copytree(PACK_SRC, project / "packs" / "main")
     shutil.copytree(LIBRARY_FX, project / "effects")
+    shutil.copytree(EXAMPLE_FX, project / "effects", dirs_exist_ok=True)
     scene = {"version": 1, "pack": "packs/main", "transport": {"bpm": spec["bpm"]},
              "bindings": spec["bindings"], "post": []}
     (project / "scene.json").write_text(json.dumps(scene, indent=2))

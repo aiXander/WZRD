@@ -2,73 +2,65 @@
   "version": 1,
   "pack": "../../test_results/layerpack/pack",
   "transport": {
-    "bpm": 123
+    "bpm": 120
   },
   "bindings": [
     {
-      "select": {
-        "tag": "background"
-      },
-      "effect": "bloom",
-      "params": {
-        "rate": 0.06986788617886179,
-        "glow": 0.6009432164634146,
-        "core": "#ffd48a",
-        "edge": "#cc66e5"
-      },
-      "id": "facade_noise"
-    },
-    {
-      "select": {
-        "id": "left_tower"
-      },
-      "effect": "vbars",
-      "params": {
-        "speed": 1,
-        "count": 36,
-        "duty": 0.5,
-        "color": "#000000"
-      },
-      "id": "left_tower_bars"
-    },
-    {
-      "select": {
-        "id": "right_wing"
-      },
-      "effect": "hueCycle",
-      "params": {
-        "phase": 0,
-        "color0": "#1ab24d",
-        "color1": "#4de566",
-        "color2": "#e5b233",
-        "color3": "#c4bc00"
-      },
-      "id": "right_wing_bars"
-    },
-    {
-      "select": {
-        "id": "base_wall"
-      },
-      "effect": "flow_noise",
-      "params": {
-        "scale": 3,
-        "speed": 1,
-        "bright": 1.2999999523162842,
-        "tint": "#ffffff"
-      },
-      "id": "base_wall_noise"
-    },
-    {
-      "id": "main_facade",
+      "id": "facade_silk",
       "select": {
         "id": "main_facade"
       },
-      "effect": "flow_noise",
+      "effect": "silk",
       "params": {
-        "scale": 3,
+        "scale": 2.2,
         "speed": 1,
-        "bright": 1.2999999523162842,
-        "tint": "#ffffff"
+        "bright": 1.2,
+        "colorA": "#3a5cff",
+        "colorB": "#ff4fd8"
+      }
+    },
+    {
+      "id": "tower_embers",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "embers",
+      "params": {
+        "density": 9,
+        "rise": 1,
+        "bright": 1.3,
+        "hot": "#ffe2a0",
+        "cool": "#ff3a0a"
+      }
+    },
+    {
+      "id": "wing_contours",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "contours",
+      "params": {
+        "scale": 2.5,
+        "lines": 18,
+        "speed": 1,
+        "bright": 1.2,
+        "line": "#2ee6c8",
+        "sweep": "#e8fff9"
+      }
+    },
+    {
+      "id": "wall_scanwave",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "scanwave",
+      "params": {
+        "count": 5,
+        "amp": 0.5,
+        "speed": 1,
+        "bright": 1.1,
+        "colorA": "#7cff4f",
+        "colorB": "#22d3ff"
       }
     }
   ],

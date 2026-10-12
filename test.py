@@ -13,6 +13,9 @@ TEST_DAY_IMAGE = "test_imgs/day.jpg"
 TEST_NIGHT_IMAGE = "test_imgs/night.jpg"
 
 TEST_SEGMAP = "test_imgs/segmap.jpeg"
+# The photo `segmap.jpeg` was segmented from (same framing, 2x its size) —
+# the layer pack's surface. Not `day.jpg`: that's a different building.
+TEST_SEGMAP_PHOTO = "test_imgs/aligned.jpg"
 
 TEST_VIDEO = "test_imgs/test_video/video.mp4"
 TEST_BACKGROUND = "test_imgs/test_video/background.jpg"
@@ -54,10 +57,16 @@ def test_islands():
 
 def test_layerpack():
     from wzrd import islands, layerpack
+    from PIL import Image
     import json
-    _require(TEST_SEGMAP, TEST_DAY_IMAGE)
+    _require(TEST_SEGMAP, TEST_SEGMAP_PHOTO)
     out_dir = _result_dir("layerpack")
     _copy_input(TEST_SEGMAP, out_dir)
+    # Surface at the segmap's own size (1376x768, the Nano Banana canvas),
+    # so masks land 1:1 on the photo they were drawn from.
+    surface_path = os.path.join(out_dir, "surface_src.jpg")
+    seg_size = Image.open(TEST_SEGMAP).size
+    Image.open(TEST_SEGMAP_PHOTO).convert("RGB").resize(seg_size, Image.LANCZOS).save(surface_path, quality=92)
     # First produce some masks via the islands pipeline.
     regions_dir = os.path.join(out_dir, "regions")
     regions, _ = islands.extract_color_regions(TEST_SEGMAP, regions_dir)
@@ -67,7 +76,7 @@ def test_layerpack():
     # Hand-author the tags file that names every region. These ids are what
     # the example scenes in `render-core/examples/` select on and what the
     # Tauri inspector shows an operator, so they are named after what the
-    # region actually *is* in the test photo (a Moroccan kasbah) rather than
+    # region actually *is* in the test photo (a Moroccan kasbah wall) rather than
     # left to fall back to the islands mask stem
     # (`region_mask_003_color_fefd00` — unreadable in a binding list).
     #
@@ -96,7 +105,7 @@ def test_layerpack():
     scene = layerpack.build_layerpack(
         masks_dir=regions_dir,
         output_dir=pack_dir,
-        surface=TEST_DAY_IMAGE,
+        surface=surface_path,
         tags=tags_path,
         feather_px=1,
         include_background=True,
