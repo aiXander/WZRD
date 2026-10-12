@@ -32,7 +32,10 @@ use crate::alignment::{self, AlignmentDoc, AlignmentState};
 use crate::compositor::{resolve_effect_def, PassPlan};
 use crate::drivers::{Crossfade, Masters, ParamOverrides, SliderBank, Transport};
 use crate::effects::{EffectKind, EffectRegistry, InputSlot};
-use crate::gpu::{FinalPassUniforms, GpuContext, Leg, LayerIdentity, LayerParamsGpu};
+use crate::gpu::{
+    FinalPassUniforms, GpuContext, Leg, LayerIdentity, LayerParamsGpu, PreviewExtraUniforms,
+    PreviewInput,
+};
 use crate::osc::{try_spawn, AudioFeatures, OscListener};
 use crate::pack::LoadedPack;
 use crate::probe::{
@@ -78,6 +81,56 @@ enum PromotePhase {
         start: Instant,
         fade_ms: f32,
     },
+}
+
+/// Which composite a preview view samples. Wire form of [`Leg`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PreviewSource {
+    Live,
+    Design,
+}
+
+impl From<PreviewSource> for Leg {
+    fn from(s: PreviewSource) -> Self {
+        match s {
+            PreviewSource::Live => Leg::Live,
+            PreviewSource::Design => Leg::Design,
+        }
+    }
+}
+
+/// What the native preview view shows (docs/TODO/native-preview-underlay.md
+/// D3). One parameter block for every room — Perform, Prepare and Align
+/// differ only in values. Set by the host alongside the slot rect.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PreviewParams {
+    /// Which composite; `None` follows the deck toggle (`preview.setSource`).
+    /// Ignored when `program` is set.
+    pub source: Option<PreviewSource>,
+    /// The exact projector final pass: promote mix, live masters, the §2.8
+    /// warp (LUT indexed by uv) and the §3.6 test pattern.
+    pub program: bool,
+    /// Final multiply, 1.0 = off.
+    pub dim: f32,
+    /// Surface photo (`pack.json` `surface`) added under the light; 0 = off.
+    pub photo_weight: f32,
+    /// The composite itself; 0 = photo only.
+    pub light_weight: f32,
+}
+
+impl Default for PreviewParams {
+    /// Perform's monitor: the deck-toggle leg, no warp, no photo.
+    fn default() -> Self {
+        Self {
+            source: None,
+            program: false,
+            dim: 1.0,
+            photo_weight: 0.0,
+            light_weight: 1.0,
+        }
+    }
 }
 
 /// §5.6 design leg — the AI/operator scratchpad. `None` on single-leg
@@ -258,6 +311,8 @@ pub struct Core {
     /// same §3.1 rule applies to the preview swapchain, so this must be
     /// false whenever the preview window might be occluded.
     preview_visible: bool,
+    /// What the native preview view shows (host-set with the slot rect).
+    preview_params: PreviewParams,
 
     // Telemetry emit pacing.
     last_drivers_emit: Instant,
@@ -554,6 +609,7 @@ impl Core {
             exit_requested: false,
             occluded: false,
             preview_visible: false,
+            preview_params: PreviewParams::default(),
             last_drivers_emit: Instant::now(),
             last_audio_emit: Instant::now(),
             frame_budget,
@@ -1727,8 +1783,23 @@ impl Core {
         matches!(
             self.promote,
             PromotePhase::Pending { .. } | PromotePhase::Ramping { .. }
-        ) || (self.preview_visible && self.preview_source == Leg::Design)
+        ) || (self.preview_visible
+            && !self.preview_params.program
+            && self.preview_leg() == Leg::Design)
             || self.bus.subscriber_count("preview") > 0
+    }
+
+    /// The leg the native preview samples when it isn't the program view:
+    /// the slot's explicit source (Prepare pins design), else the deck
+    /// toggle. Always live on a single-leg run.
+    fn preview_leg(&self) -> Leg {
+        if !self.two_leg {
+            return Leg::Live;
+        }
+        self.preview_params
+            .source
+            .map(Leg::from)
+            .unwrap_or(self.preview_source)
     }
 
     fn emit_deck(&self) {
@@ -1823,7 +1894,32 @@ impl Core {
             .gpu
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("attach_preview_surface before init_gpu"))?;
-        gpu.attach_preview(target, width, height)
+        gpu.attach_preview(target, width, height)?;
+        // The surface photo only ever feeds the preview (Prepare's PHOTO /
+        // BOTH backdrops), so it loads here, not on headless runs. Missing
+        // or unreadable → the 1×1 black default, i.e. photo weight is moot.
+        if let Some(rel) = self.pack.manifest.surface.as_deref() {
+            let path = self.pack.pack_dir.join(rel);
+            match image::open(&path) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    gpu.set_surface_photo(rgba.as_raw(), rgba.width(), rgba.height());
+                    log::info!(
+                        "preview surface photo loaded ({}x{})",
+                        rgba.width(),
+                        rgba.height()
+                    );
+                }
+                Err(e) => log::warn!("surface photo {} unreadable: {e}", path.display()),
+            }
+        }
+        Ok(())
+    }
+
+    /// The composite's pixel size (the pack's atlas) — what a preview
+    /// drawable never needs to exceed.
+    pub fn composite_size(&self) -> (u32, u32) {
+        (self.pack.atlas_width, self.pack.atlas_height)
     }
 
     pub fn resize_preview_surface(&mut self, width: u32, height: u32) {
@@ -1845,35 +1941,57 @@ impl Core {
         self.preview_visible = visible;
     }
 
+    /// Host-set preview view parameters (D3) — which composite, program
+    /// view, dim, photo/light weights. Takes effect next frame.
+    pub fn set_preview_params(&mut self, params: PreviewParams) {
+        self.preview_params = params;
+    }
+
+    pub fn preview_params(&self) -> PreviewParams {
+        self.preview_params
+    }
+
     /// Blit + present the preview if attached and visible. Errors degrade
     /// to a log line — the preview must never take the projector down.
-    /// §5.6: the source toggle picks the leg; LIVE renders with the real
-    /// masters, DESIGN un-mastered.
+    /// What it shows comes from the host's `PreviewParams` (D3): the program
+    /// view runs the projector's exact uniforms (mix, live masters, warp,
+    /// test pattern); otherwise one leg — LIVE with the real masters, DESIGN
+    /// un-mastered (§5.4 convention) — then dim / photo / light weights.
     fn present_preview(&self) {
         if !self.preview_visible {
             return;
         }
-        if let Some(gpu) = self.gpu.as_ref() {
-            // §5.6 full-control-switch: each position shows its own leg's
-            // masters — the preview is WYSIWYG for the leg you're driving.
-            let source = if self.two_leg { self.preview_source } else { Leg::Live };
-            let (b, s) = match source {
-                Leg::Live => (self.masters.brightness(), self.masters.saturation()),
-                Leg::Design => (
-                    self.design_masters.brightness(),
-                    self.design_masters.saturation(),
-                ),
-            };
-            if let Err(e) = gpu.render_preview(source, b, s) {
-                log::warn!("preview present failed: {e}");
-            }
+        let Some(gpu) = self.gpu.as_ref() else { return };
+        let (input, uniforms) = self.preview_uniforms();
+        let p = self.preview_params;
+        let extra = PreviewExtraUniforms::new(p.dim, p.photo_weight, p.light_weight);
+        if let Err(e) = gpu.render_preview(input, uniforms, extra) {
+            log::warn!("preview present failed: {e}");
         }
     }
 
+    fn preview_uniforms(&self) -> (PreviewInput, FinalPassUniforms) {
+        if self.preview_params.program {
+            return (PreviewInput::Program, self.final_pass_uniforms());
+        }
+        let leg = self.preview_leg();
+        let uniforms = match leg {
+            Leg::Live => FinalPassUniforms::new(
+                self.masters.brightness(),
+                self.masters.saturation(),
+                0.0,
+            ),
+            Leg::Design => FinalPassUniforms::identity(),
+        };
+        (PreviewInput::Leg(leg), uniforms)
+    }
+
     /// §5.6 blanket leg rule: the JPEG `preview` channel is an authoring
-    /// surface, so it samples the design composite in two-leg mode.
+    /// surface, so it samples the design composite in two-leg mode. Also
+    /// drives in-flight `preview.snapshot` readbacks.
     fn capture_preview_jpeg(&mut self) {
-        if self.bus.subscriber_count("preview") == 0 {
+        let stream = self.bus.subscriber_count("preview") > 0;
+        if !stream && !self.preview.busy() {
             return;
         }
         let Self { gpu, preview, bus, two_leg, .. } = self;
@@ -1883,7 +2001,60 @@ impl Core {
         } else {
             &gpu.composite_texture
         };
-        preview.maybe_capture(gpu, bus, texture);
+        preview.maybe_capture(gpu, bus, texture, stream);
+    }
+
+    /// `preview.snapshot` — render the native preview's current view
+    /// (same params, same uniforms) offscreen at `width` (default: the
+    /// slot's drawable width, capped at 1024) and reply with a JPEG once
+    /// the readback is encoded. Errors when no slot is visible.
+    pub fn cmd_preview_snapshot(
+        &mut self,
+        width: Option<u32>,
+        reply: crossbeam_channel::Sender<Result<serde_json::Value, String>>,
+    ) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            let _ = reply.send(Err("no GPU context".into()));
+            return;
+        };
+        let Some((sw, sh)) = gpu.preview_size().filter(|_| self.preview_visible) else {
+            let _ = reply.send(Err(
+                "no native preview slot is visible (open a room with a monitor/surface/warp view)".into(),
+            ));
+            return;
+        };
+        let w = width.unwrap_or(sw.min(1024)).clamp(16, 4096);
+        let h = ((w as f64 * sh as f64 / sw.max(1) as f64).round() as u32).max(1);
+        let (input, _) = self.preview_uniforms();
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("preview snapshot encoder"),
+            });
+        let Some((buffer, bytes_per_row, bgra)) =
+            gpu.encode_preview_snapshot(&mut encoder, input, w, h)
+        else {
+            let _ = reply.send(Err("no native preview attached".into()));
+            return;
+        };
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        let meta = serde_json::json!({
+            "params": self.preview_params,
+            "leg": match input {
+                PreviewInput::Program => "program",
+                PreviewInput::Leg(Leg::Live) => "live",
+                PreviewInput::Leg(Leg::Design) => "design",
+            },
+            "slot_px": [sw, sh],
+        });
+        self.preview.push_snapshot(
+            buffer,
+            bytes_per_row,
+            w,
+            h,
+            bgra,
+            crate::telemetry::SnapshotReply { reply, meta },
+        );
     }
 
     /// The plan whose structure telemetry reports — §5.6 full-control-switch:
@@ -2111,6 +2282,15 @@ impl Core {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("offscreen frame encoder"),
                 });
+            // The program-view preview (Align) reads the warp LUT, so alignment
+            // edits must rebake it even while the projector is buried.
+            if self.preview_visible
+                && self.preview_params.program
+                && (self.alignment.take_render_dirty() || gpu.warp_needs_bake())
+            {
+                gpu.write_warp_uniforms(&self.alignment.bake_uniforms());
+                gpu.encode_warp_bake(&mut encoder);
+            }
             plan.encode_uploads(&mut encoder);
             plan.encode_composite(gpu, &mut encoder, &gpu.composite_view);
             if design_demand {

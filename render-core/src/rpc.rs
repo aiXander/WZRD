@@ -174,6 +174,13 @@ pub enum Command {
         source: crate::gpu::Leg,
         reply: Sender<Result<Value, String>>,
     },
+    /// `preview.snapshot` — one-shot image of exactly what the native preview
+    /// slot shows (its current `PreviewParams`). Replies once the readback
+    /// is encoded, a few frames later.
+    PreviewSnapshot {
+        width: Option<u32>,
+        reply: Sender<Result<Value, String>>,
+    },
     /// Live tempo / downbeat resync (`transport.set`). `leg: None` = both.
     Transport {
         bpm: Option<f32>,
@@ -199,6 +206,7 @@ impl Command {
             Command::Promote { .. } => "promote",
             Command::Pull { .. } => "pull",
             Command::PreviewSource { .. } => "preview.setSource",
+            Command::PreviewSnapshot { .. } => "preview.snapshot",
             Command::Transport { .. } => "transport.set",
         }
     }
@@ -652,6 +660,34 @@ pub fn dispatch(
             cmd_tx
                 .send(EngineCommand::new(Command::PreviewSource {
                     source,
+                    reply: reply_tx,
+                }))
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
+        // What the native preview slot shows right now, as an image — the
+        // agent's way to verify the underlay (program view, photo blend…),
+        // which no webview screenshot can see. Errors when no slot is
+        // visible rather than returning a blank image.
+        "preview.snapshot" => {
+            #[derive(Deserialize, Default)]
+            struct Params {
+                width: Option<u32>,
+            }
+            let p: Params = if req.params.is_null() {
+                Params::default()
+            } else {
+                serde_json::from_value(req.params.clone())
+                    .map_err(|e| RpcError::message(format!("params: {e}")))?
+            };
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::new(Command::PreviewSnapshot {
+                    width: p.width,
                     reply: reply_tx,
                 }))
                 .map_err(|_| RpcError::message("engine command channel closed"))?;
@@ -1126,6 +1162,9 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
         }
         Command::PreviewSource { source, reply } => {
             let _ = reply.send(core.cmd_preview_source(source));
+        }
+        Command::PreviewSnapshot { width, reply } => {
+            core.cmd_preview_snapshot(width, reply);
         }
         Command::Transport {
             bpm,

@@ -9,11 +9,11 @@
 // *outside* both legs and outside the masters — it is never duplicated per leg
 // and never copied on promote/pull.
 //
-// The same pipeline family serves the native operator preview, which binds a
-// 1×1 zero dummy LUT and writes adjust.w = 0: the preview surface has its own
-// size, so indexing a projector-sized LUT with preview pixel coordinates would
-// be out of bounds, and the calibration warp only reads right on the wall
-// anyway (§2.6 convention).
+// The native operator preview runs the same math through `fs_preview`
+// (bottom of this file). Its target has its own size, so it can never index
+// the projector-sized LUT by pixel: when it shows the program view (Align)
+// it indexes by uv instead. The projector entry point `fs_main` is untouched
+// by that and never sees the preview's extra bindings.
 //
 // Vertex stage comes from `fullscreen_vs.wgsl`, shared verbatim with
 // `warp_bake.wgsl` so the two cannot disagree about the Y flip.
@@ -86,7 +86,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // regardless of the uniformity of the condition.
         off = textureLoad(warp_lut, vec2<i32>(in.pos.xy), 0).xy;
     }
-    let uv = in.uv + off;
+    return shade(in.uv + off);
+}
+
+// Everything after the warp lookup: promote mix, test pattern, masters,
+// out-of-source background. Shared by the projector and the preview.
+fn shade(uv: vec2<f32>) -> vec4<f32> {
     let inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
 
     // Sampled unconditionally (the sampler clamps) so the two textureSample
@@ -112,4 +117,45 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(uniforms.background.rgb, 1.0);
     }
     return vec4<f32>(rgb, c.a);
+}
+
+// ---------- native preview (docs/TODO/native-preview-underlay.md D2–D4) ----------
+//
+// Group 1 is bound only by the preview pipeline. Core Animation can only
+// alpha-over HTML on top of the native view, so any image blending a room
+// needs (Prepare's photo under the light, Align's dimmed underlay) happens
+// here, in linear light: light adds to reflected light on the real wall.
+
+struct PreviewExtra {
+    // (dim, photo_weight, light_weight, _)
+    weights: vec4<f32>,
+};
+
+// The pack's surface photo (`pack.json` `surface`), Rgba8UnormSrgb so the
+// sample is already linear; a 1×1 black texture when the pack has none.
+@group(1) @binding(0) var photo_tex: texture_2d<f32>;
+@group(1) @binding(1) var<uniform> preview: PreviewExtra;
+
+@fragment
+fn fs_preview(in: VsOut) -> @location(0) vec4<f32> {
+    var off = vec2<f32>(0.0);
+    if (uniforms.adjust.w > 0.5) {
+        // The preview target is not the LUT's size: index by uv. Nearest
+        // texel of a projector-res LUT is plenty for a monitor.
+        let dims = vec2<f32>(textureDimensions(warp_lut));
+        let texel = clamp(floor(in.uv * dims), vec2<f32>(0.0), dims - 1.0);
+        off = textureLoad(warp_lut, vec2<i32>(texel), 0).xy;
+    }
+    let uv = in.uv + off;
+    let light = shade(uv);
+    // Sampled unconditionally (uniform control flow), masked to the source
+    // rect so the clamped edge doesn't smear into the background.
+    let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
+    let photo = select(
+        vec3<f32>(0.0),
+        textureSample(photo_tex, composite_sampler, uv).rgb,
+        inside,
+    );
+    let w = preview.weights;
+    return vec4<f32>((light.rgb * w.z + photo * w.y) * w.x, 1.0);
 }

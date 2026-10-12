@@ -653,175 +653,313 @@ fn percentiles(samples: &std::collections::VecDeque<f32>) -> (f32, f32, f32) {
     (pick(0.5), pick(0.95), pick(0.99))
 }
 
-/// Samples the composite buffer back to CPU at ~15 fps and emits a JPEG
-/// thumbnail on the `preview` channel. The composite is `Rgba16Float`; we
-/// decode f16 by hand to stay zero-dependency on `half`.
+/// The JPEG `preview` channel and `preview.snapshot` (docs/TODO/native-
+/// preview-underlay.md D5). In the app the native preview shows the
+/// composite directly; this path only serves external clients (MCP
+/// `get_preview`, the browser build, remote operators) and agent snapshots.
 ///
-/// **Render-thread budget.** The sampler never calls `device.poll(Wait)` —
-/// blocking the render thread for a readback to land tanked total fps over
-/// time as the GPU queue backed up. Instead it runs a 3-state pipeline:
+/// **Render-thread budget.** Never `device.poll(Wait)`, never encode on the
+/// render thread:
 ///
-/// 1. `Idle` — when at least `interval` has elapsed, allocate the readback
-///    buffer (once, reused thereafter), submit a `copy_texture_to_buffer`
-///    onto the composite, kick off `map_async`, transition to `Pending`.
-/// 2. `Pending` — every subsequent call drives the device with
-///    `Maintain::Poll` (non-blocking) so wgpu can fire the map callback.
-///    Returns immediately if the buffer isn't mapped yet.
-/// 3. `Ready` — the callback flipped the flag; decode the f16 data to a
-///    JPEG, emit on the bus, unmap the buffer, drop back to `Idle`.
+/// 1. *Kick off* (stream, every `interval` while subscribed): a GPU pass
+///    downscales the composite into a 320-px `Rgba8UnormSrgb` thumbnail
+///    (`gpu::Downscaler`, sRGB encode free on store), copies just that
+///    (~230 KB at 4:3) into a readback buffer, `map_async`.
+/// 2. *Pending*: each call drives `Maintain::Poll`; returns if unmapped.
+/// 3. *Ready*: copy the mapped bytes into a `Vec`, unmap, hand the job to
+///    the encode worker through a `bounded(1)` channel — busy worker →
+///    frame dropped (it's a thumbnail). The worker JPEG-encodes and emits.
 ///
-/// The readback buffer is allocated once (or re-allocated only on composite
-/// resize) — no 16 MB allocation per 66 ms.
+/// Snapshots (`preview.snapshot`) ride the same readback → worker path on
+/// their own unbounded queue (never dropped), and reply to their caller.
 pub struct PreviewSampler {
     interval: Duration,
-    /// When we kicked off the *current* in-flight (or pending-emit) capture.
-    /// Used to gate the next kick-off so we don't oversubscribe the GPU.
+    /// When the current/last stream capture was kicked off.
     last_capture: Instant,
-    /// Persistent readback buffer + the geometry it was allocated for.
-    /// Re-created only when the composite changes shape.
-    buffer: Option<wgpu::Buffer>,
-    buf_bytes_per_row: u32,
-    buf_src_w: u32,
-    buf_src_h: u32,
-    /// Atomic flipped by `map_async`'s callback. `None` ↔ Idle; `Some(..)`
-    /// pending or ready (see status codes below).
-    in_flight: Option<Arc<AtomicU8>>,
+    downscaler: Option<crate::gpu::Downscaler>,
+    stream: Option<Readback>,
+    snapshots: Vec<(Readback, SnapshotReply)>,
+    worker: Option<EncodeWorker>,
+}
+
+/// One in-flight `map_async` readback of a 4-byte-per-pixel image.
+struct Readback {
+    buffer: wgpu::Buffer,
+    bytes_per_row: u32,
+    width: u32,
+    height: u32,
+    /// Byte order of the source texture (the preview surface may be BGRA).
+    bgra: bool,
+    state: Arc<AtomicU8>,
+}
+
+/// Where a snapshot's encoded image goes, plus what to report with it.
+pub struct SnapshotReply {
+    pub reply: Sender<Result<Value, String>>,
+    /// Echoed into the reply (the `PreviewParams` used, etc.).
+    pub meta: Value,
+}
+
+/// Pixels handed to the encode worker: tightly packed, 4 bytes per pixel.
+struct EncodeJob {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    bgra: bool,
+    snapshot: Option<SnapshotReply>,
+}
+
+struct EncodeWorker {
+    stream_tx: Sender<EncodeJob>,
+    snapshot_tx: Sender<EncodeJob>,
 }
 
 const MAP_PENDING: u8 = 0;
 const MAP_READY_OK: u8 = 1;
 const MAP_READY_ERR: u8 = 2;
 
+/// Width of the `preview` channel thumbnail.
+const THUMB_WIDTH: u32 = 320;
+
+impl Readback {
+    fn start(buffer: wgpu::Buffer, bytes_per_row: u32, width: u32, height: u32, bgra: bool) -> Self {
+        let state = Arc::new(AtomicU8::new(MAP_PENDING));
+        let cb = Arc::clone(&state);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+            cb.store(if res.is_ok() { MAP_READY_OK } else { MAP_READY_ERR }, Ordering::Release);
+        });
+        Self {
+            buffer,
+            bytes_per_row,
+            width,
+            height,
+            bgra,
+            state,
+        }
+    }
+
+    /// `None` while still mapping; `Some(Err)` if the map failed;
+    /// `Some(Ok(pixels))` (tightly packed) once ready — the buffer is
+    /// unmapped and done.
+    fn take(&self) -> Option<Result<Vec<u8>, ()>> {
+        match self.state.load(Ordering::Acquire) {
+            MAP_PENDING => None,
+            MAP_READY_OK => {
+                let row = (self.width * 4) as usize;
+                let mut pixels = Vec::with_capacity(row * self.height as usize);
+                {
+                    let data = self.buffer.slice(..).get_mapped_range();
+                    for y in 0..self.height as usize {
+                        let at = y * self.bytes_per_row as usize;
+                        pixels.extend_from_slice(&data[at..at + row]);
+                    }
+                }
+                self.buffer.unmap();
+                Some(Ok(pixels))
+            }
+            _ => Some(Err(())),
+        }
+    }
+}
+
 impl PreviewSampler {
     pub fn new() -> Self {
         Self {
             interval: Duration::from_millis(66), // ~15 fps
             last_capture: Instant::now() - Duration::from_secs(1),
-            buffer: None,
-            buf_bytes_per_row: 0,
-            buf_src_w: 0,
-            buf_src_h: 0,
-            in_flight: None,
+            downscaler: None,
+            stream: None,
+            snapshots: Vec::new(),
+            worker: None,
         }
     }
 
-    /// Perf-monitor PM1 GPU-MB inventory: the persistent readback buffer.
+    /// Perf-monitor PM1 GPU-MB inventory: the thumbnail target + readbacks.
     pub fn gpu_bytes(&self) -> u64 {
-        self.buffer.as_ref().map_or(0, |b| b.size())
+        self.downscaler.as_ref().map_or(0, |d| d.gpu_bytes())
+            + self.stream.as_ref().map_or(0, |r| r.buffer.size())
+            + self.snapshots.iter().map(|(r, _)| r.buffer.size()).sum::<u64>()
     }
 
-    /// `texture` is the composite this sampler reads — the design leg's in
-    /// two-leg mode (§5.6 blanket leg rule: the JPEG channel is an authoring
-    /// surface), the live composite headless. Must match the pack's
-    /// composite shape (`gpu.composite_width/height`).
-    pub fn maybe_capture(&mut self, gpu: &GpuContext, bus: &Bus, texture: &wgpu::Texture) {
-        // Drive any pending map callback forward. Non-blocking — returns
-        // immediately whether work has finished or not, and fires any
-        // completed callbacks along the way.
+    /// Anything in flight that needs this frame's `maybe_capture` even with
+    /// no `preview` subscriber (a snapshot, or a stream frame mid-map).
+    pub fn busy(&self) -> bool {
+        self.stream.is_some() || !self.snapshots.is_empty()
+    }
+
+    fn worker(&mut self, bus: &Bus) -> &EncodeWorker {
+        self.worker.get_or_insert_with(|| EncodeWorker::spawn(bus.clone()))
+    }
+
+    /// Queue a `preview.snapshot` readback (the caller already encoded the
+    /// copy into `buffer`; this kicks off the map once submitted).
+    pub fn push_snapshot(
+        &mut self,
+        buffer: wgpu::Buffer,
+        bytes_per_row: u32,
+        width: u32,
+        height: u32,
+        bgra: bool,
+        reply: SnapshotReply,
+    ) {
+        let rb = Readback::start(buffer, bytes_per_row, width, height, bgra);
+        self.snapshots.push((rb, reply));
+    }
+
+    /// Per-frame driver. `texture` is the composite the stream samples —
+    /// the design leg's in two-leg mode (§5.6 blanket leg rule: the JPEG
+    /// channel is an authoring surface), the live composite headless.
+    /// `stream` = someone subscribes to `preview` right now.
+    pub fn maybe_capture(
+        &mut self,
+        gpu: &GpuContext,
+        bus: &Bus,
+        texture: &wgpu::Texture,
+        stream: bool,
+    ) {
+        // Fire any completed map callbacks. Non-blocking.
         gpu.device.poll(wgpu::Maintain::Poll);
 
-        // If a readback is in flight, drain it (or skip if still mapping).
-        if let Some(state) = self.in_flight.as_ref() {
-            match state.load(Ordering::Acquire) {
-                MAP_PENDING => return, // still mapping; try again next frame
-                MAP_READY_OK => {
-                    let buf = self.buffer.as_ref().expect("buffer present");
-                    let slice = buf.slice(..);
-                    let data = slice.get_mapped_range();
-                    let jpeg = encode_jpeg_thumbnail(
-                        &data,
-                        self.buf_src_w,
-                        self.buf_src_h,
-                        self.buf_bytes_per_row,
-                        320,
-                    );
-                    drop(data);
-                    buf.unmap();
-                    if let Ok((bytes, w, h)) = jpeg {
-                        bus.emit_preview_jpeg(&bytes, w, h);
+        if let Some(rb) = self.stream.as_ref() {
+            match rb.take() {
+                None => {}
+                Some(res) => {
+                    let (w, h) = (rb.width, rb.height);
+                    self.stream = None;
+                    if let Ok(pixels) = res {
+                        let job = EncodeJob {
+                            pixels,
+                            width: w,
+                            height: h,
+                            bgra: false,
+                            snapshot: None,
+                        };
+                        // Busy worker → drop the frame; the next one is 66 ms away.
+                        let _ = self.worker(bus).stream_tx.try_send(job);
                     }
                 }
-                MAP_READY_ERR => {
-                    log::trace!("preview map failed; recycling buffer");
-                    // No mapped range to drop; unmap is a no-op when the
-                    // buffer isn't mapped, so just clear state.
-                }
-                _ => {}
             }
-            self.in_flight = None;
         }
 
-        if self.last_capture.elapsed() < self.interval {
+        let mut i = 0;
+        while i < self.snapshots.len() {
+            let Some(res) = self.snapshots[i].0.take() else {
+                i += 1;
+                continue;
+            };
+            let (rb, reply) = self.snapshots.swap_remove(i);
+            match res {
+                Ok(pixels) => {
+                    let job = EncodeJob {
+                        pixels,
+                        width: rb.width,
+                        height: rb.height,
+                        bgra: rb.bgra,
+                        snapshot: Some(reply),
+                    };
+                    let _ = self.worker(bus).snapshot_tx.send(job);
+                }
+                Err(()) => {
+                    let _ = reply.reply.send(Err("preview snapshot readback failed".into()));
+                }
+            }
+        }
+
+        if !stream || self.stream.is_some() || self.last_capture.elapsed() < self.interval {
             return;
         }
         self.last_capture = Instant::now();
 
-        // (Re)allocate the readback buffer if the composite shape changed.
-        // For a 1920x1080 RGBA16F target this is 1920 * 8 = 15360 = 60 * 256
-        // bytes per row, already aligned.
-        let src_w = gpu.composite_width;
-        let src_h = gpu.composite_height;
-        let bytes_per_row = align_up(src_w * 8, 256);
-        let need_realloc = self.buffer.is_none()
-            || self.buf_src_w != src_w
-            || self.buf_src_h != src_h;
-        if need_realloc {
-            let size = (bytes_per_row * src_h) as u64;
-            self.buffer = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preview readback buffer"),
-                size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            }));
-            self.buf_bytes_per_row = bytes_per_row;
-            self.buf_src_w = src_w;
-            self.buf_src_h = src_h;
-        }
-        let buf = self.buffer.as_ref().expect("buffer present");
-
+        let src_w = gpu.composite_width.max(1);
+        let src_h = gpu.composite_height.max(1);
+        let w = THUMB_WIDTH.min(src_w);
+        let h = ((w as f32 * src_h as f32 / src_w as f32).round() as u32).max(1);
         let mut enc = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("preview readback encoder"),
+                label: Some("preview thumbnail encoder"),
             });
-        enc.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::ImageCopyBuffer {
-                buffer: buf,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_row),
-                    rows_per_image: Some(src_h),
-                },
-            },
-            wgpu::Extent3d {
-                width: src_w,
-                height: src_h,
-                depth_or_array_layers: 1,
-            },
-        );
+        let downscaler = self
+            .downscaler
+            .get_or_insert_with(|| crate::gpu::Downscaler::new(&gpu.device));
+        let thumb = downscaler.encode(&gpu.device, &mut enc, texture, w, h);
+        let (buffer, bytes_per_row) = gpu.encode_readback(&mut enc, thumb, w, h);
         gpu.queue.submit(std::iter::once(enc.finish()));
-
-        // Kick off the async map. The callback flips the atomic; the *next*
-        // `maybe_capture` call observes `MAP_READY_OK` and consumes the
-        // buffer. Render thread never waits.
-        let state = Arc::new(AtomicU8::new(MAP_PENDING));
-        let state_cb = Arc::clone(&state);
-        buf.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            let code = if res.is_ok() { MAP_READY_OK } else { MAP_READY_ERR };
-            state_cb.store(code, Ordering::Release);
-        });
-        self.in_flight = Some(state);
+        self.stream = Some(Readback::start(buffer, bytes_per_row, w, h, false));
     }
 }
 
-fn align_up(v: u32, to: u32) -> u32 {
-    ((v + to - 1) / to) * to
+impl EncodeWorker {
+    fn spawn(bus: Bus) -> Self {
+        let (stream_tx, stream_rx) = bounded::<EncodeJob>(1);
+        let (snapshot_tx, snapshot_rx) = crossbeam_channel::unbounded::<EncodeJob>();
+        let _ = std::thread::Builder::new()
+            .name("preview-encode".into())
+            .spawn(move || {
+                let mut cpu = crate::perf::ThreadCpu::register("preview-encode");
+                loop {
+                    cpu.tick();
+                    let job = crossbeam_channel::select! {
+                        recv(snapshot_rx) -> j => j,
+                        recv(stream_rx) -> j => j,
+                    };
+                    let Ok(job) = job else { break };
+                    let encoded = encode_rgba_jpeg(&job.pixels, job.width, job.height, job.bgra, 
+                        if job.snapshot.is_some() { 90 } else { 70 });
+                    match (job.snapshot, encoded) {
+                        (None, Ok(bytes)) => bus.emit_preview_jpeg(&bytes, job.width, job.height),
+                        (None, Err(e)) => log::trace!("preview thumbnail encode failed: {e}"),
+                        (Some(snap), Ok(bytes)) => {
+                            use base64::Engine;
+                            let mut out = json!({
+                                "encoding": "jpeg",
+                                "width": job.width,
+                                "height": job.height,
+                                "data_b64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                            });
+                            if let (Some(o), Value::Object(meta)) = (out.as_object_mut(), snap.meta) {
+                                o.extend(meta);
+                            }
+                            let _ = snap.reply.send(Ok(out));
+                        }
+                        (Some(snap), Err(e)) => {
+                            let _ = snap.reply.send(Err(format!("snapshot encode failed: {e}")));
+                        }
+                    }
+                }
+            });
+        Self {
+            stream_tx,
+            snapshot_tx,
+        }
+    }
+}
+
+/// JPEG-encode tightly packed 8-bit pixels (RGBA or BGRA, already
+/// sRGB-encoded by the GPU). Alpha is dropped.
+fn encode_rgba_jpeg(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    bgra: bool,
+    quality: u8,
+) -> Result<Vec<u8>, image::ImageError> {
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for px in pixels.chunks_exact(4) {
+        if bgra {
+            rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+        } else {
+            rgb.extend_from_slice(&px[..3]);
+        }
+    }
+    let mut jpeg = Vec::with_capacity(rgb.len() / 6);
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality).encode(
+        &rgb,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(jpeg)
 }
 
 fn f16_to_f32(bits: u16) -> f32 {
@@ -850,7 +988,8 @@ fn f16_to_f32(bits: u16) -> f32 {
 
 /// sRGB electro-optical transfer function (linear → gamma-encoded), clamped
 /// to [0, 1]. Mirrors the automatic conversion the GPU does when storing into
-/// the sRGB swapchain, so the preview JPEG matches the on-projector output.
+/// the sRGB swapchain. Only the probe thumbnail (`encode_jpeg_thumbnail`)
+/// still decodes on the CPU; the `preview` channel downscales on the GPU.
 fn linear_to_srgb(c: f32) -> f32 {
     let c = c.clamp(0.0, 1.0);
     if c <= 0.0031308 {

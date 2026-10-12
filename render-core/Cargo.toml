@@ -46,6 +46,12 @@ libc = "0.2"
 # timer-coalescing opt-out (NSProcessInfo activity assertion).
 objc2-foundation = { version = "0.2", features = ["NSProcessInfo", "NSString"] }
 
+# Standalone `cargo run`: optimize dependencies (wgpu/naga/image) in dev.
+# Ignored when render-core is built as a dependency — wzrd-app's manifest
+# carries its own copy.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

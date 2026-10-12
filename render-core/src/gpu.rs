@@ -38,6 +38,7 @@ const BUILTIN_BODY_WGSL: &str = include_str!("shaders/builtin_effects.wgsl");
 const FULLSCREEN_VS_WGSL: &str = include_str!("shaders/fullscreen_vs.wgsl");
 const FINAL_PASS_WGSL: &str = include_str!("shaders/final_pass.wgsl");
 const WARP_BAKE_WGSL: &str = include_str!("shaders/warp_bake.wgsl");
+const DOWNSCALE_WGSL: &str = include_str!("shaders/downscale.wgsl");
 
 /// Uniform-array bound on §5.14 warp handles. Mirrored by `MAX_POINTS` in
 /// `alignment.rs` and by the `MAX_POINTS` const in `warp_bake.wgsl` — all
@@ -279,23 +280,53 @@ pub enum Leg {
     Design,
 }
 
-/// Native operator-preview swapchain (app-collapse Step 3): a second
-/// surface the same device blits a composite onto — the Resolume-style
-/// preview. Runs the final-pass pipeline with the warp disabled (§5.6/§5.14:
-/// the calibration warp only looks right on the physical surface).
+/// What a preview blit samples (docs/TODO/native-preview-underlay.md D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewInput {
+    /// One leg's composite, no warp (Perform's monitor, Prepare).
+    Leg(Leg),
+    /// The projector's own final pass — live × design promote mix, the real
+    /// warp LUT (indexed by uv), test pattern (Align).
+    Program,
+}
+
+/// `fs_preview`'s group-1 uniform: (dim, photo_weight, light_weight, _).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct PreviewExtraUniforms {
+    pub weights: [f32; 4],
+}
+
+impl PreviewExtraUniforms {
+    pub fn new(dim: f32, photo_weight: f32, light_weight: f32) -> Self {
+        Self {
+            weights: [dim, photo_weight, light_weight, 0.0],
+        }
+    }
+}
+
+/// Native operator-preview swapchain: a second surface the same device
+/// blits onto — the Resolume-style preview. Runs `fs_preview`, the
+/// final-pass math plus a preview-only group 1 (surface photo + weights).
 ///
-/// §5.6 source toggle: one bind group per leg; the LIVE position renders
-/// with the *real* brightness/saturation masters (what the crowd sees, sans
-/// warp), the DESIGN position stays neutral/un-mastered (§5.4 convention).
+/// Bind groups: one per leg (dummy 1×1 LUT, warp off — the §5.6 source
+/// toggle: LIVE renders with the real masters, DESIGN un-mastered) and one
+/// for the program view (the real LUT, which `fs_preview` indexes by uv
+/// because this target is never the LUT's size — D4).
 pub struct PreviewTarget {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     bind_group_live: wgpu::BindGroup,
     bind_group_design: wgpu::BindGroup,
-    /// Rewritten per present so the LIVE position tracks the masters and the
-    /// DESIGN position stays neutral. `adjust.w` (warp) stays 0 here.
+    /// Rebuilt whenever the warp LUT is reallocated (`resize_warp`).
+    bind_group_program: wgpu::BindGroup,
+    /// `FinalPassUniforms`, rewritten per present from the caller's view.
     buffer: wgpu::Buffer,
+    extra_layout: wgpu::BindGroupLayout,
+    extra_buffer: wgpu::Buffer,
+    /// Photo + weights; rebuilt when the surface photo changes.
+    extra_bind_group: wgpu::BindGroup,
 }
 
 /// §5.14 — the baked offset LUT plus everything needed to refill it.
@@ -340,6 +371,10 @@ pub struct GpuContext {
 
     /// Attached/detached by the host at runtime (None headless / pre-attach).
     pub preview: Option<PreviewTarget>,
+    /// The pack's surface photo for the preview's PHOTO/BOTH backdrops —
+    /// 1×1 black until `set_surface_photo`.
+    photo_texture: wgpu::Texture,
+    photo_view: wgpu::TextureView,
 
     /// LIVE-leg composite — what the projector pass warps to the swapchain.
     pub composite_texture: wgpu::Texture,
@@ -537,6 +572,8 @@ impl GpuContext {
             &warp.view,
         );
 
+        let (photo_texture, photo_view) = create_photo_texture(&device, &queue, 1, 1, &[0, 0, 0, 255]);
+
         Ok(Self {
             instance,
             adapter,
@@ -546,6 +583,8 @@ impl GpuContext {
             queue,
             bc_supported,
             preview: None,
+            photo_texture,
+            photo_view,
             composite_texture,
             composite_view,
             composite_sampler,
@@ -599,6 +638,35 @@ impl GpuContext {
             self.design_view.as_ref().unwrap_or(&self.composite_view),
             &self.warp.view,
         );
+        if let Some(pv) = self.preview.as_mut() {
+            pv.bind_group_program = create_final_bind_group(
+                &self.device,
+                &self.final_bind_group_layout,
+                "preview bind group (program)",
+                &self.composite_view,
+                &self.composite_sampler,
+                &pv.buffer,
+                self.design_view.as_ref().unwrap_or(&self.composite_view),
+                &self.warp.view,
+            );
+        }
+    }
+
+    /// Upload the pack's surface photo (tightly packed RGBA8, sRGB-encoded)
+    /// for the preview's photo weight. Sampled as `Rgba8UnormSrgb`, so the
+    /// shader sees linear light.
+    pub fn set_surface_photo(&mut self, rgba: &[u8], width: u32, height: u32) {
+        let (texture, view) = create_photo_texture(&self.device, &self.queue, width, height, rgba);
+        self.photo_texture = texture;
+        self.photo_view = view;
+        if let Some(pv) = self.preview.as_mut() {
+            pv.extra_bind_group = create_preview_extra_bind_group(
+                &self.device,
+                &pv.extra_layout,
+                &self.photo_view,
+                &pv.extra_buffer,
+            );
+        }
     }
 
     pub fn warp_size(&self) -> (u32, u32) {
@@ -630,9 +698,10 @@ impl GpuContext {
             + texture_bytes(&self.warp.texture)
             + self.warp.buffer.size()
             + self.final_buffer.size()
+            + texture_bytes(&self.photo_texture)
             + swapchain(&self.surface_config);
         if let Some(p) = self.preview.as_ref() {
-            total += swapchain(&p.config) + p.buffer.size();
+            total += swapchain(&p.config) + p.buffer.size() + p.extra_buffer.size();
         }
         total
     }
@@ -705,10 +774,10 @@ impl GpuContext {
         };
         surface.configure(&self.device, &config);
 
-        // Same pipeline family as the projector pass, compiled for the
-        // preview surface's own format; masters written per present (real on
-        // LIVE, neutral on DESIGN — §5.6 source toggle), warp always off.
-        let (_, pipeline) = create_final_pipeline(&self.device, format);
+        // Same shader as the projector pass, `fs_preview` entry, compiled
+        // for the preview surface's own format; uniforms written per present.
+        let (extra_layout, pipeline) =
+            create_preview_pipeline(&self.device, format, &self.final_bind_group_layout);
         let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("preview blit uniform"),
             contents: bytemuck::bytes_of(&FinalPassUniforms::identity()),
@@ -734,13 +803,34 @@ impl GpuContext {
             "preview blit bind group (design)",
             self.design_view.as_ref().unwrap_or(&self.composite_view),
         );
+        let bind_group_program = create_final_bind_group(
+            &self.device,
+            &self.final_bind_group_layout,
+            "preview bind group (program)",
+            &self.composite_view,
+            &self.composite_sampler,
+            &buffer,
+            self.design_view.as_ref().unwrap_or(&self.composite_view),
+            &self.warp.view,
+        );
+        let extra_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("preview extra uniform"),
+            contents: bytemuck::bytes_of(&PreviewExtraUniforms::new(1.0, 0.0, 1.0)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let extra_bind_group =
+            create_preview_extra_bind_group(&self.device, &extra_layout, &self.photo_view, &extra_buffer);
         self.preview = Some(PreviewTarget {
             surface,
             config,
             pipeline,
             bind_group_live,
             bind_group_design,
+            bind_group_program,
             buffer,
+            extra_layout,
+            extra_buffer,
+            extra_bind_group,
         });
         log::info!("preview surface attached ({width}x{height}, {format:?})");
         Ok(())
@@ -760,33 +850,34 @@ impl GpuContext {
         }
     }
 
-    /// Blit a composite onto the preview surface and present. Self-heals
+    /// Blit onto the preview surface and present. Self-heals
     /// `Lost`/`Outdated` by reconfiguring (frame skipped); other errors are
     /// returned. No-op without an attached preview.
     ///
-    /// §5.6 source toggle: `source` picks which leg's composite is sampled;
-    /// LIVE applies the real brightness/saturation masters (identity
-    /// homography — the calibration warp only reads right on the physical
-    /// surface), DESIGN stays neutral/un-mastered.
+    /// The caller builds `uniforms` for `input`: a leg's own masters with
+    /// the warp off for `Leg` (the per-leg groups bind a dummy LUT, so a
+    /// warp flag there is cleared), the projector's exact uniforms for
+    /// `Program`.
     ///
-    /// §3.1 caveat: the *caller* must ensure the preview window is visible —
+    /// §3.1 caveat: the *caller* must ensure the preview view is visible —
     /// `get_current_texture` on an occluded macOS window blocks the render
     /// thread just like the projector swapchain does.
     pub fn render_preview(
         &self,
-        source: Leg,
-        brightness: f32,
-        saturation: f32,
+        input: PreviewInput,
+        mut uniforms: FinalPassUniforms,
+        extra: PreviewExtraUniforms,
     ) -> Result<(), wgpu::SurfaceError> {
         let Some(pv) = self.preview.as_ref() else {
             return Ok(());
         };
-        let uniforms = match source {
-            Leg::Live => FinalPassUniforms::new(brightness, saturation, 0.0),
-            Leg::Design => FinalPassUniforms::identity(),
-        };
+        if input != PreviewInput::Program {
+            uniforms.adjust[3] = 0.0;
+        }
         self.queue
             .write_buffer(&pv.buffer, 0, bytemuck::bytes_of(&uniforms));
+        self.queue
+            .write_buffer(&pv.extra_buffer, 0, bytemuck::bytes_of(&extra));
         let frame = match pv.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -803,35 +894,132 @@ impl GpuContext {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("preview blit encoder"),
             });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("preview blit pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pv.pipeline);
-            pass.set_bind_group(
-                0,
-                match source {
-                    Leg::Live => &pv.bind_group_live,
-                    Leg::Design => &pv.bind_group_design,
-                },
-                &[],
-            );
-            pass.draw(0..3, 0..1);
-        }
+        Self::encode_preview_pass(pv, &mut encoder, &view, input);
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
+    }
+
+    /// The preview blit itself, onto any view in the preview surface's
+    /// format — the swapchain frame, or `preview.snapshot`'s offscreen
+    /// target. Uniforms must already be written (`render_preview`).
+    fn encode_preview_pass(
+        pv: &PreviewTarget,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        input: PreviewInput,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("preview blit pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pv.pipeline);
+        pass.set_bind_group(
+            0,
+            match input {
+                PreviewInput::Leg(Leg::Live) => &pv.bind_group_live,
+                PreviewInput::Leg(Leg::Design) => &pv.bind_group_design,
+                PreviewInput::Program => &pv.bind_group_program,
+            },
+            &[],
+        );
+        pass.set_bind_group(1, &pv.extra_bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// `preview.snapshot`: render exactly what the native preview shows
+    /// (same input, uniforms and weights as the last `render_preview`) into
+    /// an offscreen `width × height` texture in the preview surface's
+    /// format, and copy it into a fresh readback buffer. Returns the
+    /// buffer, its padded row pitch, and whether the bytes are BGRA. `None`
+    /// without an attached preview.
+    pub fn encode_preview_snapshot(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: PreviewInput,
+        width: u32,
+        height: u32,
+    ) -> Option<(wgpu::Buffer, u32, bool)> {
+        let pv = self.preview.as_ref()?;
+        let format = pv.config.format;
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("preview snapshot target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self::encode_preview_pass(pv, encoder, &view, input);
+        let (buffer, bytes_per_row) = self.encode_readback(encoder, &texture, width, height);
+        let bgra = matches!(
+            format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        Some((buffer, bytes_per_row, bgra))
+    }
+
+    /// Copy a 4-byte-per-pixel texture into a new `MAP_READ` buffer with
+    /// 256-aligned rows. Returns the buffer and its row pitch.
+    pub fn encode_readback(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Buffer, u32) {
+        let bytes_per_row = (width * 4).div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preview readback"),
+            size: (bytes_per_row * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        (buffer, bytes_per_row)
+    }
+
+    /// Physical size of the attached preview surface (the slot's drawable).
+    pub fn preview_size(&self) -> Option<(u32, u32)> {
+        self.preview.as_ref().map(|p| (p.config.width, p.config.height))
     }
 
     /// Refresh the final-pass uniform: §5.4 output masters + §5.6 promote mix
@@ -1263,6 +1451,7 @@ mod tests {
         for (name, src) in [
             ("final_pass", FINAL_PASS_WGSL),
             ("warp_bake", WARP_BAKE_WGSL),
+            ("downscale", DOWNSCALE_WGSL),
         ] {
             let composed = compose_output_shader(src);
             let module = naga::front::wgsl::parse_str(&composed)
@@ -1454,15 +1643,32 @@ mod tests {
     /// vertical flip anywhere in the chain moves the sampled row and fails.
     #[test]
     fn final_pass_samples_through_the_warp() {
+        warp_sample_case(false, 64, 64);
+    }
+
+    /// D4: the preview's program view reads the projector-sized LUT **by uv**
+    /// from a target of a different size, and lands on the same image.
+    #[test]
+    fn program_preview_samples_through_the_warp_at_another_size() {
+        // 128-px LUT read from a 64-px target (rows stay 256-byte aligned).
+        warp_sample_case(true, 128, 64);
+    }
+
+    /// Composite and LUT are `n` px square. `preview = false`: the
+    /// projector pipeline (`fs_main`, LUT by pixel) at the LUT's own size.
+    /// `preview = true`: the preview pipeline (`fs_preview`, LUT by uv) at
+    /// `out` px, light only, no dim.
+    #[allow(non_snake_case)]
+    fn warp_sample_case(preview: bool, n: u32, out: u32) {
         use crate::alignment::AlignmentDoc;
 
-        const N: u32 = 64;
-        const SHIFT: u32 = 16; // 0.25 × 64
+        let N = n;
 
         let Some((device, queue)) = test_device() else {
-            eprintln!("no GPU device — skipping final_pass_samples_through_the_warp");
+            eprintln!("no GPU device — skipping warp sample case (preview={preview})");
             return;
         };
+        assert!(preview || out == N, "the projector pass indexes the LUT by pixel");
 
         // Composite: texel (x, y) carries its own coordinates as (r, g), so a
         // sample landing on the wrong texel is self-identifying.
@@ -1532,8 +1738,8 @@ mod tests {
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test output"),
             size: wgpu::Extent3d {
-                width: N,
-                height: N,
+                width: out,
+                height: out,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -1545,7 +1751,16 @@ mod tests {
         });
         let target_view = target.create_view(&Default::default());
 
-        let (bgl, pipeline) = create_final_pipeline(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let (bgl, final_pipeline) = create_final_pipeline(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let (extra_bgl, preview_pipeline) =
+            create_preview_pipeline(&device, wgpu::TextureFormat::Rgba8Unorm, &bgl);
+        let (_photo, photo_view) = create_photo_texture(&device, &queue, 1, 1, &[0, 0, 0, 255]);
+        let extra_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("test preview extra"),
+            contents: bytemuck::bytes_of(&PreviewExtraUniforms::new(1.0, 0.0, 1.0)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let extra_group = create_preview_extra_bind_group(&device, &extra_bgl, &photo_view, &extra_buf);
         let uniforms = FinalPassUniforms::new(1.0, 1.0, 0.0)
             .with_warp(true, solution.background_linear);
         let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1566,7 +1781,7 @@ mod tests {
 
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("test readback"),
-            size: (N * N * 4) as u64,
+            size: (out * out * 4) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -1605,7 +1820,12 @@ mod tests {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&pipeline);
+            if preview {
+                pass.set_pipeline(&preview_pipeline);
+                pass.set_bind_group(1, &extra_group, &[]);
+            } else {
+                pass.set_pipeline(&final_pipeline);
+            }
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -1620,13 +1840,13 @@ mod tests {
                 buffer: &readback,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(N * 4),
-                    rows_per_image: Some(N),
+                    bytes_per_row: Some(out * 4),
+                    rows_per_image: Some(out),
                 },
             },
             wgpu::Extent3d {
-                width: N,
-                height: N,
+                width: out,
+                height: out,
                 depth_or_array_layers: 1,
             },
         );
@@ -1642,34 +1862,39 @@ mod tests {
         let data = slice.get_mapped_range();
 
         let px = |x: u32, y: u32| -> [f32; 3] {
-            let i = ((y * N + x) * 4) as usize;
+            let i = ((y * out + x) * 4) as usize;
             [
                 data[i] as f32 / 255.0,
                 data[i + 1] as f32 / 255.0,
                 data[i + 2] as f32 / 255.0,
             ]
         };
-        // Sampled region: shifted left by exactly SHIFT, same row.
-        for y in [1u32, 7, 31, 62] {
-            for x in [SHIFT, SHIFT + 5, N - 1] {
+        // Texel t of the composite holds t/N at its centre, so a bilinear
+        // sample at source u reads u − 0.5/N. Output pixel x sits at dest
+        // u = (x+½)/out and samples source u − 0.25 (the translation). At
+        // out == N that is exactly 16 texels to the left; a vertical flip
+        // anywhere in the chain moves the sampled row and fails.
+        let quarter = out / 4;
+        for y in [1u32, out / 8, out / 2, out - 2] {
+            for x in [quarter + 1, quarter + 5, out - 1] {
                 let got = px(x, y);
-                let want_r = (x - SHIFT) as f32 / N as f32;
-                let want_g = y as f32 / N as f32;
+                let want_r = (x as f32 + 0.5) / out as f32 - 0.25 - 0.5 / N as f32;
+                let want_g = (y as f32 + 0.5) / out as f32 - 0.5 / N as f32;
                 assert!(
-                    (got[0] - want_r).abs() < 0.01,
+                    (got[0] - want_r).abs() < 0.015,
                     "({x},{y}) column: got r={} want {want_r}",
                     got[0]
                 );
                 assert!(
-                    (got[1] - want_g).abs() < 0.01,
+                    (got[1] - want_g).abs() < 0.015,
                     "({x},{y}) row (Y flip?): got g={} want {want_g}",
                     got[1]
                 );
             }
         }
         // Left quarter maps outside the composite ⇒ background, not a wrap.
-        for y in [0u32, 30, 63] {
-            for x in [0u32, 5, SHIFT - 2] {
+        for y in [0u32, out / 2, out - 1] {
+            for x in [0u32, quarter / 2, quarter - 2] {
                 let got = px(x, y);
                 assert!(
                     got[0] > 0.98 && got[1] > 0.98 && got[2] > 0.98,
@@ -1686,10 +1911,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<FinalPassUniforms>(), 48);
         assert_eq!(std::mem::offset_of!(FinalPassUniforms, background), 16);
         assert_eq!(std::mem::offset_of!(FinalPassUniforms, pattern), 32);
-        // The preview blit must never enable the warp (§3.4) — it binds a
-        // 1×1 dummy LUT and would index it out of bounds otherwise.
+        // Defaults never enable the warp: the per-leg preview groups bind a
+        // 1×1 dummy LUT (`render_preview` also clears the flag for them).
         assert_eq!(FinalPassUniforms::identity().adjust[3], 0.0);
         assert_eq!(FinalPassUniforms::new(0.5, 1.0, 0.0).adjust[3], 0.0);
+        assert_eq!(std::mem::size_of::<PreviewExtraUniforms>(), 16);
     }
 }
 
@@ -1834,6 +2060,307 @@ fn create_final_bind_group(
             },
         ],
     })
+}
+
+/// GPU thumbnail for the JPEG `preview` channel (D5): samples a composite
+/// into a small `Rgba8UnormSrgb` target with a 3×3 bilinear-tap box filter
+/// (`downscale.wgsl`), so the readback is ~230 KB of display-ready sRGB
+/// bytes instead of the full linear f16 composite.
+pub struct Downscaler {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// Reused while the size holds.
+    target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+}
+
+pub const THUMB_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+impl Downscaler {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("downscale bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("downscale shader"),
+            source: wgpu::ShaderSource::Wgsl(compose_output_shader(DOWNSCALE_WGSL).into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("downscale pipeline layout"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("downscale pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: THUMB_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("downscale sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            pipeline,
+            layout,
+            sampler,
+            target: None,
+        }
+    }
+
+    /// Encode `src` → a `width × height` thumbnail. Returns the target
+    /// texture (to copy out of).
+    pub fn encode(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        src: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> &wgpu::Texture {
+        if !matches!(self.target, Some((_, _, w, h)) if w == width && h == height) {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("preview thumbnail"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: THUMB_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.target = Some((texture, view, width, height));
+        }
+        let (texture, view, _, _) = self.target.as_ref().expect("target just ensured");
+        let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("downscale bind group"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("downscale pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        texture
+    }
+
+    pub fn gpu_bytes(&self) -> u64 {
+        self.target
+            .as_ref()
+            .map_or(0, |(t, ..)| crate::perf::texture_bytes(t))
+    }
+}
+
+/// The native preview's pipeline: the final-pass shader's `fs_preview`
+/// entry with group 0 = the final-pass layout (shared bind groups) and a
+/// preview-only group 1 (surface photo + `PreviewExtraUniforms`).
+fn create_preview_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    final_bgl: &wgpu::BindGroupLayout,
+) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
+    let extra_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("preview extra bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("preview shader"),
+        source: wgpu::ShaderSource::Wgsl(compose_output_shader(FINAL_PASS_WGSL).into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("preview pipeline layout"),
+        bind_group_layouts: &[final_bgl, &extra_bgl],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("preview pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_preview",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    (extra_bgl, pipeline)
+}
+
+fn create_preview_extra_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    photo_view: &wgpu::TextureView,
+    extra: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("preview extra bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(photo_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: extra.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+/// The surface photo as `Rgba8UnormSrgb` (sampling linearizes it).
+/// `rgba` is tightly packed, `width × height × 4` bytes.
+fn create_photo_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("surface photo"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        rgba,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
 }
 
 /// §5.14 — allocate the offset LUT at the output's exact size, plus its bake
