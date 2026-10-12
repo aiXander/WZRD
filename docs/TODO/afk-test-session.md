@@ -201,6 +201,17 @@ isolated GPU timing on the window path (B7). **Duration:** ≈ 20 min.
    pulses, the beat lamp and Lamp primitive look as before, the TopBar at a
    1100-pt-wide window doesn't overlap.
 
+6. **Refresh the perf baseline** — the machine must be otherwise idle and on
+   the charger (`uptime` load < ~3): `uv run scripts/perf_gate.py`. On
+   2026-10-12 (load ~5, other agents building) it failed only
+   `layers-heavy` gpu.total / composite.live **p95** (2.8 vs a 1.61 baseline)
+   — but the *original* binary read 2.0–2.5 there too, and p50 improved in
+   every interleaved A/B, so it's machine noise against a quiet-machine
+   baseline. If green apart from that and the NEW rows (`fabric-7`,
+   `preview-clips`): `uv run scripts/perf_gate.py --update-baseline --reason
+   "perf pass 2026-10-12: region scissor, per-plan uniforms, sampled design,
+   single clip decode, tick after acquire; new fabric-7 + preview-clips"`.
+
 **Results:** _(filled by the runner)_
 
 **After the run:** all pass → delete B6 and its runbook row. A fail →
