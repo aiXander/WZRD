@@ -19,11 +19,13 @@ hatch until the soak has run. Don't let it linger past the gig.
 
 ### Manual checks → AFK test session block B2
 
-The interaction and window-robustness checks (clicks and a dropdown over the
-image, resize / fullscreen / minimize / fast room switching, a TAKE
-crossfade on the monitor, an Align handle drag, a second display) run
-unattended as **block B2 of [afk-test-session.md](afk-test-session.md)**.
-Its Results decide whether this section can go.
+All interaction and window-robustness checks passed on 2026-10-12
+(clicks and a dropdown over the image, resize / fullscreen / minimize, fast
+room switching, Align handle drag) except **the TAKE crossfade on the
+PROGRAM monitor**: the projector faded, the monitor held the old look and
+jumped at the end. Fixed the same day (the LIVE preview now applies the
+fade mix), still to watch on screen — **step 8 of block B2 in
+[afk-test-session.md](afk-test-session.md)**; a pass retires this section.
 
 Not in B2 — needs Xander's eyes: Prepare BOTH vs. the old look; tune
 `BACKDROP_PARAMS.both.photo_weight` in `SurfaceMap.tsx` (0.15 now) if the
@@ -39,8 +41,9 @@ additive is the physics).
   `PreviewNsRefs` + the child-window `OcclusionProbe` use in
   `wzrd-app/src-tauri/src/engine.rs`, the `focus` re-push in
   `NativeSlot.tsx`, the `window` branch of `api/previewMode.ts`, and the
-  `WZRD_PREVIEW` env knob. Keep `preview_jpeg_demand` — Perform's
-  CUED·DESIGN cue monitor and the browser build still use the JPEG.
+  `WZRD_PREVIEW` env knob. Keep the JPEG `preview` channel (demanded via
+  `telemetry_demand`) — Perform's CUED·DESIGN cue monitor and the browser
+  build still use it.
 - Doc pass: drop the fallback from `render-engine.md` §1b and
   `operator-ui.md`, drop this plan's row from `CLAUDE.md`, move this file to
   `docs/finished/`.
@@ -68,12 +71,11 @@ composite renders whenever Perform is open. Xander's call after U7.
 - **U0** — `[profile.dev.package."*"] opt-level = 2` in both Cargo
   manifests (render-core itself opt-level 1 in the app). Clean dev build of
   the shell: 170 s.
-- **U1** — the shell's telemetry fan-in and the browser bridge subscribe to
-  every channel *except* `preview`; consumers hold a refcounted
-  `preview_jpeg_demand` (`usePreviewJpegDemand`). Finding: Perform's
-  CUED·DESIGN cue monitor (`DeckPanel.tsx`, shown on LIVE) is a real JPEG
-  consumer, so "no design render in Perform on LIVE" holds only with that
-  panel hidden; on DESIGN the JPEG is fully idle.
+- **U1** — the JPEG `preview` channel flows only on demand (since the
+  2026-10-12 perf pass: per-channel `telemetry_demand`, see
+  operator-ui.md). Perform's CUED·DESIGN cue monitor now samples ~1 Hz +
+  on design change (full rate only while hovered), and the engine renders
+  the design leg only on capture-due frames for a JPEG-only consumer.
 - **U2 spike — go.** wry 0.55 puts the `WKWebView` under
   `NSWindow.contentView` = `WryWebViewParent` (not flipped); a sibling
   `NSView` inserted below it works. `drawsBackground = NO` via KVC on the

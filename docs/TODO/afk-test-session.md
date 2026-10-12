@@ -1,6 +1,7 @@
 # AFK test session — every test that needs the screen, run in one sitting
 
-> **Status: open — nothing run yet.** Collects every test that needs the
+> **Status: open — first run 2026-10-12** (B1, B3, B4, B5 passed and are
+> retired; B2 has one step left; B6 added for the perf pass). Collects every test that needs the
 > engine window **visible, in front, and nobody touching the Mac**: fps gates,
 > screen-recorded flash checks, window screenshots. Xander says "I'm AFK",
 > one agent runs all blocks below in order, fills in each block's
@@ -48,8 +49,11 @@
    `osascript -e 'tell application "System Events" to get size of window 1 of process "Finder"'`
    prints a size, not an error (Finder needs a window open). Only Xander can
    grant it.
-7. Xander leaves. Wrap the whole run in `caffeinate -dims` so the display
-   never sleeps or locks.
+7. Xander leaves. Start **one** `caffeinate -dimsu -t 10800 &` for the whole
+   run — wrapping single commands isn't enough: on 2026-10-12 the screen
+   locked in a gap between commands and every later recording captured the
+   lock screen (nothing can unlock it unattended). Also check System
+   Settings → Lock Screen → "Turn display off" / screensaver are long.
 
 ## Runbook
 
@@ -60,7 +64,8 @@ point is one sitting.
 
 | Block | Owner | Duration | What it proves |
 |---|---|---|---|
-| B2 | native preview underlay | ≈ 12 min | clicks/dropdowns over the GPU image, resize/fullscreen/minimize/room-switch robustness, TAKE crossfade + Align drag on the image |
+| B2 | native preview underlay | ≈ 5 min | the PROGRAM monitor shows a TAKE crossfade in step with the projector (step 8; the rest passed 2026-10-12) |
+| B6 | perf pass 2026-10-12 | ≈ 20 min | fx + continuity gates, app GPU timing and idle CPU, and the UI animation changes on the engine after the perf pass |
 
 ---
 
@@ -88,7 +93,7 @@ recreates it); nothing else on ports 1420 / 9123 / 9124.
 ```bash
 B=test_results/underlay && mkdir -p $B
 # fixture-a state this block changes — restored in "After the run"
-cp projects/fixture-a/alignment.json projects/fixture-a/session.json $B/
+cp projects/fixture-a/alignment.json projects/fixture-a/session.json $B/ 2>/dev/null
 cp projects/fixture-a/.wzrd/design.scene.json $B/ 2>/dev/null || true
 swiftc -O scripts/cgmouse.swift -o $B/cgmouse && swiftc -O scripts/winbounds.swift -o $B/winbounds
 (cd wzrd-app && WZRD_SCENE=../projects/fixture-a/scene.json pnpm tauri dev > ../$B/app.log 2>&1 &)
@@ -115,100 +120,91 @@ centre, with y offset by the title bar: `y_screen = win_y + (win_h −
 innerHeight) + rect_y`. Get rects and `innerHeight` with `js`. Activate the
 app once first (`$B/winbounds $PID --front`) so clicks land on it.
 
-**Steps** — each one: act, then check; record pass/fail + a one-line note:
+**Steps.** Steps 1–7 and 9 passed on 2026-10-12 (region pick, dropdown
+over the image, click over the monitor, resize, fullscreen, minimize /
+restore, 20 fast room switches, Align handle drag) and are retired. Left:
 
-1. **Prepare region pick.** `room prepare`. Take a region's centroid from
-   `rpc pack.info` (`layers[].centroid`, **pack pixels** — divide by the
-   pack's width/height for uv; pick a region whose centroid lies inside its
-   own mask, e.g. a facade, not a thin strip), map it into the surface
-   canvas rect (`js "JSON.stringify(document.querySelector('canvas').getBoundingClientRect())"`),
-   `cgmouse click` there. Pass: `js "(await import('/src/state/store.ts')).useStore.getState().selectedLayerId"`
-   returns that region's id. `shot prepare_pick` — the hover label/selection
-   draws over the light.
-2. **Dropdown over the image.** `room perform`. Click the TopBar project
-   menu button (text `fixture-a`). Pass: `shot perform_menu` shows the menu
-   panel drawn *over* the monitor image (not cut off behind it). Press Esc /
-   click it again to close.
-3. **Click over the monitor.** In Perform, click the centre of the monitor.
-   Pass: no error in `$B/app.log`, the app stays responsive (`js "1+1"`
-   answers), keyboard focus is still the page (`js "document.hasFocus()"` →
-   true).
-4. **Resize.** `osascript -e 'tell application "System Events" to tell process "wzrd-app" to set size of window "WZRD" to {1200, 760}'`,
-   wait 1 s, `shot resize_small`; then `{1700, 1000}`, `shot resize_large`.
-   Pass: in both, the image fills exactly the monitor's black-framed slot —
-   no offset, no band, no image outside the frame. Repeat once in
-   `room align` (image = the dashed projector rect).
-5. **Fullscreen.** `...set value of attribute "AXFullScreen" of window "WZRD" to true`,
-   wait 2 s, `shot fullscreen`, then back to `false`. Pass as 4.
-6. **Minimize / restore.** `...set value of attribute "AXMinimized" of window "WZRD" to true`,
-   wait 3 s, then `false` (or `$B/winbounds $PID --front`), wait 2 s.
-   Pass: `$B/app.log` shows `native preview paused` then `presenting`; no
-   `perf_spike` ≥ 500 ms in that window (`rpc` can't read channels — use the
-   Debug room's "last spike", or subscribe to `perf_spike` like
-   `fx_gate.py`'s `Rpc.collect`). `shot restored` matches the slot.
-7. **Fast room switching.** 20× `osascript -e 'tell application "System Events" to keystroke "1" using command down'`
-   cycling ⌘1 / ⌘2 / ⌘3 with 150 ms gaps, ending on ⌘2 (Align). Pass: no
-   `perf_spike` ≥ 500 ms, no panic in the log, `shot rooms_end` shows the
-   program view inside the projector rect, and `rpc preview.snapshot '{"width":400}'`
-   answers with `"leg": "program"`.
 8. **TAKE crossfade on the monitor.** `room perform`, `rpc preview.setSource '{"source":"live"}'`.
-   Make design differ: mute its first binding —
-   `rpc param.set '{"binding":"<first binding id from scene.getState>","param":"@mute","value":1,"leg":"design"}'`.
-   Start a 60 fps recording of the monitor rect (`fx_gate.py`'s `record()`
-   recipe: avfoundation crop, 3 s) and, 0.5 s in,
-   `rpc promote '{"fade_ms":1500,"quantize":"now"}'`. Pass: the mean
-   brightness of the muted region's area falls gradually over ~90 frames,
-   not in one step (`ffmpeg -i rec.mp4 -vf "crop=…,signalstats" -f null -`
-   or sample frames and look).
-9. **Align handle drag.** `room align`. Find the TL handle (the first
-   `svg circle.cursor-grab`), `cgmouse drag` it 60 px right and 40 px down.
-   Pass: `rpc alignment.get` shows `corners[0]` moved by ≈ (60/fit, 40/fit)
-   projector px in uv, and `rpc preview.snapshot '{"width":600}'` (decode
-   `data_b64`) shows the image warped to match `shot align_drag`. Then
-   `rpc alignment.reset`.
+   Make design differ: `rpc param.set '{"binding":"facade_silk","param":"@mute","value":1,"leg":"design"}'`.
+   Keep the engine output window **uncovered** (a covered engine window
+   drops to ~28 fps): shrink/move the windows so the monitor slot and the
+   engine output don't overlap. Record the **whole screen** (avfoundation
+   `-i "1:none"`, `scale=1440:-2`, 4 s), and 1 s in
+   `rpc promote '{"fade_ms":1500,"quantize":"now"}'`. Crop the main-facade
+   area of both the monitor and the engine output and run `signalstats`.
+   Pass: the monitor's brightness ramps over ~90 frames **in step with the
+   engine output**, not one jump. 2026-10-12 result: FAIL — the engine
+   output faded correctly but the monitor held the old look for the whole
+   fade and jumped at its end (Perform's LIVE source never applied the fade
+   mix). Fixed the same day, untested on screen: the LIVE preview now pairs
+   live with design as its mix partner (`gpu.rs` `attach_preview`).
 10. **Second display** (only if `system_profiler SPDisplaysDataType | grep -c Resolution:` ≥ 2):
-    move the window there (`set position of window "WZRD" to {<x on display 2>, 100}`),
-    `shot display2`. Pass: image sharp and in its slot (contentsScale follows
-    the display). One display → record "skipped".
+    move the window there, `shot display2`. Pass: image sharp and in its
+    slot. 2026-10-12: skipped (one display).
 
-Also record: `preview.present` p95 from the Debug room's profiler (or a
-`perf` subscription) with Perform open.
+Traps learned on 2026-10-12: the first synthetic click after activating the
+app only makes the main window key (the engine output window had focus) —
+click once on empty chrome first; `alignment.json` may not exist in
+fixture-a (copy with `2>/dev/null`, and delete the engine-written one when
+restoring); `perf_spike` needs `telemetry.subscribe` (method name), not
+`subscribe`.
 
 **Not covered here — needs Xander's eyes (≈ 1 min next time he's at the
 Mac):** Prepare's BOTH backdrop vs. the old look; the knob is
 `BACKDROP_PARAMS.both.photo_weight` in `wzrd-app/src/components/SurfaceMap.tsx`
 (0.15 now). And the gig-length soak (U7) is a rehearsal, not a block.
 
-**Results:** _(fill in: commit, then one row per step)_
-
-| Step | Pass? | Note / screenshot |
-|---|---|---|
-| 1 Prepare pick | | |
-| 2 Dropdown over image | | |
-| 3 Click over monitor | | |
-| 4 Resize | | |
-| 5 Fullscreen | | |
-| 6 Minimize / restore | | |
-| 7 Room switching | | |
-| 8 TAKE crossfade | | |
-| 9 Align drag | | |
-| 10 Second display | | |
-| `preview.present` p95 | — | |
-
-**After the run:**
-
-1. Quit the app (`kill $PID`; the Vite server too), then restore fixture-a:
-   `cp $B/alignment.json $B/session.json projects/fixture-a/` and
-   `cp $B/design.scene.json projects/fixture-a/.wzrd/` if it was saved.
-2. Commit this file's Results by path (screenshots stay in `test_results/`,
-   gitignored).
-3. All pass: delete the "Manual checks" section of
-   [native-preview-underlay.md](native-preview-underlay.md) (keep the BOTH
-   tuning line) and delete B2 from this file. A failure: fix it if it's
-   small and re-run that step next session; otherwise leave B2 with only the
-   failing steps and describe the failure under the plan's "Manual checks".
+**After the run:** quit the app and Vite, restore fixture-a, commit the
+result here. Step 8 passes → delete the "Manual checks" section of
+[native-preview-underlay.md](native-preview-underlay.md) (keep the BOTH
+tuning line) and delete B2 from this file.
 
 ---
+
+### B6 — perf pass 2026-10-12: re-verify on screen
+
+**Owner:** the 2026-10-12 perf pass (no plan file; current state in
+[../reference/render-engine.md](../reference/render-engine.md) §2.4 "Output
+bounds", §2.6 design demand, §2.9–§2.10, and
+[../reference/operator-ui.md](../reference/operator-ui.md) telemetry demand).
+It landed after the screen locked, so nothing of it has been watched on a
+real window: region scissor on every layer pass, a per-plan uniform buffer,
+the design leg sampled for the JPEG stream, parallel clip opens + one decode
+per clip frame, batched demand-gated app telemetry, a sampled cue monitor,
+opacity-only glow/lamp animations, and (if P6 landed) the tick moved after
+`acquire` + isolated GPU timing on the window path. **Duration:** ≈ 20 min.
+
+**Preconditions:** release build of current main; `projects/fx-bench`;
+`projects/fixture-a/perf-clips.scene.json`; nothing on 1420/9123/9124/9177.
+
+**Commands / checks** (repo root, inside `caffeinate -dims`):
+
+1. `uv run python scripts/fx_gate.py run --bench projects/fx-bench` — all 15
+   effects: live p95 ≤ 17.5 ms, flash pass, and look at
+   `test_results/fx_gate/rec_<fx>.mp4` frames for anything cut off at a
+   region edge (the scissor clips output to each region's mask box; bit
+   identity is unit-tested, this is the eyes-on check). edgeGlow's
+   live+design `headroom_min` was 0.35 before — expect higher.
+2. `uv run python scripts/continuity_gate.py --bench projects/fx-bench` —
+   status pass (clip opens moved to worker threads, first frame now arrives
+   via the staging ring).
+3. Re-run the former B3 snapshot (git history of this file, commit
+   4c85335^): in the app, `passes.preview` should now read ≲ 0.3 ms and
+   `gpu.total` p95 below the 16.7 ms budget at 60 fps (fails today: 29.8).
+4. App idle cost in the show posture (Perform, LIVE, engine window in
+   front): per-process CPU via `top -l 7 -s 5 -pid <wzrd-app> -pid
+   <WebContent…> -pid <WindowServer>`. 2026-10-12 on a loaded machine:
+   before wzrd-app 18.9 % / WebContent 8.7 %, after P4 15.2 % / 3.8 %.
+   Measure both again on a quiet machine.
+5. Screenshots to eyeball (Xander or the runner): CUED·DESIGN thumbnail
+   refreshes (~1 Hz, and at full rate while hovered), the armed TAKE glow
+   pulses, the beat lamp and Lamp primitive look as before, the TopBar at a
+   1100-pt-wide window doesn't overlap.
+
+**Results:** _(filled by the runner)_
+
+**After the run:** all pass → delete B6 and its runbook row. A fail →
+describe it in render-engine.md §4 and leave the failing check here.
 
 ## Block template (copy, fill, append above this section, add a runbook row)
 
