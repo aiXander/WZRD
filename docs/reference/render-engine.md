@@ -611,12 +611,36 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   immutable except via `promote`.
 - **Both legs tick every frame** (shared transport/audio bus — bar-quantized
   promotes land in sync; §5.2 picks are stateless hashes, so the legs pick
-  identically). Design's **render passes are demand-gated**: they run only
-  when the native preview shows design (deck toggle on DESIGN, or a slot
-  pinning `source: design` like Prepare — never the program view), ≥1
-  `preview` subscriber exists, or a promote is pending/ramping. An idle
-  design leg costs zero GPU — in the app too, since the shell stopped
-  subscribing to `preview` by default (2026-10-12).
+  identically). Design's **render passes are demand-gated** (`Core::
+  design_demand`, evaluated *before* the tick): every frame when the native
+  preview shows design (deck toggle on DESIGN, or a slot pinning
+  `source: design` like Prepare — never the program view) or a promote is
+  pending/ramping; when ≥1 `preview` subscriber is the **only** consumer,
+  only on JPEG capture frames (`PreviewSampler::capture_due`: interval up,
+  nothing in flight — ~15 Hz), unless the design plan draws a clip
+  (`PassPlan::draws_clips`), which then renders every frame (a ~4-frame
+  playhead stride makes the decoders' prefetch miss → stale frames). A
+  stream capture only kicks off on a frame whose source composite was
+  rendered (`capture_preview_jpeg(subscribed, fresh)`). An unrendered leg
+  still ticks (clock, picks, faders, clip readiness) but skips its uniform
+  upload and `after_submit`. An idle design leg costs zero GPU — in the app
+  too, since the shell stopped subscribing to `preview` by default
+  (2026-10-12).
+- **Per-plan uniform buffer.** A `PassPlan` owns one uniform buffer: slot 0
+  = `FrameStateGpu`, slot `1+k` = pass k's `LayerParamsGpu`, slots
+  `min_uniform_buffer_offset_alignment` (256) apart; each pass's bind group
+  points at its slot (built once at plan build). `tick` fills a reused CPU
+  `Vec<u8>` (drawing passes only — picked-out / opacity-0 passes are
+  skipped and rewritten the tick they draw again) and uploads it with
+  **one `write_buffer` per rendered leg**: wgpu-core 22 allocates a staging
+  buffer per `write_buffer` call, so per-pass writes cost O(passes)
+  allocations (40-pass `layers-heavy`: `tick.live` 0.28 → 0.05 ms p95).
+  The final-pass and native-preview uniforms are likewise re-uploaded only
+  when they change (`Core::last_final_uniforms` / `last_preview_uniforms`).
+- **The native preview's LIVE view shows the TAKE.** Its bind group pairs
+  the live composite with design as the mix partner and `preview_uniforms`
+  passes the promote `mix`, so Perform's monitor crossfades with the wall
+  (mix 0 outside a promote → live only; same shader, no extra pass).
 - **Promote = crossfade, then pointer swap.** The final pass
   samples both composites and lerps by a `mix` uniform ramped over
   `fade_ms` (wall time). On completion live **adopts design's already-built
@@ -1121,7 +1145,8 @@ pack and `image.clip` paths made absolute; never `session.json` or
 | `take-crossfade` | clip-set swap TAKE every 2 s (scene.load → promote 400 ms) | paced |
 | `warp-64` | 64-handle alignment + `alignment.set` every 4 frames (rebake) | uncapped |
 | `edit-churn` | 300 × `effect.upsert` + 300 × `scene.load`, single leg: resource counts flat, rebuild ms | uncapped |
-| `preview-remote` | a `preview` subscriber (JPEG readback + design leg awake) | uncapped |
+| `preview-remote` | a `preview` subscriber as design's only consumer (JPEG readback; design renders on capture frames only) | uncapped |
+| `preview-clips` | `clips-7` + a `preview` subscriber: a clip-drawing design leg stays per-frame, **stale = 0**, JPEG ≈ 15 Hz | paced |
 | `knob-latency` | `param.set` at 100 Hz → knob→submit p95 | paced |
 | `capacity-clips` | info only: largest N clip bindings with headroom ≥ 0 and no stale | uncapped |
 
@@ -1198,7 +1223,11 @@ While occluded it never touches the swapchain — `PassPlan::render_offscreen`
 renders the composite only (preview + telemetry stay live) at a self-paced
 ~30 Hz, driven from `about_to_wait` because macOS stops delivering
 `RedrawRequested` to occluded windows. On un-occlusion, normal
-present resumes. **Any future render-loop refactor must keep the property:
+present resumes. Nothing presents the live composite while occluded, so
+`render_offscreen_frame` renders it only for a consumer
+(`Core::live_demand_occluded`: native preview on LIVE or the program view,
+or a headless JPEG stream); otherwise only ticks. Its clips idle meanwhile
+and wake (1–2 transparent frames) on the first visible frame. **Any future render-loop refactor must keep the property:
 nothing on the render thread may block on the swapchain of a window that
 might be occluded or throttled.**
 
