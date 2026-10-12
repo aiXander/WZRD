@@ -7,6 +7,7 @@
 // another venue. The engine owns `alignment.json` and writes it on its own
 // debounce — there is no save button on purpose.
 
+import { nativeUnderlay } from '../api/previewMode';
 import { useEffect } from 'react';
 import { useStore } from '../state/store';
 import { WarpCanvas } from '../components/WarpCanvas';
@@ -55,7 +56,7 @@ export function Align() {
 
   return (
     <div className="flex h-full min-h-0 gap-2 p-2">
-      <Panel className="flex-1 overflow-hidden" bodyClassName="min-h-0 flex flex-col">
+      <Panel hole={nativeUnderlay()} className="flex-1 overflow-hidden" bodyClassName="min-h-0 flex flex-col">
         {error && (
           <div className="flex items-start gap-2 border-b border-bad/40 bg-bad/10 px-3 py-1.5 text-[11px] text-fg">
             {/* The engine rejected the edit and kept rendering the previous

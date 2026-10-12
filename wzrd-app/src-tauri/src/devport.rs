@@ -10,6 +10,14 @@
 //! Every command runs on the main thread, exactly like a sync Tauri
 //! command (a project switch attaches GPU surfaces). Bound to loopback on
 //! `WZRD_DEVPORT` (default 9124); never compiled into a release build.
+//!
+//! Plus one agent hook with no Tauri twin: `POST /cmd/webview_eval {js}`
+//! runs a script in the app's own webview (switch rooms, click a toggle)
+//! so an agent can drive the native-preview rooms without taking the
+//! operator's keyboard focus. Fire-and-forget: no return value — to read
+//! something back, have the script POST it to `/__shell/cmd/debug_log
+//! {msg}`, which lands in the app log (`[webview] …`). Pair it with the
+//! engine's `preview.snapshot` to see the result.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -136,6 +144,16 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "clips_list" => clips::clips_list(st()),
         "clip_thumb" => ok(clips::clip_thumb(st(), s("path")?)),
         "clip_file" => ok(clips::clip_file(st(), s("path")?, opt("region"))),
+        "debug_log" => {
+            log::info!("[webview] {}", s("msg")?);
+            Ok(Value::Null)
+        }
+        "webview_eval" => app
+            .get_webview_window("main")
+            .ok_or_else(|| "main window missing".to_string())?
+            .eval(s("js")?)
+            .map(|()| Value::Null)
+            .map_err(|e| format!("{e}")),
         other => Err(format!("no dev shell handler for {other}")),
     }
 }

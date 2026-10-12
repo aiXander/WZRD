@@ -28,7 +28,7 @@ export function Perform() {
         {/* Monitor */}
         <section
           className={
-            'relative min-h-0 rounded-lg border-2 bg-black overflow-hidden flex flex-col ' +
+            'relative min-h-0 rounded-lg border-2 overflow-hidden flex flex-col ' +
             (leg === 'live' ? 'border-live/80' : 'border-design/60')
           }
         >

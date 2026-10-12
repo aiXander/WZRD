@@ -18,6 +18,8 @@ mod devport;
 mod engine;
 mod projects;
 mod rpc;
+#[cfg(target_os = "macos")]
+mod underlay;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -352,7 +354,9 @@ pub fn run() {
             rpc::effect_upsert,
             rpc::effect_remove,
             rpc::last_payload,
-            rpc::preview_set_bounds,
+            rpc::preview_set_slot,
+            rpc::preview_mode,
+            rpc::preview_jpeg_demand,
             rpc::list_effects,
             rpc::read_effect,
             rpc::read_scene_file,

@@ -337,23 +337,34 @@ pub fn last_payload(state: State<AppState>, channel: String) -> Option<Value> {
     state.engine().ok()?.last_payload(&channel)
 }
 
-/// Collapse Step 3 — position the native preview window over the React
-/// layout's preview slot (CSS px, viewport-relative), or hide it.
+/// Place the native preview over a `<NativeSlot>` rect (CSS px,
+/// viewport-relative) with what it should show, or hide it.
 #[tauri::command]
-pub fn preview_set_bounds(
+pub fn preview_set_slot(
     app: tauri::AppHandle,
     state: State<AppState>,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    visible: bool,
+    slot: crate::engine::PreviewSlot,
 ) -> Result<(), String> {
     let engine = state.engine().ok();
     state
         .windows
-        .set_preview_bounds(&app, engine.as_deref(), x, y, width, height, visible)
+        .set_preview_slot(&app, engine.as_deref(), &slot)
         .map_err(|e| format!("{e:#}"))
+}
+
+/// `"underlay"` (HTML draws over the native preview; every room uses it)
+/// or `"window"` (`WZRD_PREVIEW=window`: Perform only, JPEG elsewhere).
+#[tauri::command]
+pub fn preview_mode(state: State<AppState>) -> &'static str {
+    state.windows.preview_mode()
+}
+
+/// Refcounted demand for the JPEG `preview` channel: a webview consumer
+/// calls this with `true` on mount and `false` on unmount. The shell only
+/// subscribes to `preview` while at least one consumer is mounted.
+#[tauri::command]
+pub fn preview_jpeg_demand(state: State<AppState>, on: bool) {
+    state.windows.preview_jpeg_demand(on);
 }
 
 /// Convenience for the front-end: read the project-local effects directory

@@ -79,6 +79,18 @@ const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) =>
 const listeners = new Map<string, Set<Handler>>();
 const sticky = new Map<string, unknown>();
 let opening: Promise<void> | null = null;
+/** Every channel the engine offers (from `telemetry.channels`). */
+let allChannels: string[] = [];
+/** Mounted consumers of the JPEG `preview` channel (`preview_jpeg_demand`). */
+let jpegDemand = 0;
+
+/** All channels except `preview`, which joins only while a consumer wants
+ *  it — the engine gates its JPEG readback (and the design leg) on there
+ *  being a `preview` subscriber. `telemetry.subscribe` replaces the set. */
+function resubscribe() {
+  const channels = allChannels.filter((c) => c !== 'preview' || jpegDemand > 0);
+  return send('telemetry.subscribe', { channels });
+}
 
 function emit(event: string, payload: unknown) {
   listeners.get(event)?.forEach((h) => h(payload));
@@ -108,9 +120,10 @@ function ensureOpen(): Promise<void> {
       // Declare ourselves the operator seat, then take every channel.
       send('hello', { actor: 'ui' }).catch(() => {});
       send('telemetry.channels', {})
-        .then((r: any) =>
-          send('telemetry.subscribe', { channels: r?.channels ?? r ?? [] })
-        )
+        .then((r: any) => {
+          allChannels = r?.channels ?? r ?? [];
+          return resubscribe();
+        })
         .catch((e) => console.warn('[bridge] subscribe', e));
       emit('engine:status', { running: true, ws_addr: WS_URL });
     };
@@ -150,7 +163,15 @@ export function bridgeCall<T>(cmd: string, args: Record<string, any>): Promise<T
   if (cmd === 'last_payload') {
     return ensureOpen().then(() => (sticky.get(args.channel) ?? null) as T);
   }
-  if (cmd === 'preview_set_bounds') return Promise.resolve(undefined as T);
+  if (cmd === 'preview_set_slot') return Promise.resolve(undefined as T);
+  if (cmd === 'preview_jpeg_demand') {
+    const was = jpegDemand > 0;
+    jpegDemand = Math.max(0, jpegDemand + (args.on ? 1 : -1));
+    if (was === jpegDemand > 0 || !connected || !allChannels.length) {
+      return Promise.resolve(undefined as T);
+    }
+    return resubscribe().then(() => undefined as T);
+  }
   if (SHELL_COMMANDS.has(cmd)) {
     return fetch(`/__shell/cmd/${cmd}`, {
       method: 'POST',

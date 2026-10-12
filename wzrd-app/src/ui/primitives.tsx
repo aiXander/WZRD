@@ -135,15 +135,21 @@ export function Panel({
   children,
   className = '',
   bodyClassName = '',
+  hole = false,
 }: {
   title?: React.ReactNode;
   right?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
   bodyClassName?: string;
+  /** A `<NativeSlot>` lives inside: paint no background, or it would hide
+   *  the native preview under the page. */
+  hole?: boolean;
 }) {
   return (
-    <section className={'flex flex-col min-h-0 min-w-0 bg-panel border border-line rounded-lg ' + className}>
+    <section
+      className={'flex flex-col min-h-0 min-w-0 border border-line rounded-lg ' + (hole ? '' : 'bg-panel ') + className}
+    >
       {(title || right) && (
         <header className="flex items-center gap-2 h-8 px-3 border-b border-line shrink-0">
           <div className="label flex items-center gap-2 min-w-0 truncate">{title}</div>

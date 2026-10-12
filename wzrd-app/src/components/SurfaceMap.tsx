@@ -1,20 +1,38 @@
 // The surface map — the photographed surface with its named regions, the
 // primary visual of the Prepare room (spec §1: "the surface map is primary").
 //
-// Backdrop: PHOTO (the pack's surface.png), LIGHT (the design composite, the
-// ~15 fps JPEG feed) or BOTH (light over a dimmed photo — see exactly where
-// light lands on the real thing). Regions paint in their own colour; the
-// selected layer's regions glow, the hovered region gets a floating label.
+// Backdrop: PHOTO (the pack's surface.png), LIGHT (the design composite) or
+// BOTH (light added onto a dimmed photo — see exactly where light lands on
+// the real thing). Regions paint in their own colour; the selected layer's
+// regions glow, the hovered region gets a floating label.
+//
+// With the native underlay the engine composites the backdrop (full-rate,
+// lossless — `BACKDROP_PARAMS`) into a `<NativeSlot>` under the page, and
+// the canvas only draws the region overlays, cleared transparent. Without it
+// (browser, `WZRD_PREVIEW=window`) the canvas paints the photo and the
+// ~15 fps JPEG feed itself.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { nativeUnderlay } from '../api/previewMode';
 import { useAspectFit } from '../ui/useAspectFit';
-import type { PackInfo } from '../api/ipc';
+import { usePreviewJpegDemand } from '../ui/usePreviewJpegDemand';
+import type { PackInfo, PreviewParams } from '../api/ipc';
 import { getMask, getSurface, pickRegion, useMaskVersion } from '../state/masks';
 import { regionName, regionsOf, selectorCovers, type Binding } from '../state/scene';
 import { useStore } from '../state/store';
 import { Seg } from '../ui/primitives';
+import { NativeSlot } from './NativeSlot';
 
 type Backdrop = 'photo' | 'light' | 'both';
+
+/** The engine-side backdrop (linear-light additive, D2). BOTH's photo weight
+ *  is linear: 0.15 ≈ 0.42^2.2, the old canvas's 0.42 sRGB alpha — 0.42 in
+ *  linear light read ~68% bright and washed the light out. */
+const BACKDROP_PARAMS: Record<Backdrop, PreviewParams> = {
+  photo: { source: 'design', photo_weight: 1, light_weight: 0 },
+  light: { source: 'design', photo_weight: 0, light_weight: 1 },
+  both: { source: 'design', photo_weight: 0.15, light_weight: 1 },
+};
 
 export function SurfaceMap({
   bindings,
@@ -38,11 +56,12 @@ export function SurfaceMap({
   const [backdrop, setBackdrop] = useState<Backdrop>('both');
   const [overlays, setOverlays] = useState(true);
   const [img, setImg] = useState<HTMLImageElement | null>(null);
-
+  const native = nativeUnderlay();
+  usePreviewJpegDemand(!native && backdrop !== 'photo');
 
   // Decode JPEG frames off the paint path.
   useEffect(() => {
-    if (!preview || backdrop === 'photo') return;
+    if (native || !preview || backdrop === 'photo') return;
     let cancelled = false;
     const im = new Image();
     im.src = `data:image/jpeg;base64,${preview.data_b64}`;
@@ -52,7 +71,7 @@ export function SurfaceMap({
     return () => {
       cancelled = true;
     };
-  }, [preview, backdrop]);
+  }, [native, preview, backdrop]);
 
   // Fit the canvas to the slot at pack aspect.
   const box = useAspectFit(wrap, pack ? pack.width / pack.height : 4 / 3);
@@ -75,14 +94,19 @@ export function SurfaceMap({
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, pack.width, pack.height);
-    const photo = getSurface();
+    // Underlay: the engine draws the backdrop beneath; keep the canvas a hole.
+    const photo = native ? null : getSurface();
+    if (native) {
+      ctx.clearRect(0, 0, pack.width, pack.height);
+    } else {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, pack.width, pack.height);
+    }
     if (photo && backdrop !== 'light') {
       ctx.globalAlpha = backdrop === 'both' ? 0.42 : 1;
       ctx.drawImage(photo, 0, 0, pack.width, pack.height);
     }
-    if (img && backdrop !== 'photo') {
+    if (!native && img && backdrop !== 'photo') {
       // Light adds onto the surface — exactly what the projector does.
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = backdrop === 'both' ? 'lighter' : 'source-over';
@@ -104,7 +128,7 @@ export function SurfaceMap({
       }
       ctx.globalAlpha = 1;
     }
-  }, [pack, img, backdrop, overlays, sel, hot, selectedRegion, maskV]);
+  }, [native, pack, img, backdrop, overlays, sel, hot, selectedRegion, maskV]);
 
   if (!pack) return <div className="p-4 text-[12px] text-fg3">Waiting for the layer pack…</div>;
 
@@ -145,8 +169,11 @@ export function SurfaceMap({
           {pack.layers.length} regions · {pack.width}×{pack.height}
         </span>
       </div>
-      <div ref={setWrap} className="relative flex-1 min-h-0 flex items-center justify-center p-3 dim-grid">
-        <div className="relative" style={{ width: box.w, height: box.h }}>
+      <div
+        ref={setWrap}
+        className={'relative flex-1 min-h-0 flex items-center justify-center p-3 ' + (native ? '' : 'dim-grid')}
+      >
+        <NativeSlot params={BACKDROP_PARAMS[backdrop]} className="relative" style={{ width: box.w, height: box.h }}>
           <canvas
             ref={canvasRef}
             className={'w-full h-full rounded-md ring-1 ring-line ' + (armed ? 'cursor-crosshair' : 'cursor-pointer')}
@@ -185,7 +212,7 @@ export function SurfaceMap({
               Click a region to give it a new layer
             </div>
           )}
-        </div>
+        </NativeSlot>
       </div>
     </div>
   );

@@ -331,16 +331,45 @@ export const writeSceneFile = (contents: string) =>
 export const readMaskPng = (maskPath: string) =>
   invoke<string>('read_mask_png', { maskPath });
 /**
- * Collapse Step 3 — position the native (lossless, full-rate) preview
- * window over a measured layout slot, or hide it. CSS px, viewport-relative.
+ * Refcounted demand for the JPEG `preview` channel (true on mount, false on
+ * unmount). The app only receives `preview` frames while a consumer is
+ * mounted — an always-on subscription kept the engine's JPEG readback and
+ * design-leg render running in every room. Use `usePreviewJpegDemand`.
  */
-export const previewSetBounds = (
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  visible: boolean
-) => invoke<void>('preview_set_bounds', { x, y, width, height, visible });
+export const previewJpegDemand = (on: boolean) =>
+  invoke<void>('preview_jpeg_demand', { on });
+/**
+ * What the native preview shows (engine `PreviewParams`). Omitted fields take
+ * Perform's defaults: the deck-toggle leg, no warp, no photo, no dim.
+ */
+export type PreviewParams = {
+  /** Which composite; omitted/null = follow the deck toggle. */
+  source?: 'live' | 'design' | null;
+  /** The exact projector final pass: promote mix, live masters, real warp, test pattern. */
+  program?: boolean;
+  /** Final multiply, 1 = off. */
+  dim?: number;
+  /** Surface photo added under the light (linear, additive), 0 = off. */
+  photo_weight?: number;
+  /** The composite itself, 0 = photo only. */
+  light_weight?: number;
+};
+/**
+ * Place the native (lossless, full-rate) preview over a measured layout slot
+ * with what it should show, or hide it. CSS px, viewport-relative. Use
+ * `<NativeSlot>` rather than calling this directly.
+ */
+export const previewSetSlot = (slot: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+  params?: PreviewParams;
+}) => invoke<void>('preview_set_slot', { slot: { id: 'main', ...slot } });
+/** `underlay`: the preview sits under a transparent page, HTML draws over it.
+ *  `window`: `WZRD_PREVIEW=window`, the old child window above the page. */
+export const previewModeGet = () => invoke<'underlay' | 'window'>('preview_mode');
 
 // ---------- projects (A1: re-root the in-process engine) ----------
 

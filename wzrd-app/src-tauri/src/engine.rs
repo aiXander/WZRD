@@ -31,13 +31,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use render_core::core::Core;
+use render_core::core::{Core, PreviewParams};
 use render_core::rpc::{self, EngineCommand, JsonRpcRequest, RpcContext};
 use render_core::telemetry::ALL_CHANNELS;
 use render_core::wgpu;
@@ -66,6 +66,7 @@ const QUEUED_METHODS: &[&str] = &[
     "promote",
     "pull",
     "preview.setSource",
+    "preview.snapshot",
     "identity.setGroups",
 ];
 
@@ -82,14 +83,55 @@ pub struct TelemetryFrameOut {
     pub payload: Value,
 }
 
-/// Host → render-thread messages for the native preview surface (collapse
-/// Step 3). Sent by `preview_set_bounds`; drained at frame boundary.
+/// Host → render-thread messages for the native preview surface. Sent by
+/// `preview_set_slot`; drained at frame boundary.
 enum PreviewCmd {
-    /// New physical surface size + whether the React slot wants it shown.
-    Config {
-        width: u32,
-        height: u32,
-        visible: bool,
+    Config(PreviewCfg),
+}
+
+/// One preview-slot state as the render thread needs it: physical drawable
+/// size, whether the React slot wants it shown, and what to show.
+#[derive(Clone, Copy)]
+struct PreviewCfg {
+    width: u32,
+    height: u32,
+    visible: bool,
+    params: PreviewParams,
+}
+
+/// A `<NativeSlot>` rect from the webview (docs/TODO/native-preview-
+/// underlay.md §4.1). CSS px, viewport-relative (== AppKit points).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreviewSlot {
+    /// Slot id — only `"main"` exists today (rooms are exclusive); keyed so
+    /// a second monitor is additive later.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub id: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub visible: bool,
+    /// Omitted → Perform defaults (the deck-toggle leg, no warp, no photo).
+    #[serde(default)]
+    pub params: Option<PreviewParams>,
+}
+
+/// Where the native preview lives.
+enum PreviewHost {
+    /// Default on macOS: an `NSView` under a transparent webview, so HTML
+    /// draws over the image (`underlay.rs`).
+    #[cfg(target_os = "macos")]
+    Underlay(crate::underlay::PreviewView),
+    /// `WZRD_PREVIEW=window` (and every non-macOS build): the collapse-
+    /// Step-3 borderless child window ordered *above* the webview. Nothing
+    /// can draw over it, so Prepare/Align fall back to the JPEG channel.
+    /// Kept as the stage escape hatch until the underlay has soaked (D6).
+    Window {
+        window: tauri::Window,
+        #[cfg(target_os = "macos")]
+        ns: Option<PreviewNsRefs>,
     },
 }
 
@@ -117,11 +159,11 @@ struct EngineInner {
     preview_tx: crossbeam_channel::Sender<PreviewCmd>,
 }
 
-/// The engine output window + native preview window, created once per app
+/// The engine output window + native preview host, created once per app
 /// and reused by every engine instance (A1: project switch / restart).
 pub struct EngineWindows {
     engine: tauri::Window,
-    preview: tauri::Window,
+    preview: PreviewHost,
     /// Shared with whichever render thread is current; a fresh engine
     /// starts from `last`.
     sizes: Arc<SizeState>,
@@ -130,14 +172,17 @@ pub struct EngineWindows {
     current_stop: Mutex<Arc<AtomicBool>>,
     /// Last preview-slot config from the webview, replayed into a fresh
     /// engine so the native preview survives a restart without a re-layout.
-    preview_cfg: Mutex<Option<(u32, u32, bool)>>,
+    preview_cfg: Mutex<Option<PreviewCfg>>,
     /// The engine window is sized to the first pack that boots on it; later
     /// engines keep whatever size/placement the operator gave it.
     sized: AtomicBool,
-    /// AppKit handles for preview placement + child re-attach (main thread
-    /// only — see `PreviewNsRefs`).
-    #[cfg(target_os = "macos")]
-    preview_ns: Option<PreviewNsRefs>,
+    /// Webview consumers of the JPEG `preview` channel currently mounted
+    /// (`preview_jpeg_demand`). The telemetry fan-in subscribes to
+    /// `preview` only while this is > 0 — an always-on subscription kept
+    /// the JPEG readback *and* the design leg running in every room.
+    /// Lives here (not per engine) because the consumers stay mounted
+    /// across an engine restart.
+    jpeg_demand: Arc<AtomicUsize>,
 }
 
 /// Size updates flow window-event thread → render thread through shared
@@ -245,15 +290,18 @@ unsafe impl Send for OcclusionProbe {}
 impl OcclusionProbe {
     fn new(window: &tauri::Window) -> Option<Self> {
         match window.ns_window() {
-            Ok(ptr) if !ptr.is_null() => Some(Self {
-                ns_window: ptr.cast(),
-            }),
-            Ok(_) => None,
+            Ok(ptr) => Self::from_ptr(ptr),
             Err(e) => {
                 log::warn!("occlusion probe unavailable (ns_window: {e}); assuming visible");
                 None
             }
         }
+    }
+
+    fn from_ptr(ptr: *mut std::ffi::c_void) -> Option<Self> {
+        (!ptr.is_null()).then(|| Self {
+            ns_window: ptr.cast(),
+        })
     }
 
     /// `NSWindowOcclusionStateVisible = 1 << 1`. A cheap property read —
@@ -271,12 +319,7 @@ impl EngineWindows {
     /// pack that boots on it.
     pub fn create(app: &AppHandle) -> Result<Arc<Self>> {
         let engine = build_engine_window(app).context("creating engine output window")?;
-        // Native operator-preview window (collapse Step 3): borderless
-        // child window of the main webview window, positioned by the React
-        // layout over its preview slot. Hidden until the slot mounts.
-        let preview = build_preview_window(app).context("creating preview window")?;
-        #[cfg(target_os = "macos")]
-        let preview_ns = preview_ns_refs(app, &preview);
+        let preview = build_preview_host(app)?;
         let size = engine.inner_size().context("querying engine window size")?;
         let sizes = Arc::new(SizeState::default());
         *sizes.last.lock().expect("size lock") = (size.width.max(1), size.height.max(1));
@@ -288,8 +331,7 @@ impl EngineWindows {
             current_stop: Mutex::new(Arc::new(AtomicBool::new(false))),
             preview_cfg: Mutex::new(None),
             sized: AtomicBool::new(false),
-            #[cfg(target_os = "macos")]
-            preview_ns,
+            jpeg_demand: Arc::new(AtomicUsize::new(0)),
         });
 
         // Engine-window events: sizes flow to the render thread; closing the
@@ -325,75 +367,129 @@ impl EngineWindows {
         Ok(windows)
     }
 
-    /// Position the native preview window over the React layout's preview
-    /// slot (CSS px, webview-viewport-relative) — or hide it. Called from
-    /// the `preview_set_bounds` Tauri command on layout/visibility changes.
-    /// The preview window is a child of the main window, so window drags
-    /// track automatically; only layout-relative changes come through here.
-    /// The surface config is remembered (replayed into a restarted engine)
-    /// and forwarded to the running engine, if any.
-    pub fn set_preview_bounds(
+    /// Refcounted demand for the JPEG `preview` channel from the webview
+    /// (Prepare's light backdrop, Align's underlay). The fan-in picks the
+    /// change up within one recv timeout.
+    pub fn preview_jpeg_demand(&self, on: bool) {
+        if on {
+            self.jpeg_demand.fetch_add(1, Ordering::Relaxed);
+        } else {
+            let _ = self
+                .jpeg_demand
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+        }
+    }
+
+    /// `"underlay"` (native view under a transparent webview — HTML draws
+    /// over it, every room uses it) or `"window"` (the child window above
+    /// the webview — Perform only; Prepare/Align use the JPEG channel).
+    pub fn preview_mode(&self) -> &'static str {
+        match self.preview {
+            #[cfg(target_os = "macos")]
+            PreviewHost::Underlay(_) => "underlay",
+            PreviewHost::Window { .. } => "window",
+        }
+    }
+
+    /// Place the native preview over the webview's `<NativeSlot>` rect (or
+    /// hide it) and hand the engine the slot's physical size + params. The
+    /// config is remembered (replayed into a restarted engine) and forwarded
+    /// to the running engine, if any.
+    ///
+    /// Ordering upholds §3.1 for the preview swapchain: on show the view is
+    /// placed and unhidden *before* the engine is told to present; on hide
+    /// the engine is told first.
+    pub fn set_preview_slot(
         &self,
         app: &AppHandle,
         engine: Option<&EngineHandle>,
-        x: f64,
-        y: f64,
-        width: f64,
-        height: f64,
-        visible: bool,
+        slot: &PreviewSlot,
     ) -> Result<()> {
         use tauri::Manager;
-        let preview = &self.preview;
-        let show = visible && width >= 4.0 && height >= 4.0;
-        let cfg = if show {
-            let main = app
-                .get_webview_window("main")
-                .ok_or_else(|| anyhow!("main window missing"))?;
-            let scale = main.scale_factor().unwrap_or(1.0);
-            let pw = ((width * scale).round() as u32).max(1);
-            let ph = ((height * scale).round() as u32).max(1);
-            #[cfg(target_os = "macos")]
-            {
-                // Place + order in via AppKit (see PreviewNsRefs) — never
-                // through tauri show(), which would make the preview the
-                // key window and steal focus from the webview.
-                let _ = preview;
-                if let Some(refs) = self.preview_ns.as_ref() {
-                    refs.place(x, y, width, height);
-                    refs.show();
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let origin = main.inner_position().context("main window position")?;
-                let px = origin.x + (x * scale).round() as i32;
-                let py = origin.y + (y * scale).round() as i32;
-                preview
-                    .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-                        px, py,
-                    )))
-                    .context("positioning preview window")?;
-                preview
-                    .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(pw, ph)))
-                    .context("sizing preview window")?;
-                preview.show().context("showing preview window")?;
-            }
-            (pw, ph, true)
-        } else {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = preview;
-                if let Some(refs) = self.preview_ns.as_ref() {
-                    refs.hide();
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            preview.hide().context("hiding preview window")?;
-            (1, 1, false)
+        let show = slot.visible && slot.width >= 4.0 && slot.height >= 4.0;
+        let params = slot.params.unwrap_or_default();
+        let hidden = PreviewCfg {
+            width: 1,
+            height: 1,
+            visible: false,
+            params,
         };
-        *self.preview_cfg.lock().expect("preview cfg lock") = Some(cfg);
-        if let Some(engine) = engine {
-            engine.send_preview_cfg(cfg);
+        if !show {
+            *self.preview_cfg.lock().expect("preview cfg lock") = Some(hidden);
+            if let Some(engine) = engine {
+                engine.send_preview_cfg(hidden);
+            }
+        }
+        let scale = app
+            .get_webview_window("main")
+            .ok_or_else(|| anyhow!("main window missing"))?
+            .scale_factor()
+            .unwrap_or(1.0);
+        let (x, y, width, height) = (slot.x, slot.y, slot.width, slot.height);
+        match &self.preview {
+            #[cfg(target_os = "macos")]
+            PreviewHost::Underlay(view) => {
+                if show {
+                    view.place(x, y, width, height);
+                }
+                view.set_hidden(!show);
+            }
+            PreviewHost::Window {
+                window: preview,
+                #[cfg(target_os = "macos")]
+                ns,
+            } => {
+                #[cfg(target_os = "macos")]
+                {
+                    // Place + order in via AppKit (see PreviewNsRefs) —
+                    // never through tauri show(), which would make the
+                    // preview the key window and steal focus.
+                    let _ = preview;
+                    if let Some(refs) = ns.as_ref() {
+                        if show {
+                            refs.place(x, y, width, height);
+                            refs.show();
+                        } else {
+                            refs.hide();
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                if show {
+                    let main = app
+                        .get_webview_window("main")
+                        .ok_or_else(|| anyhow!("main window missing"))?;
+                    let origin = main.inner_position().context("main window position")?;
+                    let px = origin.x + (x * scale).round() as i32;
+                    let py = origin.y + (y * scale).round() as i32;
+                    preview
+                        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                            px, py,
+                        )))
+                        .context("positioning preview window")?;
+                    preview
+                        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                            ((width * scale).round() as u32).max(1),
+                            ((height * scale).round() as u32).max(1),
+                        )))
+                        .context("sizing preview window")?;
+                    preview.show().context("showing preview window")?;
+                } else {
+                    preview.hide().context("hiding preview window")?;
+                }
+            }
+        }
+        if show {
+            let cfg = PreviewCfg {
+                width: ((width * scale).round() as u32).max(1),
+                height: ((height * scale).round() as u32).max(1),
+                visible: true,
+                params,
+            };
+            *self.preview_cfg.lock().expect("preview cfg lock") = Some(cfg);
+            if let Some(engine) = engine {
+                engine.send_preview_cfg(cfg);
+            }
         }
         Ok(())
     }
@@ -451,11 +547,25 @@ impl EngineHandle {
             size.height
         );
 
-        let preview_window = windows.preview.clone();
-        if let Err(e) = core.attach_preview_surface(preview_window.clone(), 320, 180) {
+        let attached = match &windows.preview {
+            #[cfg(target_os = "macos")]
+            PreviewHost::Underlay(view) => {
+                core.attach_preview_surface(view.surface_target(), 320, 180)
+            }
+            PreviewHost::Window { window, .. } => {
+                core.attach_preview_surface(window.clone(), 320, 180)
+            }
+        };
+        if let Err(e) = attached {
             // Non-fatal — the JPEG thumbnail path still works.
             log::error!("could not attach native preview surface: {e:#}");
         }
+        // The underlay may render below the slot's size but never above the
+        // composite's (D3 / open question 3): its layer scales the drawable.
+        #[cfg(target_os = "macos")]
+        let cap_preview = matches!(windows.preview, PreviewHost::Underlay(_));
+        #[cfg(not(target_os = "macos"))]
+        let cap_preview = false;
 
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
@@ -463,18 +573,19 @@ impl EngineHandle {
 
         #[cfg(target_os = "macos")]
         let occlusion = OcclusionProbe::new(&window);
+        // The underlay is visible exactly when the main window is; the
+        // child window has its own occlusion state.
         #[cfg(target_os = "macos")]
-        let preview_occlusion = OcclusionProbe::new(&preview_window);
+        let preview_occlusion = match &windows.preview {
+            PreviewHost::Underlay(view) => OcclusionProbe::from_ptr(view.ns_window()),
+            PreviewHost::Window { window, .. } => OcclusionProbe::new(window),
+        };
 
         let (preview_tx, preview_rx) = crossbeam_channel::unbounded::<PreviewCmd>();
         // A restarted engine picks up the preview slot where the webview
         // left it — the React side only re-sends bounds on layout changes.
-        if let Some((width, height, visible)) = *windows.preview_cfg.lock().expect("preview cfg lock") {
-            let _ = preview_tx.send(PreviewCmd::Config {
-                width,
-                height,
-                visible,
-            });
+        if let Some(cfg) = *windows.preview_cfg.lock().expect("preview cfg lock") {
+            let _ = preview_tx.send(PreviewCmd::Config(cfg));
         }
 
         let inner = Arc::new(EngineInner {
@@ -502,6 +613,7 @@ impl EngineHandle {
                         app,
                         sizes,
                         preview_rx,
+                        cap_preview,
                         #[cfg(target_os = "macos")]
                         occlusion,
                         #[cfg(target_os = "macos")]
@@ -519,9 +631,10 @@ impl EngineHandle {
         {
             let inner = Arc::clone(&inner);
             let bus = ctx.bus.clone();
+            let demand = Arc::clone(&windows.jpeg_demand);
             thread::Builder::new()
                 .name("engine-telemetry".into())
-                .spawn(move || telemetry_loop(inner, app, bus))
+                .spawn(move || telemetry_loop(inner, app, bus, demand))
                 .context("spawning telemetry fan-in thread")?;
         }
 
@@ -562,12 +675,8 @@ impl EngineHandle {
         }
     }
 
-    fn send_preview_cfg(&self, (width, height, visible): (u32, u32, bool)) {
-        let _ = self.inner.preview_tx.send(PreviewCmd::Config {
-            width,
-            height,
-            visible,
-        });
+    fn send_preview_cfg(&self, cfg: PreviewCfg) {
+        let _ = self.inner.preview_tx.send(PreviewCmd::Config(cfg));
     }
 
     pub fn last_payload(&self, channel: &str) -> Option<Value> {
@@ -615,6 +724,7 @@ fn render_thread(
     app: AppHandle,
     sizes: Arc<SizeState>,
     preview_rx: crossbeam_channel::Receiver<PreviewCmd>,
+    cap_preview: bool,
     #[cfg(target_os = "macos")] occlusion: Option<OcclusionProbe>,
     #[cfg(target_os = "macos")] preview_occlusion: Option<OcclusionProbe>,
     launch: Instant,
@@ -631,8 +741,8 @@ fn render_thread(
     let mut spike_armed = !spike.is_empty();
     let mut presented_first = false;
     // React-slot visibility of the native preview (set via
-    // `preview_set_bounds`); combined with the preview window's own
-    // occlusion state each frame.
+    // `preview_set_slot`); combined with the hosting window's occlusion
+    // state each frame.
     let mut preview_wanted = false;
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -650,14 +760,16 @@ fn render_thread(
             if let Some((w, h)) = sizes.pending.lock().expect("size lock").take() {
                 core.resize(w, h);
             }
-            while let Ok(PreviewCmd::Config {
-                width,
-                height,
-                visible,
-            }) = preview_rx.try_recv()
-            {
-                core.resize_preview_surface(width, height);
-                preview_wanted = visible;
+            while let Ok(PreviewCmd::Config(cfg)) = preview_rx.try_recv() {
+                let (w, h) = if cap_preview {
+                    let (cw, ch) = core.composite_size();
+                    fit_within(cfg.width, cfg.height, cw, ch)
+                } else {
+                    (cfg.width, cfg.height)
+                };
+                core.resize_preview_surface(w, h);
+                core.set_preview_params(cfg.params);
+                preview_wanted = cfg.visible;
             }
             #[cfg(target_os = "macos")]
             if let Some(probe) = occlusion.as_ref() {
@@ -666,7 +778,7 @@ fn render_thread(
             {
                 // §3.1 applies to the preview swapchain too: only present
                 // while the React slot wants it AND AppKit reports the
-                // preview window visible (not hidden/minimized/covered).
+                // hosting window visible (not minimized/covered).
                 #[cfg(target_os = "macos")]
                 let effective = preview_wanted
                     && preview_occlusion.as_ref().map_or(true, |p| p.visible());
@@ -742,15 +854,36 @@ fn render_thread(
 
 /// Bus subscription → `engine:telemetry` Tauri events + sticky snapshots +
 /// the 1 Hz `engine:status` heartbeat. Exits when the stop flag is set.
-fn telemetry_loop(inner: Arc<EngineInner>, app: AppHandle, bus: render_core::telemetry::Bus) {
-    let channels: std::collections::HashSet<String> =
-        ALL_CHANNELS.iter().map(|s| s.to_string()).collect();
-    let (sub_id, rx) = bus.subscribe(channels);
+///
+/// Every channel except `preview`, which is added only while `jpeg_demand`
+/// > 0: the engine gates the JPEG readback and the design leg's render on
+/// `subscriber_count("preview")`, so subscribing unconditionally made both
+/// run in every room, including Perform where nothing shows them.
+fn telemetry_loop(
+    inner: Arc<EngineInner>,
+    app: AppHandle,
+    bus: render_core::telemetry::Bus,
+    jpeg_demand: Arc<AtomicUsize>,
+) {
+    let channels_for = |with_preview: bool| -> std::collections::HashSet<String> {
+        ALL_CHANNELS
+            .iter()
+            .filter(|c| with_preview || **c != "preview")
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let mut with_preview = jpeg_demand.load(Ordering::Relaxed) > 0;
+    let (sub_id, rx) = bus.subscribe(channels_for(with_preview));
     let mut last_status_emit = Instant::now() - Duration::from_secs(1);
     let mut cpu = render_core::perf::ThreadCpu::register("engine-telemetry");
 
     loop {
         cpu.tick();
+        let want = jpeg_demand.load(Ordering::Relaxed) > 0;
+        if want != with_preview {
+            with_preview = want;
+            bus.update_channels(sub_id, channels_for(want));
+        }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(frame) => {
                 // Perf PM1 `telemetry_bps.webview` — the webview hop's load.
@@ -844,6 +977,60 @@ fn size_engine_window(window: &tauri::Window, pack_w: u32, pack_h: u32) -> Resul
         }
     }
     Ok(())
+}
+
+/// Scale `(w, h)` down (never up) to fit inside `(max_w, max_h)`, keeping
+/// aspect — a monitor drawable above composite resolution buys nothing.
+fn fit_within(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w <= max_w && h <= max_h {
+        return (w, h);
+    }
+    let k = (max_w as f64 / w as f64).min(max_h as f64 / h as f64);
+    (
+        ((w as f64 * k).round() as u32).max(1),
+        ((h as f64 * k).round() as u32).max(1),
+    )
+}
+
+/// `WZRD_PREVIEW=window` selects the old child-window monitor (D6).
+fn window_preview_requested() -> bool {
+    std::env::var("WZRD_PREVIEW").is_ok_and(|v| v == "window")
+}
+
+/// App `--bg` (`src/index.css`, `6 7 9`) — the main window's background
+/// once the webview stops painting its own.
+#[cfg(target_os = "macos")]
+const APP_BG: (f64, f64, f64) = (6.0 / 255.0, 7.0 / 255.0, 9.0 / 255.0);
+
+/// Build the preview host: the underlay view (macOS default), else — or if
+/// installing it fails — the child window.
+fn build_preview_host(app: &AppHandle) -> Result<PreviewHost> {
+    #[cfg(target_os = "macos")]
+    if !window_preview_requested() {
+        use tauri::Manager;
+        let installed = app
+            .get_webview_window("main")
+            .ok_or_else(|| anyhow!("main window missing"))
+            .and_then(|main| main.ns_window().map_err(|e| anyhow!("{e}")))
+            .and_then(|ns| crate::underlay::PreviewView::install(ns, APP_BG));
+        match installed {
+            Ok(view) => return Ok(PreviewHost::Underlay(view)),
+            Err(e) => log::error!(
+                "preview underlay unavailable ({e:#}) — falling back to the child window"
+            ),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window_preview_requested();
+    let window = build_preview_window(app).context("creating preview window")?;
+    #[cfg(target_os = "macos")]
+    let ns = preview_ns_refs(app, &window);
+    log::info!("native preview: child window (WZRD_PREVIEW=window)");
+    Ok(PreviewHost::Window {
+        window,
+        #[cfg(target_os = "macos")]
+        ns,
+    })
 }
 
 /// Create the native operator-preview window (collapse Step 3): borderless,

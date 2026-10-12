@@ -12,6 +12,7 @@
 // Putting a rendered clip on a region is one: its slot in the clip grid.
 
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { nativeUnderlay } from '../api/previewMode';
 import { SurfaceMap } from '../components/SurfaceMap';
 import { ClipGrid } from '../components/ClipGrid';
 import { LayerParams } from '../components/LayerParams';
@@ -184,7 +185,7 @@ export function Prepare() {
         </div>
 
         {/* Center: the surface */}
-        <Panel className="overflow-hidden" bodyClassName="min-h-0 flex flex-col">
+        <Panel hole={nativeUnderlay()} className="overflow-hidden" bodyClassName="min-h-0 flex flex-col">
           <div className="flex-1 min-h-0">
             <SurfaceMap bindings={bindings} onRegionClick={onRegionClick} armed={armed} />
           </div>

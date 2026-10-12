@@ -39,6 +39,18 @@ tauri-plugin-shell = "2"
 # placement math (AppKit convertRectToScreen — see engine.rs).
 objc2 = "0.5"
 objc2-foundation = "0.2"
+# The preview underlay view's handle for wgpu::Instance::create_surface.
+raw-window-handle = "0.6"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Dev builds: optimize dependencies so `pnpm tauri dev` is representative for
+# perf (unoptimized wgpu/naga/image made the preview JPEG cost ~24 ms/frame).
+# render-core is a path dependency, so "*" covers it; the specific entry wins
+# — opt-level 1 keeps engine edits rebuilding reasonably fast.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.render-core]
+opt-level = 1

@@ -50,6 +50,28 @@ body,
   -webkit-user-select: none;
 }
 
+/* Native preview underlay (api/previewMode.ts): the page is see-through so
+   the GPU view beneath the webview shows wherever nothing paints. The native
+   window background is the same --bg, so nothing else changes. Any ancestor
+   of a <NativeSlot> that paints a background hides the preview — the dev
+   check in NativeSlot.tsx flags it. */
+:root[data-underlay],
+:root[data-underlay] body,
+:root[data-underlay] #root {
+  background: transparent;
+}
+
+/* Native preview underlay (api/previewMode.ts): the page is see-through so
+   the GPU view beneath the webview shows wherever nothing paints. The native
+   window background is the same --bg, so nothing else changes. Any ancestor
+   of a <NativeSlot> that paints a background hides the preview — the dev
+   check in NativeSlot.tsx flags it. */
+:root[data-underlay],
+:root[data-underlay] body,
+:root[data-underlay] #root {
+  background: transparent;
+}
+
 /* Text fields and code stay selectable. */
 input,
 textarea,

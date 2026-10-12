@@ -9,10 +9,16 @@
 // Ground truth is always the projector, but the canvas shows the real field:
 // a source-space grid drawn where it actually lands (`warpMath`, evaluated
 // from the engine's own solved coefficients), so a local correction is
-// visible here the moment you drag it. The photographic underlay behind it is
-// the composite preview through the **corner quad only** — a homography maps
-// exactly onto a CSS `matrix3d`, so it comes for free, but CSS cannot express
-// the local corrections. Grid = truth, image = reference.
+// visible here the moment you drag it.
+//
+// The image under it, with the native underlay, is the **program view**: the
+// engine's exact projector final pass (real warp incl. local corrections,
+// test pattern, live masters), dimmed, in a `<NativeSlot>` over the
+// projector rect — what the wall gets. Without the underlay (browser,
+// `WZRD_PREVIEW=window`) it falls back to the JPEG composite through the
+// **corner quad only**: a homography maps exactly onto a CSS `matrix3d`, but
+// CSS cannot express the local corrections, so there grid = truth, image =
+// reference.
 
 import {
   useCallback,
@@ -23,7 +29,10 @@ import {
   useState,
 } from 'react';
 import type { AlignmentDoc, WarpPoint } from '../api/ipc';
+import { nativeUnderlay } from '../api/previewMode';
 import { useStore } from '../state/store';
+import { usePreviewJpegDemand } from '../ui/usePreviewJpegDemand';
+import { NativeSlot } from './NativeSlot';
 import {
   addPoint,
   flushAlignment,
@@ -276,6 +285,8 @@ export function WarpCanvas() {
   const doc = useStore((s) => s.alignment);
   const preview = useStore((s) => s.preview);
   const selected = useStore((s) => s.selectedHandle);
+  const native = nativeUnderlay();
+  usePreviewJpegDemand(!native);
   const setSelected = useStore((s) => s.setSelectedHandle);
 
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -298,7 +309,10 @@ export function WarpCanvas() {
     ro.observe(el);
     setBox({ w: el.clientWidth, h: el.clientHeight });
     return () => ro.disconnect();
-  }, []);
+    // The host only exists once the document has arrived (before that the
+    // canvas renders a "waiting" stub), so re-attach when it does — a
+    // mount-only effect left `fit` at 0 and the handles infinitely large.
+  }, [!!doc]);
 
   const [outW, outH] = doc && doc.output[0] > 0 ? doc.output : FALLBACK;
   const vb = {
@@ -479,7 +493,7 @@ export function WarpCanvas() {
   // element's own space is uv scaled by (outW*fit, outH*fit), so conjugate the
   // homography by that scale before packing it into matrix3d (column-major).
   let underlay: React.CSSProperties | null = null;
-  if (hom && fit > 0 && preview) {
+  if (!native && hom && fit > 0 && preview) {
     const sx = outW * fit;
     const sy = outH * fit;
     const [a, b, c, d2, e2, f, g, h2, i] = hom;
@@ -509,7 +523,15 @@ export function WarpCanvas() {
   const selectedPoint = doc.points.find((p) => p.id === selected) ?? null;
 
   return (
-    <div ref={hostRef} className="relative h-full w-full overflow-hidden dim-grid">
+    <div ref={hostRef} className={'relative h-full w-full overflow-hidden ' + (native ? '' : 'dim-grid')}>
+      {native && fit > 0 && (
+        // The projector framebuffer, dimmed so the handles read over it.
+        <NativeSlot
+          params={{ program: true, dim: 0.55 }}
+          className="absolute pointer-events-none"
+          style={{ left: originX, top: originY, width: outW * fit, height: outH * fit }}
+        />
+      )}
       {underlay && preview && (
         <img
           alt=""
@@ -532,6 +554,32 @@ export function WarpCanvas() {
         }}
         onContextMenu={(e) => openMenu(e, { kind: 'empty', dest: toUv(e.clientX, e.clientY) })}
       >
+        {native && fit > 0 && (
+          // `.dim-grid`, but only around the projector rect: a background
+          // over the rect would hide the native image beneath the page.
+          <>
+            <defs>
+              <pattern id="warp-dim-grid" width={16 / fit} height={16 / fit} patternUnits="userSpaceOnUse">
+                <path
+                  d={`M ${16 / fit} 0 L 0 0 0 ${16 / fit}`}
+                  fill="none"
+                  stroke="rgb(255 255 255 / 0.025)"
+                  strokeWidth={1}
+                  vectorEffect="non-scaling-stroke"
+                />
+              </pattern>
+            </defs>
+            {['rgb(var(--bg))', 'url(#warp-dim-grid)'].map((fill) => (
+              <path
+                key={fill}
+                pointerEvents="none"
+                fillRule="evenodd"
+                fill={fill}
+                d={`M${vb.x} ${vb.y}h${vb.w}v${vb.h}h${-vb.w}Z M0 0V${outH}H${outW}V0Z`}
+              />
+            ))}
+          </>
+        )}
         {/* The projector rectangle — where light exists at all. Anything the
             warp pushes outside this is simply not projected. */}
         <rect
@@ -668,8 +716,9 @@ export function WarpCanvas() {
           selected = move the quad) · {outW}×{outH}
         </div>
         <div>
-          grid is the real field; the photo underlay only follows the corner quad — ground
-          truth is the projector
+          {native
+            ? 'grid is the real field; the image is the projector output, dimmed'
+            : 'grid is the real field; the photo underlay only follows the corner quad — ground truth is the projector'}
         </div>
         {selectedPoint && (
           <div className="text-amber-500/80">
