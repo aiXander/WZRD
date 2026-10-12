@@ -16,6 +16,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -384,7 +385,10 @@ enum Output {
 
 struct OffscreenOutput {
     texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    /// Shared with the acquired [`OutputFrame`] (a refcount bump per frame,
+    /// no allocation), so a frame in hand borrows nothing from the context
+    /// and `Core` can tick its legs *after* `acquire` (§4 #9).
+    view: Arc<wgpu::TextureView>,
     /// Submits that drew into it and may still be on the GPU, oldest first.
     /// Without a swapchain nothing else stops the CPU from queueing
     /// unbounded work, and an uncapped bench would measure the queue.
@@ -398,7 +402,7 @@ impl OffscreenOutput {
         let (texture, view) = create_offscreen_output(device, config);
         Self {
             texture,
-            view,
+            view: Arc::new(view),
             in_flight: RefCell::new(VecDeque::new()),
             vsync: vsync_hz
                 .filter(|hz| *hz > 0.0)
@@ -409,7 +413,7 @@ impl OffscreenOutput {
     fn resize(&mut self, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) {
         let (texture, view) = create_offscreen_output(device, config);
         self.texture = texture;
-        self.view = view;
+        self.view = Arc::new(view);
     }
 
     /// Block until this frame may start drawing: the in-flight cap, then
@@ -476,18 +480,20 @@ fn new_instance() -> wgpu::Instance {
     })
 }
 
-/// One acquired output frame (see [`GpuContext::acquire_output`]).
-pub enum OutputFrame<'a> {
+/// One acquired output frame (see [`GpuContext::acquire_output`]). Owns
+/// what it needs — it borrows nothing from the `GpuContext`, so the
+/// caller can mutate the rest of its state between acquire and present.
+pub enum OutputFrame {
     Swapchain {
         frame: wgpu::SurfaceTexture,
         view: wgpu::TextureView,
     },
     Offscreen {
-        view: &'a wgpu::TextureView,
+        view: Arc<wgpu::TextureView>,
     },
 }
 
-impl OutputFrame<'_> {
+impl OutputFrame {
     pub fn view(&self) -> &wgpu::TextureView {
         match self {
             OutputFrame::Swapchain { view, .. } => view,
@@ -929,7 +935,7 @@ impl GpuContext {
     /// waits for the queue to drain (see `OffscreenOutput::wait_turn`), and
     /// `--paced` waits for the next virtual vsync. `timed` is ignored on a
     /// window.
-    pub fn acquire_output(&self, timed: bool) -> Result<OutputFrame<'_>, wgpu::SurfaceError> {
+    pub fn acquire_output(&self, timed: bool) -> Result<OutputFrame, wgpu::SurfaceError> {
         match &self.output {
             Output::Window(surface) => {
                 let frame = surface.get_current_texture()?;
@@ -940,14 +946,32 @@ impl GpuContext {
             }
             Output::Offscreen(o) => {
                 o.wait_turn(&self.device, timed);
-                Ok(OutputFrame::Offscreen { view: &o.view })
+                Ok(OutputFrame::Offscreen { view: Arc::clone(&o.view) })
             }
+        }
+    }
+
+    /// Window path, a GPU-`timed` frame only: block until every earlier
+    /// submit has finished, right before this frame's main submit, so the
+    /// sampled frame runs **alone** on the GPU — the swapchain twin of
+    /// `OffscreenOutput::wait_turn`'s drain (which already ran offscreen).
+    /// Without it a timed frame's first pass begins while the previous
+    /// frame's tail still draws and its span counts that wait (perf-monitor
+    /// "windowed GPU timing over-reads"). Called after encoding, so the
+    /// wait only covers whatever GPU work is still left; untimed frames
+    /// (29 in 30 by default) never block here. Returns whether it waited.
+    pub fn drain_before_timed_submit(&self, timed: bool) -> bool {
+        if timed && matches!(self.output, Output::Window(_)) {
+            let _ = self.device.poll(wgpu::Maintain::Wait);
+            true
+        } else {
+            false
         }
     }
 
     /// Present a frame from [`GpuContext::acquire_output`]; `submitted` is
     /// the submit that drew it (offscreen tracks it for the in-flight cap).
-    pub fn present(&self, frame: OutputFrame<'_>, submitted: wgpu::SubmissionIndex) {
+    pub fn present(&self, frame: OutputFrame, submitted: wgpu::SubmissionIndex) {
         match (frame, &self.output) {
             (OutputFrame::Swapchain { frame, .. }, _) => frame.present(),
             (OutputFrame::Offscreen { .. }, Output::Offscreen(o)) => {

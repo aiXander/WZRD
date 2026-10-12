@@ -2338,39 +2338,55 @@ impl Core {
         }
     }
 
-    /// One presented frame (tick → record → submit → present). Must only be
-    /// called while not occluded. On `SurfaceError::Lost`/`Outdated` the host
-    /// should query the window's current size and call [`Core::resize`];
-    /// on `OutOfMemory` it should shut down.
-    pub fn redraw(&mut self) -> Result<(), wgpu::SurfaceError> {
-        // §5.4 speed master bends the musical clock (integrated, never a
-        // scaled absolute time). §5.6: each leg's clock bends under its own
-        // speed master — design at 4× never touches the show.
-        let span = self.perf.enter();
+    /// Step both legs' clocks (§5.4 speed master bends the musical clock —
+    /// integrated, never a scaled absolute time; §5.6 each leg bends under
+    /// its own speed master, so design at 4× never touches the show), then
+    /// advance the promote machine.
+    fn step_clocks(&mut self) {
         self.transport.step(self.masters.speed());
         if self.two_leg {
             self.design_transport.step(self.design_masters.speed());
         }
         self.update_promote();
-        self.perf.end(Stage::TickLive, span);
+    }
+
+    /// One presented frame (acquire → tick → record → submit → present).
+    /// Must only be called while not occluded. On `SurfaceError::Lost`/
+    /// `Outdated` the host should query the window's current size and call
+    /// [`Core::resize`]; on `OutOfMemory` it should shut down.
+    ///
+    /// **Acquire first, then tick** (§4 #9): `acquire` is where the frame
+    /// waits for vsync (a window's next drawable; the bench's virtual
+    /// vsync), so the clocks, the promote machine and both legs' driver
+    /// eval + uniform upload run *after* it — a knob value read at tick
+    /// reaches the GPU within the same frame's encode, not one vsync wait
+    /// later. A `SurfaceError` frame ticks nothing; the next step
+    /// integrates the longer gap.
+    pub fn redraw(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let span = self.perf.enter();
         if self.gpu.is_none() || self.plan.is_none() {
+            self.step_clocks();
+            self.perf.end(Stage::TickLive, span);
             return Ok(());
         }
-        // Demand first: an unrendered design leg still ticks (clock, picks)
-        // but skips its uniform upload.
+        // `acquire` is vsync backpressure, timed even when it errors so a
+        // `SurfaceError` frame's wait still lands somewhere.
+        let timed = self.gpu_timer.as_ref().is_some_and(GpuTimer::recording);
+        let acquired = self.gpu.as_ref().expect("checked above").acquire_output(timed);
+        let span = self.perf.lap(Stage::Acquire, span);
+        let frame = acquired?;
+        self.step_clocks();
+        self.perf.end(Stage::TickLive, span);
+        // Demand after the promote step (it can start/finish a TAKE): an
+        // unrendered design leg still ticks (clock, picks) but skips its
+        // uniform upload.
         let jpeg_subscribed = self.bus.subscriber_count("preview") > 0;
         let design_demand = self.design_demand(jpeg_subscribed);
         self.tick_legs(true, design_demand);
 
         let gpu = self.gpu.as_ref().expect("checked above");
-        let plan = self.plan.as_mut().expect("checked above");
-        // `acquire` is vsync backpressure, timed even when it errors so a
-        // `SurfaceError` frame's wait still lands somewhere.
+        let plan = self.plan.as_mut().expect("promote keeps a live plan");
         let span = self.perf.begin();
-        let timed = self.gpu_timer.as_ref().is_some_and(GpuTimer::recording);
-        let acquired = gpu.acquire_output(timed);
-        let span = self.perf.lap(Stage::Acquire, span);
-        let frame = acquired?;
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2390,7 +2406,7 @@ impl Core {
             gpu.encode_warp_bake(&mut encoder, timer_writes(&mut self.gpu_timer, GpuPass::WarpBake));
         }
         // 1) Live leg → live composite (clip uploads first, same encoder).
-        plan.encode_uploads(&mut encoder);
+        plan.encode_uploads(gpu, &mut encoder);
         plan.encode_composite(
             gpu,
             &mut encoder,
@@ -2404,7 +2420,7 @@ impl Core {
         if design_demand {
             if let (Some(d), Some(view)) = (self.design.as_mut(), gpu.design_view.as_ref()) {
                 if let Some(p) = d.plan.as_mut() {
-                    p.encode_uploads(&mut encoder);
+                    p.encode_uploads(gpu, &mut encoder);
                     p.encode_composite(
                         gpu,
                         &mut encoder,
@@ -2429,6 +2445,13 @@ impl Core {
         gpu.encode_final(&mut encoder, frame.view(), timer_writes(&mut self.gpu_timer, GpuPass::Final));
         let commands = encoder.finish();
         let span = self.perf.lap(Stage::Encode, span);
+        // A GPU-timed frame runs alone on the GPU (window only — offscreen
+        // drained in `acquire`). A wait, so it's charged to `acquire`.
+        let span = if gpu.drain_before_timed_submit(timed) {
+            self.perf.lap(Stage::Acquire, span)
+        } else {
+            span
+        };
         let submitted = gpu.queue.submit(std::iter::once(commands));
         let span = self.perf.lap(Stage::Submit, span);
         gpu.present(frame, submitted);
@@ -2514,7 +2537,7 @@ impl Core {
             // Nothing presents the live composite while buried: it renders
             // only for a preview / JPEG consumer (`live_demand_occluded`).
             if live_demand {
-                plan.encode_uploads(&mut encoder);
+                plan.encode_uploads(gpu, &mut encoder);
                 plan.encode_composite(
                     gpu,
                     &mut encoder,
@@ -2525,7 +2548,7 @@ impl Core {
             if design_demand {
                 if let (Some(d), Some(view)) = (self.design.as_mut(), gpu.design_view.as_ref()) {
                     if let Some(p) = d.plan.as_mut() {
-                        p.encode_uploads(&mut encoder);
+                        p.encode_uploads(gpu, &mut encoder);
                         p.encode_composite(
                             gpu,
                             &mut encoder,
@@ -2538,6 +2561,14 @@ impl Core {
             }
             let commands = encoder.finish();
             let span = self.perf.lap(Stage::Encode, span);
+            // Same timed-frame isolation as `redraw` (no vsync here, so the
+            // wait is all GPU tail).
+            let timed = self.gpu_timer.as_ref().is_some_and(GpuTimer::recording);
+            let span = if gpu.drain_before_timed_submit(timed) {
+                self.perf.lap(Stage::Acquire, span)
+            } else {
+                span
+            };
             gpu.queue.submit(std::iter::once(commands));
             self.perf.end(Stage::Submit, span);
         }

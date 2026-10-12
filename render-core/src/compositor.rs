@@ -197,6 +197,9 @@ pub struct PassPlan {
     drawn: Vec<bool>,
     /// A drawing pass samples a video clip (as of the last tick).
     draws_clips: bool,
+    /// The last tick wrote `uniform_bytes` + uploaded them (`upload` was
+    /// set) — so `encode_uploads` may patch a slot's bind flag on top.
+    uniforms_fresh: bool,
 }
 
 /// Byte stride between uniform slots: the larger of the two structs,
@@ -454,6 +457,7 @@ impl PassPlan {
             clock_sec,
             clips_ready: true,
             draws_clips: false,
+            uniforms_fresh: false,
             drawn,
             uniforms,
             uniform_bytes,
@@ -541,6 +545,7 @@ impl PassPlan {
         }
         self.clips_ready = ready;
         self.draws_clips = draws_clips;
+        self.uniforms_fresh = upload;
 
         if !upload {
             return;
@@ -614,13 +619,64 @@ impl PassPlan {
     /// most one staging→texture copy. Encode before [`Self::encode_composite`]
     /// into the same encoder; call [`Self::after_submit`] after the submit.
     /// Reads the per-image draw flags this frame's [`Self::tick`] computed.
-    pub fn encode_uploads(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        for (img, &drawn) in self.images.iter().zip(&self.drawn) {
+    ///
+    /// A clip this upload makes current (unmute, TAKE, a stream waking from
+    /// idle) binds **this** frame: [`Self::tick`] judged it before the
+    /// upload and wrote its passes unbound, so their slots get the bind
+    /// flag patched in — one `write_buffer` over the patched slot range,
+    /// only on such a transition frame. `write_buffer` lands before the
+    /// submit's commands, so the composite reads the patched slot. Still
+    /// "a clip binds only while current" (§2.4): the texture now holds
+    /// the playhead frame.
+    pub fn encode_uploads(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder) {
+        let mut newly_current = false;
+        for (img, &drawn) in self.images.iter_mut().zip(&self.drawn) {
             // Muted / picked-out clips don't decode: no want, no upload.
             if drawn {
                 let playhead = img.playhead(self.clock_sec);
-                img.source().encode_upload(encoder, playhead);
+                let now_current = {
+                    let mut source = img.source();
+                    source.encode_upload(encoder, playhead);
+                    !img.current && source.is_current(playhead, img.step_sec)
+                };
+                if now_current {
+                    img.current = true;
+                    newly_current = true;
+                }
             }
+        }
+        if newly_current {
+            self.clips_ready = self.images.iter().zip(&self.drawn).all(|(img, &d)| !d || img.current);
+            if self.uniforms_fresh {
+                self.bind_newly_current(gpu);
+            }
+        }
+    }
+
+    /// Set the bind flag on every drawing pass whose image is current but
+    /// whose slot (written by this frame's tick) still says unbound, and
+    /// upload the patched slot range.
+    fn bind_newly_current(&mut self, gpu: &GpuContext) {
+        let stride = self.uniform_stride;
+        let size = std::mem::size_of::<LayerParamsGpu>();
+        let mut range: Option<(usize, usize)> = None;
+        for pass in &self.layer_passes {
+            let Some((i, b, enc)) = pass.image else { continue };
+            if !pass.active || pass.opacity <= 0.0 || !self.images[i].current {
+                continue;
+            }
+            let at = pass.slot * stride;
+            let bytes = &mut self.uniform_bytes[at..at + size];
+            let params: LayerParamsGpu = bytemuck::pod_read_unaligned(bytes);
+            if params.image_meta[0] != 0.0 {
+                continue; // bound at tick already
+            }
+            bytes.copy_from_slice(bytemuck::bytes_of(&params.with_image(b, enc)));
+            range = Some(range.map_or((at, at + size), |(lo, hi)| (lo.min(at), hi.max(at + size))));
+        }
+        if let Some((lo, hi)) = range {
+            gpu.queue
+                .write_buffer(&self.uniforms, lo as u64, &self.uniform_bytes[lo..hi]);
         }
     }
 
@@ -1073,6 +1129,67 @@ pub(crate) mod tests {
         assert!(!Arc::ptr_eq(&b.images[0].source, &d.images[0].source));
         assert!((d.images[0].playhead(1.0) - 2.0).abs() < 1e-9);
         assert!(d.images[0].current);
+    }
+
+    /// A clip whose upload lands this frame binds **this** frame (unmute,
+    /// TAKE, a stream waking from idle): `tick` judges it before the
+    /// upload and writes the pass unbound; `encode_uploads` makes it
+    /// current and patches the slot, so the composite in the same submit
+    /// samples it. While it isn't current it stays unbound (dark).
+    #[test]
+    fn a_clip_binds_on_the_frame_its_upload_makes_it_current() {
+        let Some(mut gpu) = test_gpu() else {
+            eprintln!("no BC-capable adapter — skipping");
+            return;
+        };
+        let pack = test_pack();
+        let registry = EffectRegistry::new(None);
+        let (audio, sliders, overrides) = (AudioFeatures::new(), SliderBank::new(), ParamOverrides::new());
+        let ctx = |t: f32| FrameContext {
+            elapsed_sec: t,
+            bpm: 120.0,
+            beat_offset: 0.0,
+            audio: &audio,
+            sliders: &sliders,
+            audio_listen: 1.0,
+        };
+        // 32 frames at 16 fps: a 1 s jump is half the loop away.
+        let scene = clip_scene("hap_long.mov", 1.0);
+        let mut plan = PassPlan::build(&mut gpu, &pack, &scene, &registry, Path::new("/"), Carry::Fresh).unwrap();
+        let bound = |plan: &PassPlan| {
+            let at = plan.layer_passes[0].slot * plan.uniform_stride;
+            let p: LayerParamsGpu =
+                bytemuck::pod_read_unaligned(&plan.uniform_bytes[at..at + std::mem::size_of::<LayerParamsGpu>()]);
+            p.image_meta[0] != 0.0
+        };
+        // The texture holds the open frame (0); the playhead jumps to frame
+        // 16 with a small last step, so it reads as not current.
+        plan.tick(&gpu, &ctx(0.99), &overrides, true);
+        plan.tick(&gpu, &ctx(1.0), &overrides, true);
+        assert!(!plan.images[0].current && !bound(&plan) && !plan.clips_ready());
+        let unbound = render_composite(&gpu, &plan);
+
+        for _ in 0..500 {
+            plan.tick(&gpu, &ctx(1.0), &overrides, true);
+            assert!(!plan.images[0].current, "only an upload makes it current");
+            assert!(!bound(&plan));
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            plan.encode_uploads(&gpu, &mut enc);
+            gpu.queue.submit(Some(enc.finish()));
+            plan.after_submit();
+            gpu.device.poll(wgpu::Maintain::Wait);
+            if plan.images[0].current {
+                assert!(bound(&plan), "the slot is patched on the upload frame");
+                assert!(plan.clips_ready());
+                assert!(
+                    render_composite(&gpu, &plan) != unbound,
+                    "the same frame's composite samples the clip"
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("the decoder never delivered the wanted frame");
     }
 
     #[test]

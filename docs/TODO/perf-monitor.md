@@ -200,18 +200,15 @@ heavy scenes — the probe path is covered by `take-crossfade`). Done — see
 [reference/render-engine.md](../reference/render-engine.md) §2.10.
 
 Open from PM3:
-- **Windowed GPU timing over-reads (found by AFK B3, 2026-10-12).** In the
-  Tauri app at a steady 60 fps (`perf-clips` scene, Perform room, window in
-  front) the sampled passes read `composite.live` p50 6.7 / p95 14.4 ms,
-  `preview` p50 8.0 / p95 14.6 ms (a blit; expected ≲ 0.3) and `gpu.total`
-  p95 29.8 ms — more than the frame budget while no frame drops (interval
-  p95 17.3). The bench isolates its timed frame (`wait_turn`, queue drained
-  first); the swapchain path doesn't, so a timed frame's spans include the
-  previous frame's tail and the preview submit's wait behind it. Headroom
-  derived from `gpu.total` therefore reads negative in the app. Fix: on a
-  timed frame in the window path, drain the queue before the first pass
-  (as the bench does), or time each pass's own begin→end only. On vs off
-  costs nothing (work p95 1.78 vs 2.22 ms, interval 17.32 vs 17.56).
+- **Verify on screen: windowed GPU timing over-reads (AFK B3, 2026-10-12).**
+  The app at 60 fps read `preview` (a blit) p50 8.0 ms, `composite.live`
+  p95 14.4 and `gpu.total` p95 29.8 ms (negative headroom, no drops).
+  Fixed 2026-10-12 without a screen (reference §2.9 "GPU passes"): a timed
+  window frame drains the queue before its main submit, and the preview
+  blit is charged from the main span's end with `total` = the union. The
+  screen check is AFK block B6 in [afk-test-session.md](afk-test-session.md):
+  `preview` ≲ 0.5 ms, `gpu.total` p95 < 16.7 ms, and no extra drops with
+  timing on (the drain must not cost a vsync 1 frame in 30).
 - **`take-crossfade` stale frames are gated regression-only** (~28 stale
   clip frames over 4 TAKEs today — reference §4 #12). When E1b/E2 fix the
   TAKE trap, set its `gate.stale` to `"zero"` and re-baseline.
@@ -297,10 +294,9 @@ the fix changes what is measured and needs a re-calibration pass:
   - Worst single frame's render-thread work ≤ **33 ms** in steady scenarios.
   - Stale clip frames = **0** in `clips-7` (`take-crossfade`: regression
     only, see §3).
-  - `knob→submit` p95 ≤ **36 ms** — not the planned 17 or the suggested 34:
-    the bench measures 33.3–34.7 ms with a 100 Hz knob (ceiling 2 × 16.7 ms
-    because legs tick before the vsync wait, reference §4 #9), so 34 failed
-    about half the runs. Moving the tick after `acquire` is the real fix.
+  - `knob→submit` p95 ≤ **22 ms** — the legs tick after `acquire` since
+    2026-10-12 (reference §4 #9), so the ceiling is one frame + tick→submit;
+    the bench measures 17.8–18.5 ms with a 100 Hz knob (was 33.3–34.7).
   - wgpu objects gained over `edit-churn` = **0**.
   - Perf monitor overhead p95 ≤ **0.1 ms**.
   - Regression: > 15 % and > 0.5 ms (GPU) / > 1 ms (CPU) / > 2 ms latency.

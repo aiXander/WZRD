@@ -547,6 +547,11 @@ touching it:
   unrendered design leg) fails it and stays unbound (transparent) for the
   frame or two the decoder needs — never a flash of the old frame; normal
   decode lag at high rates stays inside the tolerance and never blinks.
+  The tick judges before that frame's upload, so `encode_uploads`
+  re-checks after its copy: a clip the upload just made current gets its
+  passes' bind flag patched into the plan's uniform slots (one
+  `write_buffer`, transition frames only) and binds **that** frame — an
+  unmute or TAKE shows the clip one frame sooner, never a stale one.
   The MCP's `get_preview` one-frame skip predates this and is harmless.
 - **Built-in `videoClip`** = `sample_image(uv) × mask × gain` (gain 0–2).
 - **Decode — the staging-ring invariant (canonical here since §5.9 landed):** one
@@ -997,9 +1002,10 @@ budget — the engine doesn't know the projector's refresh; CPU-only when
 
 - **Stages** (`perf::Stage`, fixed enum, no strings in the hot path):
   `inbound.cmds`, `inbound.watch`, `inbound.probe`, `inbound.misc`,
-  `telemetry`, `tick.live` (incl. transport step + promote machine),
-  `tick.design`, `encode`, `acquire` (wait), `submit` (incl. handing clip
-  slots back), `present`, `preview.present`, `preview.jpeg`, `pace` (wait),
+  `telemetry`, `acquire` (wait — first in `redraw`, see §4 #9),
+  `tick.live` (incl. transport step + promote machine), `tick.design`,
+  `encode`, `submit` (incl. handing clip slots back), `present`,
+  `preview.present`, `preview.jpeg`, `pace` (wait),
   **`host`** — render-thread time *between* Core calls (winit dispatch,
   TauriHost's size/occlusion polling). `cpu.work = Σ stages − acquire − pace`.
   Each host entry point (`poll_inbound`, `pace_frame`, `redraw`,
@@ -1026,7 +1032,8 @@ budget — the engine doesn't know the projector's refresh; CPU-only when
   they're already serialized: `ws.rs` (per notification) and the Tauri
   `telemetry_loop` (`json_len`, the webview hop).
 - **Latency:** `knob_submit` (`param.set`/`master.set` stamp the oldest
-  pending write in `Shared`; the tick picks it up, the submit resolves it),
+  pending write in `Shared`; the tick picks it up, the submit resolves it
+  — ≈ 1 frame since the tick runs after `acquire`, §4 #9),
   `rpc_queue` (`EngineCommand.queued_at` → handled), `osc_age`
   (`AudioFeatures::packet_age_ms` at tick — engine-local clock, not epoch).
 - **Process (1 Hz):** CPU % (`CLOCK_PROCESS_CPUTIME_ID`), RSS (macOS
@@ -1075,9 +1082,19 @@ budget — the engine doesn't know the projector's refresh; CPU-only when
     end)`**, so they tile `total`. Raw stage-boundary stamps overlap on
     Apple's TBDR GPU: the final pass's start-of-vertex fires during the
     composite's fragments — raw `final` read 7.5 ms on a scene whose final
-    pass costs 0.09 ms. Preview and probe (own submits) are raw; `probe` is
-    the timed probe frames' mean × every probe frame that ran (≤ 8 timed per
-    engine frame).
+    pass costs 0.09 ms. The **preview blit** (own submit, queued right
+    behind the main one, samples its composite) is charged from the main
+    span's end and adds only that to `total` — raw, it read p50 8 ms in the
+    app. `probe` is raw: the timed probe frames' mean × every probe frame
+    that ran (≤ 8 timed per engine frame).
+  - **A timed frame runs alone on the GPU.** Otherwise its first pass's
+    span counts the previous frame's tail (the app read `composite.live`
+    p95 14.4 ms, `gpu.total` p95 29.8 ms — negative headroom at a steady
+    60 fps). Offscreen, `wait_turn` drains before acquire (§2.10); on a
+    window `GpuContext::drain_before_timed_submit` polls `Maintain::Wait`
+    right before the main submit (after encoding, so it waits only for
+    what's left; charged to `acquire`). Untimed frames never wait. Not yet
+    verified on a visible window — AFK block B6 (`docs/TODO/afk-test-session.md`).
   - **Metal quirks handled:** a pass with no draws gets no end-of-fragment
     sample (empty composite → dropped for that frame; a frame with nothing
     sane isn't a sample). **wgpu-hal 22 bug:** Metal `copy_query_results`
@@ -1244,7 +1261,7 @@ Chrome on the machine:
 A full run takes **~100–110 s** (+ ~10 s for the capacity search) and
 measures, on the M2: smoke `gpu.total` p95 2.5 ms, preview-remote 4.8,
 warp-64 5.9 (the 64-handle rebake is ~3.4 ms of it), `knob→submit` p95
-~33.5 ms (§4 #9), 0 wgpu objects gained over edit-churn, ≥ 64 clip
+~18 ms (§4 #9; 33.5 before the tick moved), 0 wgpu objects gained over edit-churn, ≥ 64 clip
 bindings held. Findings it surfaced are §4 #12.
 
 ---
@@ -1451,15 +1468,20 @@ Ranked; none currently show-stopping at 5–20 layers.
    0 + handshake, or kill-by-pidfile, when it bites.
 8. ~~No regression gate~~ — **resolved 2026-10-12**: §2.10 (`--bench` +
    `scripts/perf_gate.py`).
-9. **Knob → submit is ~2 frames, not ≤ 1** (§2.9 measured `knob_submit_p95`
-   ≈ 31 ms at 60 Hz). Legs tick *before* `acquire`, and `acquire` is where
-   the frame waits for vsync, so a value read at tick reaches the GPU one
-   vsync wait later — and a write landing during that wait misses the tick.
-   Ticking after `acquire` would cut ~one frame; not done (behaviour change,
-   needs the probe/timing re-checked). The §2.10 `knob-latency` scenario
-   measures 33.3–34.7 ms p95 with a 100 Hz knob (ceiling 2 × 16.7 ms), so
-   its budget is 36 ms until the tick moves The real swapchain agrees: 32.7 ms p95 on a
-   standalone window in front (AFK B5, 2026-10-12).
+9. ~~Knob → submit is ~2 frames, not ≤ 1~~ — **resolved 2026-10-12** (perf
+   P6). Legs used to tick *before* `acquire` — where the frame waits for
+   vsync — so a value read at tick reached the GPU one vsync wait later
+   (bench 33.3–34.7 ms p95, real swapchain 32.7 ms). `Core::redraw` now
+   runs acquire → clocks + promote step → tick both legs → encode → submit;
+   the bench's virtual vsync sits in the same `acquire`. `knob-latency`:
+   p95 33.3 → ~18 ms, p50 28 → 12 (a write waits ≤ 1 frame for the next
+   tick, then ~1 ms tick → submit); budget 22 ms. Clip decode lead is
+   unchanged (the decoder `want` was already sent in `encode_uploads`,
+   after acquire); stale stays 0 on `clips-7`/`preview-clips`. The
+   occluded path (`render_offscreen_frame`) has no vsync wait and is
+   unchanged. A `SurfaceError` frame now ticks nothing; the next step
+   integrates the gap. `OutputFrame` owns its view (an `Arc` offscreen) so
+   the acquired frame borrows nothing across the tick.
 10. ~~Dev builds drop frames on the preview JPEG~~ — **resolved 2026-10-12**:
    dependencies build optimized in dev (`[profile.dev.package."*"]` in both
    manifests), the shell subscribes to `preview` only on demand, and the
