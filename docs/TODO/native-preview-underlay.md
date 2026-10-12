@@ -1,7 +1,8 @@
 # Native preview underlay — what's left (sprint plan, 2026-10-12)
 
 **Status:** U0–U6 **landed 2026-10-12** (same day as the plan). Open: the
-manual checks below, then **U7** (soak → delete the fallback). Current
+interaction checks (AFK session block B2), then **U7** (soak → delete the
+fallback). Current
 state lives in [render-engine.md](../reference/render-engine.md) §1b
 ("Native preview — the underlay") and [operator-ui.md](../reference/operator-ui.md)
 (the `<NativeSlot>` / hole-rule traps, the devport agent hooks).
@@ -16,26 +17,18 @@ hatch until the soak has run. Don't let it linger past the gig.
 
 ## Open
 
-### Manual checks (need a human at the window — never run by an agent)
+### Manual checks → AFK test session block B2
 
-Agents verified placement, rooms, warp, photo blend, snapshots, engine
-restart and the fallback via screenshots + `preview.snapshot` (see Shipped).
-What a still can't show:
+The interaction and window-robustness checks (clicks and a dropdown over the
+image, resize / fullscreen / minimize / fast room switching, a TAKE
+crossfade on the monitor, an Align handle drag, a second display) run
+unattended as **block B2 of [afk-test-session.md](afk-test-session.md)**.
+Its Results decide whether this section can go.
 
-- Clicks over the image reach the webview (Prepare region pick, Align
-  handle drag, Perform monitor) and a dropdown opened over the monitor
-  renders on top.
-- Window resize / fullscreen toggle / fast room switching: image tracks the
-  slot, no stale or misplaced frame (trailing 1–2 frames during a live
-  resize is expected — webview and native layer commit separately).
-- Minimize/restore and moving to a second display (contentsScale follows on
-  the next `place`; check it's sharp on a 1× display).
-- A TAKE crossfade visible in the Perform monitor; dragging an Align handle
-  — the image trails the grid by a few frames (accepted).
-- Prepare BOTH: eyeball against memory of the old canvas; tune
-  `BACKDROP_PARAMS.both.photo_weight` in `SurfaceMap.tsx` (0.15 now) if the
-  photo reads too dim/bright — tune the weight, not the space (linear
-  additive is the physics).
+Not in B2 — needs Xander's eyes: Prepare BOTH vs. the old look; tune
+`BACKDROP_PARAMS.both.photo_weight` in `SurfaceMap.tsx` (0.15 now) if the
+photo reads too dim/bright — tune the weight, not the space (linear
+additive is the physics).
 
 ### U7 — Soak, delete the old path
 
