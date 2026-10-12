@@ -1260,11 +1260,15 @@ Chrome on the machine:
   copy of `smoke`: `gpu.total` p95 2.46 → 8.45 ms, FAIL on budget and
   regression).
 
-A full run takes **~100–110 s** (+ ~10 s for the capacity search) and
-measures, on the M2: smoke `gpu.total` p95 2.5 ms, preview-remote 4.8,
-warp-64 5.9 (the 64-handle rebake is ~3.4 ms of it), `knob→submit` p95
-~18 ms (§4 #9; 33.5 before the tick moved), 0 wgpu objects gained over edit-churn, ≥ 64 clip
-bindings held. Findings it surfaced are §4 #12.
+A full run takes **~125–145 s** (incl. ~10 s for the capacity search) and
+measures, on the M2 (baseline refreshed 2026-10-12 after the perf pass):
+`gpu.total` p95 smoke 2.3 ms, layers-heavy 2.3, preview-remote 2.7 (4.8
+before the pass), fabric-7 0.8, warp-64 5.6 (the 64-handle rebake is ~4.1
+of it), `knob→submit` p95 ~18 ms (§4 #9; 33.5 before the tick moved), 0
+wgpu objects gained over edit-churn, ≥ 64 clip bindings held. GPU p95 rows
+spread up to ~40 % run to run even on a quiet machine, and the baseline
+keeps the best of 3: a lone p95 FAIL gets an interleaved A/B against the
+previous binary before anyone acts on it. Findings it surfaced are §4 #12.
 
 ---
 
@@ -1489,7 +1493,10 @@ Ranked; none currently show-stopping at 5–20 layers.
    dependencies build optimized in dev (`[profile.dev.package."*"]` in both
    manifests), the shell subscribes to `preview` only on demand, and the
    JPEG is GPU-downscaled + encoded off-thread (`preview.jpeg` p95 24 ms →
-   0.2 ms in dev).
+   0.2 ms in dev). render-core itself stays at opt-level 1 in dev (fast
+   engine rebuilds), so **a show runs a release build** (`pnpm tauri build`,
+   or `pnpm tauri dev --release`); in-app CPU numbers taken under `tauri
+   dev` overstate the engine's share.
 11. **The §2.6 probe renders clip effects without their clip** (found by
    gig F1, 2026-10-12). `probe.rs` builds each item's bind group with no
    image (`layer_bind_group(…, None)`), so an effect with an `image` input
