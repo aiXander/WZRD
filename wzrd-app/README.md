@@ -31,8 +31,8 @@ contract: `../docs/reference/render-engine.md` §2.6.
 │                                                                  │
 │  React + TS webview ◀─Tauri invoke─▶ Rust commands (src-tauri/   │
 │  (3 routes, Monaco)                  rpc.rs) → rpc::dispatch     │
-│      + borderless native preview          │      (direct call)   │
-│        child window over the hero slot    ▼                      │
+│      + native preview NSView *under*      │      (direct call)   │
+│        the transparent webview            ▼                      │
 │  engine-render thread: render_core::Core                         │
 │    engine output window (wgpu) ───────────────▶ projector        │
 │    native preview blit (same GPU device/composite)               │
@@ -45,8 +45,9 @@ contract: `../docs/reference/render-engine.md` §2.6.
 The engine runs **in-process** as a library (app-collapse Steps 2–3;
 current-state residue in `../docs/reference/render-engine.md` §1b): the
 shell owns the engine output
-window and a borderless preview child window, and drives `Core` on a render
-thread. Local UI calls skip the WS hop entirely; the WS server remains for
+window and a native preview view beneath the (transparent) webview —
+`WZRD_PREVIEW=window` falls back to the old preview child window — and
+drives `Core` on a render thread. Local UI calls skip the WS hop entirely; the WS server remains for
 external clients.
 
 ## Dev workflow

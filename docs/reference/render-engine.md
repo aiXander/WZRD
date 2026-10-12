@@ -55,7 +55,7 @@ agents.
 │ photo→detect→align→darken  │      ┌──────────────────────────────────────────────────┐
 │ →islands→layerpack         │      │ wzrd-app (Tauri, ONE process)                    │
 └────────────────────────────┘      │  main thread: webview window (React UI) +        │
-                                    │    borderless native preview child window        │
+                                    │    native preview NSView *under* the webview     │
 ┌────────────────────────────┐      │  engine-render thread: render-core::Core         │
 │ Audio Feature Server       │      │    - engine output window (wgpu, tao handle)     │
 │ (~/GitHub/Realtime_PyAudio │ ────▶│    - mask atlas + pass plan + driver bus         │
@@ -83,28 +83,42 @@ agents.
   and the future MCP wrapper.
 - **Occlusion is polled, not evented** — tao has no `Occluded` event. The
   render thread reads `NSWindow.occlusionState` (one objc msg_send) per
-  frame for *both* the engine window and the preview window, upholding
-  §3.1 for both swapchains.
+  frame for *both* the engine window and the window hosting the preview
+  (the main window for the underlay), upholding §3.1 for both swapchains.
 - **Render-thread rule (deadlock):** the render thread must never call a
   tauri window method that dispatches to the main thread (`inner_size`,
   `set_*`…) — sync Tauri commands run *on* the main thread and block on
   render-thread replies, so that's a deadlock. Sizes flow in via `Resized`
   events through shared state (`SizeState`).
-- **Native preview (Step 3):** a borderless, hidden-by-default tauri
-  window (`label: "preview"`) attached as a **macOS child window** of the
-  main window (`addChildWindow:ordered:` — follows drags, stacks above the
-  webview). React's `NativePreview` component (Perform hero) measures its
-  slot and pushes CSS-px bounds through the `preview_set_bounds` command;
-  the backend converts to physical screen coords and moves the child
-  window; the render thread blits a composite onto it via
-  `gpu::PreviewTarget` — the final-pass pipeline with the §2.8 warp off
-  (1×1 zero dummy LUT, `adjust.w = 0`).
-  Since §2.6 the preview has a LIVE⇄DESIGN source toggle: DESIGN (the
-  authoring default) shows the design composite un-mastered (§5.4
-  convention); LIVE shows the live composite with the real
-  brightness/saturation masters (still no calibration warp — it only
-  reads right on the physical surface). Lossless, full-rate, same GPU
-  device, zero readback.
+- **Native preview — the underlay (2026-10-12, replacing the Step-3 child
+  window).** `wzrd-app/src-tauri/src/underlay.rs` inserts a plain `NSView`
+  with our own `CAMetalLayer` into the main window *directly below the
+  `WKWebView`* (both are subviews of wry's `WryWebViewParent`) and turns
+  the webview's background off (`drawsBackground` KVC — private, so no Mac
+  App Store; the window background is set to the app `--bg`). The render
+  thread blits `gpu::PreviewTarget` into it; every bit of HTML composites
+  *over* the image, and clicks always reach the webview (in-window
+  `NSView` hit-testing ignores alpha). React's `<NativeSlot>` measures its
+  rect and pushes `preview_set_slot {x,y,width,height,visible,params}`;
+  the backend places the view via `NSWindow.contentLayoutRect` (the
+  webview's own frame spans the title bar under the full-size-content
+  style — measuring from it lands the image one title bar too high) and
+  forwards physical size + `PreviewParams` to the render thread, which
+  caps the drawable at composite resolution (the layer's resize gravity
+  scales it). Rooms differ only in `PreviewParams` (`core.rs`): Perform =
+  the deck-toggle leg (DESIGN un-mastered, LIVE with real masters);
+  Prepare = design + the pack's surface photo (`photo_weight` /
+  `light_weight`, additive in linear light); Align = `program: true`, the
+  exact projector final pass incl. the real §2.8 warp (LUT indexed by
+  **uv**, `fs_preview`) and test pattern, `dim` 0.55. Same device,
+  full-rate, zero readback. Ordering upholds §3.1: on show the view is
+  unhidden before the engine presents; on hide the engine stops first.
+  **Fallback:** `WZRD_PREVIEW=window` restores the old borderless child
+  window ordered *above* the webview (Perform only; Prepare/Align then
+  draw the JPEG channel) — the stage escape hatch until the underlay has
+  soaked through a gig, then it is deleted
+  ([native-preview-underlay.md](../TODO/native-preview-underlay.md) U7).
+  HTML rules for the hole: [operator-ui.md](operator-ui.md) trap list.
 - **Crash containment (spike b):** the render loop runs under
   `catch_unwind`; a render-thread panic (incl. wgpu's fatal-by-default
   validation panic after device loss) kills the engine but not the
@@ -116,7 +130,7 @@ agents.
   `RunEvent::ExitRequested` → `EngineHandle::shutdown()` → stop flag →
   join render thread (Core saves the session and drops the GPU context on
   that thread, *before* tauri destroys windows) → audio child killed.
-- **Re-rooting (gig A1, 2026-10-10):** the engine + preview windows live
+- **Re-rooting (gig A1, 2026-10-10):** the engine window + preview host live
   in `EngineWindows` (created once, event handlers registered once); an
   `EngineHandle` is one engine on one scene path. A project switch or
   "Restart engine" is `shutdown()` (the teardown above) + a fresh
@@ -183,9 +197,9 @@ not "fix" it to alpha blending.
 |---|---|
 | `lib.rs` | `Cli` + `run()` — shared entry for the binary and any embedder. |
 | `main.rs` | CLI parse + **tee logger** (stderr + `log` telemetry channel via `telemetry::global_bus`). |
-| `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, session persistence (§5.3 restore-at-boot, debounced write, SIGTERM/SIGINT snapshot → `exit_requested()`), plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. Step-2/3 additions: `control_channel()` (hands an embedding host the WS server's `RpcContext` + command sender — one dispatch path for every consumer), `attach_preview_surface`/`resize_preview_surface`/`set_preview_visible` (native preview; host owns §3.1 for it), `spike_force_device_loss()` (crash-spike test hook). The command channel + `RpcContext` now always exist (headless just never sends). |
+| `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, session persistence (§5.3 restore-at-boot, debounced write, SIGTERM/SIGINT snapshot → `exit_requested()`), plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. Step-2/3 additions: `control_channel()` (hands an embedding host the WS server's `RpcContext` + command sender — one dispatch path for every consumer), `attach_preview_surface`/`resize_preview_surface`/`set_preview_visible`/`set_preview_params` (native preview; host owns §3.1 for it; `PreviewParams` = what the slot shows, see §1b; the surface photo loads on attach), `cmd_preview_snapshot` (`preview.snapshot`), `spike_force_device_loss()` (crash-spike test hook). The command channel + `RpcContext` now always exist (headless just never sends). |
 | `app.rs` | Thin `WinitHost` — window creation/fullscreen/display selection, winit event delegation into `Core`, exit decisions. The only winit-aware file besides `lib.rs`. |
-| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → §2.8 warp) and `WarpTarget` (the alignment LUT + its bake pipeline). Step 3: keeps `instance`/`adapter` so `PreviewTarget` (second swapchain; §5.6 source toggle — one bind group per leg, LIVE renders with real masters, DESIGN neutral) can attach at runtime; `render_preview()` self-heals `Lost`/`Outdated`. Its test module holds the two GPU-backed guards worth knowing about: `baked_lut_matches_the_cpu_model` and `final_pass_samples_through_the_warp` (both skip cleanly with no adapter), plus a naga parse+validate of the output shaders so a WGSL typo fails on the desk rather than at device creation. |
+| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → §2.8 warp) and `WarpTarget` (the alignment LUT + its bake pipeline). Keeps `instance`/`adapter` so `PreviewTarget` (second swapchain) can attach at runtime: it runs `final_pass.wgsl`'s `fs_preview` entry — the projector math plus a preview-only group 1 (surface photo + dim/photo/light weights) — with a bind group per leg (dummy 1×1 LUT, warp off) and a **program** group on the real LUT (rebuilt in `resize_warp`); `render_preview()` self-heals `Lost`/`Outdated`; `encode_preview_snapshot` renders the same view offscreen. `Downscaler` (`downscale.wgsl`, 3×3 bilinear-tap box filter → `Rgba8UnormSrgb`) makes the JPEG thumbnail on the GPU. Its test module holds the GPU-backed guards worth knowing about: `baked_lut_matches_the_cpu_model`, `final_pass_samples_through_the_warp` and `program_preview_samples_through_the_warp_at_another_size` (all skip cleanly with no adapter), plus a naga parse+validate of the output shaders so a WGSL typo fails on the desk rather than at device creation. |
 | `alignment.rs` | §2.8 alignment layer: `AlignmentDoc` (the `alignment.json` schema), `homography_from_corners` (Heckbert) + analytic 3×3 inverse, the Wendland C² kernel and its LU solve, `AlignmentState` (solved doc + dirty stamps, shared with the render thread and the RPC surface), `TestPattern`, bake-uniform packing, and the boot migration from the legacy calibration matrix. Talks to no GPU. |
 | `perf.rs` | §2.9 always-on frame profiler (perf-monitor PM1): the fixed `Stage` enum, `Perf` recorder (span/lap/enter tokens into a `[u32; Stage::COUNT]`, 300-frame ring, spike capture, 2 Hz aggregate), the cross-thread `Shared` half in `RpcContext` (knob stamps, trigger, latest snapshot), and the process-global lock-free side probes: `ThreadCpu`, `ClipStats`, `count_telemetry`, plus `wgpu_resources` / `texture_bytes`. |
 | `probe.rs` | §5.6 shader pre-flight probe: `ProbeThresholds` (A/B atomics, sidecar-persisted), `ProbeSession` (half-res interleaved probe frames, overhead-calibrated full-res p95 prediction, pessimistic driver values), three-band verdict + JPEG thumbnail. |
@@ -199,7 +213,7 @@ not "fix" it to alpha blending.
 | `osc.rs` | UDP OSC sink for `/audio/lmh` + `/audio/onset/*` → lock-free `AudioFeatures` atomics. `OscListener` drop stops + joins the thread, so the port is free on return (an in-process re-root rebinds it, §1b). |
 | `rpc.rs` | JSON-RPC dispatch: inline read-only + live-tuning methods (`param.set` both forms, `master.set`, `hello`, `changes.list`) + queued `EngineCommand`s for mutations — an envelope `{cmd: Command, queued_at}` so the render thread can time `rpc.queue` (`scene.load` incl. `base_rev` CAS, `effect.*`, `identity.setGroups`, `session.save`); `wgsl.validate` with user-source line remapping; §2.7 `Actor` (per-connection identity) + `PackInfoCell` (swappable `pack.info` snapshot). |
 | `ws.rs` | tungstenite server, thread-per-connection, telemetry fan-out. `ServerHandle` drop joins the accept loop and closes every connection — port free on return, clients reconnect to the next engine (§1b re-rooting). |
-| `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay + `subscriber_count`), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (non-blocking composite readback → JPEG @ ~15 fps — **demand-gated since Step 3**: capture only runs with ≥1 `preview` subscriber), §2.7 `ChangeLog` (design rev + boot epoch + change ring), payload types. |
+| `telemetry.rs` | `Bus` (bounded per-subscriber channels + sticky replay + `subscriber_count`), `FpsAccumulator` (honest fps + percentiles), `PreviewSampler` (the `preview` channel + `preview.snapshot` readbacks: GPU downscale to a 320-px sRGB thumbnail, ~230 KB non-blocking map, then a `preview-encode` worker thread JPEG-encodes — busy worker drops the frame; demand-gated on ≥1 `preview` subscriber; render-thread cost ≈ a memcpy, 0.2 ms p95 in dev), §2.7 `ChangeLog` (design rev + boot epoch + change ring), payload types. |
 | `watch.rs` | notify-based watcher over the scene file + effects dir. |
 
 **`wzrd-app/`** — `src-tauri/src/{lib,engine,rpc}.rs` (in-process TauriHost —
@@ -368,7 +382,8 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `scene.reload` | queued | Re-read from disk (same design-leg routing). |
 | `promote {fade_ms?, quantize?}` | queued | §2.6 — crossfade projector live→design over `fade_ms` (default: the §5.4 crossfade-time master, ms), then live adopts design's plan (pointer swap). `quantize: "bar"` (default) starts the fade on the next bar boundary; `"now"` immediately. Pending promote replaced by a newer one; **rejected while a fade is ramping**. |
 | `pull` | queued | §2.6 — hard-copy live's scene back into design. Rejected mid-ramp; cancels a pending promote + any in-flight probe apply. |
-| `preview.setSource {source}` | queued | §2.6 — `"live"` \| `"design"`: which composite the native preview blits. |
+| `preview.setSource {source}` | queued | §2.6 — `"live"` \| `"design"`: which composite the native preview blits (when the slot doesn't pin one). |
+| `preview.snapshot {width?}` | queued | JPEG of **exactly what the native preview slot shows** (its `PreviewParams`: program view, photo blend, dim), rendered offscreen; default width = slot drawable capped at 1024. Reply `{encoding, width, height, data_b64, params, leg, slot_px}`. Errors when no slot is visible. The agent's way to verify the underlay — webview screenshots can't see it. |
 | `probe.setThresholds {a_ms, b_ms}` | inline | §2.6 probe bands, A < B, ms of predicted full-res p95. Sidecar-persisted (venue state). |
 | `probe.getThresholds` | inline | Current `{a_ms, b_ms}`. |
 | `effect.upsert {name, wgsl, descriptor?}` | queued | §2.7 verdict-in-reply: naga-validates **before** touching disk (bad WGSL → line-mapped diagnostics in the reply, nothing written), then writes `effects/<name>/`, rescans the registry (so the watcher echo of the self-write dedupes to nothing), and re-applies the design scene — the reply defers through the §2.6 probe and carries verdict + thumbnail + `{epoch, rev}` when the scene binds the effect. |
@@ -395,7 +410,7 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 
 | Channel | Rate | Payload |
 |---|---|---|
-| `preview` | ~15 fps | 320px JPEG of a composite, base64 — the **design** composite in two-leg mode (§2.6 blanket leg rule), live headless. **Demand-gated**: captured only while ≥1 subscriber listens. Consumers: remote WS clients + the webview's Prepare canvas underlay. The Perform hero uses the native preview surface instead (§1b). |
+| `preview` | ~15 fps | 320px JPEG of a composite, base64 — the **design** composite in two-leg mode (§2.6 blanket leg rule), live headless. **Demand-gated**: captured only while ≥1 subscriber listens. GPU-downscaled (smooth, not point-sampled), encoded off the render thread. Consumers: MCP `get_preview`, the browser build, remote operators, and in the app only Perform's small CUED·DESIGN monitor (the shell subscribes on demand via `preview_jpeg_demand`, never by default). Every in-app room view uses the native underlay (§1b). |
 | `fps` | 2 Hz | Honest throughput (frames/wall-second) + p50 frame time. |
 | `frame_stats` | 2 Hz | p50/p95/p99 + mask-slice / pipeline / pass counts (counts follow the **design** plan in two-leg mode — §2.6). |
 | `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). Rows come from the **design** plan in two-leg mode. |
@@ -564,13 +579,17 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   design.** `scene.load`/`scene.reload`, the file watcher, effect changes,
   the JPEG `preview` channel, `scene.getState` (default), the `drivers`
   channel and `frame_stats` counts all target/read the design leg. Only the
-  projector and the preview toggle's LIVE position show live. Live is
+  projector, the preview toggle's LIVE position and Align's program view
+  show live. Live is
   immutable except via `promote`.
 - **Both legs tick every frame** (shared transport/audio bus — bar-quantized
   promotes land in sync; §5.2 picks are stateless hashes, so the legs pick
   identically). Design's **render passes are demand-gated**: they run only
-  when the preview toggle sits on DESIGN, ≥1 WS `preview` subscriber exists,
-  or a promote is pending/ramping. An idle design leg costs zero GPU.
+  when the native preview shows design (deck toggle on DESIGN, or a slot
+  pinning `source: design` like Prepare — never the program view), ≥1
+  `preview` subscriber exists, or a promote is pending/ramping. An idle
+  design leg costs zero GPU — in the app too, since the shell stopped
+  subscribing to `preview` by default (2026-10-12).
 - **Promote = crossfade, then pointer swap.** The final pass
   samples both composites and lerps by a `mix` uniform ramped over
   `fade_ms` (wall time). On completion live **adopts design's already-built
@@ -611,12 +630,11 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   at boot a draft that differs from `scene.json` is restored into the
   design leg (probe-gated like any apply). A crash mid-design can't eat
   the draft.
-- **Preview topology: one window, source toggle.** The single native
-  `PreviewTarget` samples either composite with **that leg's own
-  brightness/saturation masters** and no §2.8 warp (the alignment warp only
-  reads right on the physical surface) — WYSIWYG for the leg
-  you're driving. `preview.setSource` flips it; the UI toggle lives in
-  Perform's deck bar.
+- **Preview topology: one view, source toggle.** The single native
+  `PreviewTarget` samples either composite — LIVE with the real
+  brightness/saturation masters, DESIGN un-mastered — and no §2.8 warp,
+  except in Align's program view (§1b). `preview.setSource` flips the leg
+  when the slot doesn't pin one; the UI toggle lives in Perform's deck bar.
 - **The deck toggle is a full control switch (decision revised 2026-07-12,
   same day it landed).** The original §5.6 design shared one venue-level
   `SliderBank`/`ParamOverrides`/masters/transport across both legs
@@ -724,9 +742,12 @@ projector swapchain only. It is engine-wide, never per leg, never
 duplicated, never copied on promote/pull, and never touched by `scene.load`,
 agent authoring or an effect reload. It is also **not scene content**: no
 MCP tool has a verb for it (same scope rule as §2.5). The native preview
-stays **unwarped** (§2.6 convention — the calibration warp only reads right
-on the wall), which is why the preview blit binds a 1×1 zero dummy LUT and
-writes `adjust.w = 0`.
+stays **unwarped** in Perform/Prepare (§2.6 convention — the calibration
+warp only reads right on the wall; their bind groups hold a 1×1 zero dummy
+LUT and `render_preview` clears `adjust.w`). Align's **program view** is the
+exception: it runs the projector's own uniforms on the real LUT, indexed by
+uv (`fs_preview`) because the preview target is never the LUT's size — the
+projector's `fs_main` keeps its exact per-pixel indexing.
 
 **The model.** `W(x) = H⁻¹(x) + R(x)`, mapping dest uv → source uv:
 
@@ -828,11 +849,12 @@ through the model and drawn where it actually lands, evaluated in
 why `weights` rides along on the alignment payload as read-only derived
 state. Re-solving in the UI would have been a second solver and a guaranteed
 drift between what the operator sees and what the projector does. The
-photographic underlay behind the grid is the `preview` JPEG placed with a CSS
-`matrix3d` built from the corner homography (a 3×3 maps exactly onto
-`matrix3d`, so it comes for free) — CSS cannot express the local
-corrections, so the image follows the corner quad only and the label says so.
-Grid = truth, image = reference, projector = ground truth. Before the grid
+image under the grid is the native **program view** (§1b): the projector's
+exact final pass, local corrections and test pattern included, dimmed, in a
+`<NativeSlot>` over the projector rect — image and grid now agree. Without
+the underlay (browser, `WZRD_PREVIEW=window`) it falls back to the
+`preview` JPEG placed with a CSS `matrix3d` from the corner homography, which
+cannot express local corrections (the label says so). Before the grid
 existed, dragging a handle changed nothing visible in the UI at all, which
 read as a broken feature.
 
@@ -1122,12 +1144,11 @@ Ranked; none currently show-stopping at 5–20 layers.
    vsync wait later — and a write landing during that wait misses the tick.
    Ticking after `acquire` would cut ~one frame; not done (behaviour change,
    needs the probe/timing re-checked).
-10. **Dev builds drop frames on the preview JPEG.** `preview.jpeg` p95 is
-   ~24 ms in `pnpm tauri dev` (unoptimized render-core; headroom went
-   negative) vs ~1.9 ms in release. The encode runs on the render thread on
-   capture frames (~15 fps) whenever a `preview` subscriber exists (the
-   webview's Prepare underlay). Fix candidates: `[profile.dev.package."*"]
-   opt-level` in `src-tauri`, or encode off-thread.
+10. ~~Dev builds drop frames on the preview JPEG~~ — **resolved 2026-10-12**:
+   dependencies build optimized in dev (`[profile.dev.package."*"]` in both
+   manifests), the shell subscribes to `preview` only on demand, and the
+   JPEG is GPU-downscaled + encoded off-thread (`preview.jpeg` p95 24 ms →
+   0.2 ms in dev).
 11. **The §2.6 probe renders clip effects without their clip** (found by
    gig F1, 2026-10-12). `probe.rs` builds each item's bind group with no
    image (`layer_bind_group(…, None)`), so an effect with an `image` input

@@ -145,9 +145,32 @@ newest first, placed by the C2 provenance sidecar's `region`.
 - **Shared mask assets** (`state/masks.ts`): each region's mask is loaded
   once → tinted overlay, 256-px pick map, silhouette thumbnail (the region
   glyphs in every list) + the pack's `surface.png` for the map's photo mode.
-- **The monitor can't be drawn on.** The native preview is a child window
-  over the measured slot (`NativePreview.tsx`, `useAspectFit`); all chrome
-  sits around it. In a browser it falls back to the JPEG `preview` channel.
+- **The native image lives *under* the page** (the underlay, host side in
+  [render-engine.md](render-engine.md) §1b). `<NativeSlot params>`
+  (`NativeSlot.tsx`) is a hole: it measures itself and the engine draws
+  there, beneath a transparent webview, so anything inside or over it
+  (mask overlays, the warp grid, dropdowns, modals) composites on top.
+  Three users, differing only in `PreviewParams`: Perform's monitor
+  (`NativePreview.tsx` — the deck-toggle leg), Prepare's `SurfaceMap`
+  (design + surface photo per the PHOTO/LIGHT/BOTH toggle, BOTH's photo
+  weight 0.15 linear ≈ the old 0.42 sRGB alpha; the canvas only draws
+  region overlays, cleared transparent) and Align's `WarpCanvas` (the
+  program view — the projector's exact output incl. local corrections,
+  dimmed 0.55, over the projector rect). The mode is resolved once at boot
+  (`api/previewMode.ts`): `underlay`, `window` (`WZRD_PREVIEW=window`, the
+  old child window — Perform only, Prepare/Align draw the JPEG) or `none`
+  (browser — JPEG everywhere, approximate). Components branch on
+  `nativeUnderlay()`. The JPEG `preview` channel arrives only while a
+  consumer holds `usePreviewJpegDemand` (refcounted `preview_jpeg_demand`);
+  never subscribe to it by default — that kept the JPEG readback and the
+  design leg running in every room.
+- **The hole rule: nothing between a `<NativeSlot>` and the page root may
+  paint a background over it**, or the image silently vanishes. `html`,
+  `body`, `#root` go transparent under `:root[data-underlay]`; a `Panel`
+  holding a slot takes `hole` (no `bg-panel`); `.dim-grid` stays off the
+  slot (Align draws its grid in the SVG, around the projector rect). In dev
+  the slot walks its ancestors on mount, `console.error`s and outlines any
+  that paint a background red. Siblings may paint freely.
 
 ## Browser bridge (dev harness)
 
@@ -172,6 +195,17 @@ coordinate clicks miss — click via element refs (`find`). In dev, the
 modules are importable from the page (`await import('/src/state/store.ts')`)
 to read store state as evidence.
 
+**Driving the Tauri webview itself (agents).** The native underlay is
+invisible to the browser seat and to webview screenshots. Two devport hooks
+cover it without taking the operator's keyboard focus: `POST
+/cmd/webview_eval {js}` runs a script in the app's own webview (e.g.
+`localStorage.setItem('wzrd.route','align'); location.reload()` to switch
+rooms), and `POST /cmd/debug_log {msg}` (callable from that script via
+`/__shell/cmd/debug_log`) writes `[webview] …` into the app log — the way
+to read a value back. The engine's `preview.snapshot` RPC returns exactly
+what the native slot shows; `screencapture -l <windowid>` grabs the real
+window (underlay included) even when it is covered.
+
 ## Traps
 
 - **No emitted `vite.config.js`.** Vite resolves `.js` before `.ts`; a
@@ -188,6 +222,12 @@ to read store state as evidence.
   down and the banner's "Restart engine" fixes it.
 - Colour defaults from `effect.describe` arrive as float arrays — convert
   with `LayerParams.tsx::toHex` before writing a scene.
+- **A page reload skips React unmount cleanups**, so a `<NativeSlot>` never
+  gets to hide itself; `initPreviewMode` resets the slot to hidden at every
+  boot. Same family: an effect that only measures on mount misses a
+  component that renders a "waiting" stub first (`WarpCanvas` re-measures
+  once the alignment doc arrives — before that fix, loading straight into
+  Align drew infinitely large handles).
 
 ## Keyboard (single keys, ignored while typing)
 
