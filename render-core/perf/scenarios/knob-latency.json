@@ -1,0 +1,29 @@
+{
+  "description": "Paced (virtual 60 Hz vsync): param.set on a live binding override at 100 Hz → knob→submit p95.",
+  "scene": "../../examples/phase3_smoke.scene.json",
+  "paced": true,
+  "warmup_frames": 60,
+  "frames": 300,
+  "timeline": [
+    {
+      "at_frame": 0,
+      "hz": 100,
+      "method": "param.set",
+      "params": {
+        "binding": "facade_silk",
+        "param": "speed",
+        "value": {
+          "$alt": [
+            0.8,
+            1.2
+          ]
+        },
+        "leg": "live"
+      }
+    }
+  ],
+  "gate": {
+    "latency": true,
+    "gpu": false
+  }
+}

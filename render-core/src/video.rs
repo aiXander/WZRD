@@ -5,9 +5,13 @@
 //! (`.mov`, decoded on its own thread). A source is opened once per (plan,
 //! binding) at plan build and owned by the plan, so it travels with the
 //! plan through the §2.6 promote pointer swap — a clip never reopens or
-//! jumps at TAKE. Opening never fails the plan: a missing, unreadable or
-//! non-HAP file becomes a per-binding warning and that binding samples
-//! transparent black.
+//! jumps at TAKE — and a rebuild of the same leg hands it on to the new
+//! plan (`compositor::Carry::Replace`), so a scene edit never reopens it
+//! either. A clip opens with the frame at its playhead already in the
+//! texture, so even a fresh one never shows black or frame 0 first.
+//! Opening never fails the plan: a missing, unreadable or non-HAP file
+//! becomes a per-binding warning and that binding samples transparent
+//! black.
 //!
 //! **The staging-ring invariant (§5.9).** Each clip stream owns a ring of
 //! [`RING_SLOTS`] `MAP_WRITE` staging buffers. Its decode thread does all
@@ -18,8 +22,10 @@
 //! (the map callback hands them back to the decoder). Decode falling behind
 //! means the previous frame stays up — a stutter, never a frame stall.
 //!
-//! **Playhead (C5):** stateless — `(leg transport seconds × rate) rem_euclid
-//! duration`. HAP is all-intra, so any frame is a free seek.
+//! **Playhead (C5):** `(leg transport seconds × rate + offset) rem_euclid
+//! duration` — the offset (owned by the plan) only moves when a rate edit
+//! needs the position held continuous. HAP is all-intra, so any frame is a
+//! free seek.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -55,8 +61,8 @@ enum SourceKind {
 
 impl ImageSource {
     /// Open `path` by extension: `.mov` → HAP clip stream, `.png`/`.jpg` →
-    /// still.
-    pub fn open(gpu: &GpuContext, path: &Path) -> Result<Self> {
+    /// still. A clip starts with the frame at `playhead_sec` in its texture.
+    pub fn open(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<Self> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -64,7 +70,7 @@ impl ImageSource {
             .unwrap_or_default();
         match ext.as_str() {
             "png" | "jpg" | "jpeg" => open_still(gpu, path),
-            "mov" => open_clip(gpu, path),
+            "mov" => open_clip(gpu, path, playhead_sec),
             other => bail!(
                 "unsupported image input {:?} (extension {other:?}; expected a HAP .mov, \
                  or a .png / .jpg still)",
@@ -85,13 +91,25 @@ impl ImageSource {
         self.size
     }
 
-    /// Whether the texture holds real content yet. A clip's texture starts
-    /// zeroed — which HAP Q's YCoCg decode would show as a blue frame — so
-    /// passes bind it only once the first decoded frame has landed.
-    pub fn has_frame(&self) -> bool {
+    /// Whether the texture shows (close to) the frame at `playhead_sec`, so
+    /// a pass may sample it. Stills always do. A clip whose stream sat idle
+    /// (muted, picked out, an unrendered design leg) still holds the frame
+    /// from when it stopped; showing that would flash old content before
+    /// the decoder catches up, so it reads as not current until it is.
+    /// `step_sec` is the playhead's advance per render frame: normal decode
+    /// lag (a few frames behind at high rates) stays within tolerance and
+    /// never blinks.
+    pub fn is_current(&self, playhead_sec: f64, step_sec: f64) -> bool {
         match &self.kind {
             SourceKind::Still { .. } => true,
-            SourceKind::Clip(c) => c.current.is_some(),
+            SourceKind::Clip(c) => c.current.is_some_and(|cur| {
+                near_playhead(
+                    cur,
+                    c.info.frame_at(playhead_sec),
+                    c.info.samples.len() as u32,
+                    step_sec * c.info.fps(),
+                )
+            }),
         }
     }
 
@@ -657,7 +675,7 @@ struct ClipStream {
     stats: Arc<ClipStats>,
 }
 
-fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
+fn open_clip(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<ImageSource> {
     if !gpu.bc_supported {
         bail!(
             "this GPU adapter has no BC texture compression \
@@ -683,23 +701,25 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
         block_rows: (h / 4) as usize,
     };
 
-    // Decode frame 0 here, synchronously, so a file that isn't really HAP
-    // (or is corrupt) fails the open with a named error instead of playing
-    // black forever.
-    let first = info.samples[0];
+    // Decode the playhead frame here, synchronously: a file that isn't
+    // really HAP (or is corrupt) fails the open with a named error instead
+    // of playing black forever, and the texture starts on the right frame —
+    // no black first frame, no flash of frame 0 before the decoder lands.
+    let start = info.frame_at(playhead_sec);
+    let first = info.samples[start as usize];
     let mut raw = vec![0u8; first.size as usize];
     file.seek(SeekFrom::Start(first.offset))?;
     file.read_exact(&mut raw)
-        .with_context(|| format!("reading frame 0 of {}", path.display()))?;
+        .with_context(|| format!("reading frame {start} of {}", path.display()))?;
     let mut blocks = Vec::new();
     let got = decode_hap_frame(&raw, &mut blocks)
-        .with_context(|| format!("decoding frame 0 of {}", path.display()))?;
+        .with_context(|| format!("decoding frame {start} of {}", path.display()))?;
     if got != format {
-        bail!("frame 0 is {got:?} but the track declares {format:?}");
+        bail!("frame {start} is {got:?} but the track declares {format:?}");
     }
     if blocks.len() != row_bytes * layout.block_rows {
         bail!(
-            "frame 0 decodes to {} bytes, expected {} for {w}×{h} {format:?}",
+            "frame {start} decodes to {} bytes, expected {} for {w}×{h} {format:?}",
             blocks.len(),
             row_bytes * layout.block_rows
         );
@@ -724,8 +744,29 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // Plan build is off the per-frame path, so the first frame goes up
+    // directly; the staging ring is for steady-state playback.
+    gpu.queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &blocks,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(row_bytes as u32),
+            rows_per_image: Some(layout.block_rows as u32),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
 
-    // Slot 0 starts with frame 0 already in it; the rest start free.
+    // Every slot starts free (mapped, owned by the decoder).
     let slots: Vec<wgpu::Buffer> = (0..RING_SLOTS)
         .map(|i| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -736,17 +777,14 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
             })
         })
         .collect();
-    write_slot(&slots[0], &blocks, layout);
-    slots[0].unmap();
     let slots = Arc::new(slots);
 
     let (want_tx, want_rx) = crossbeam_channel::bounded::<Want>(8);
     let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Ready>(RING_SLOTS);
     let (free_tx, free_rx) = crossbeam_channel::bounded::<usize>(RING_SLOTS);
-    for i in 1..RING_SLOTS {
+    for i in 0..RING_SLOTS {
         free_tx.send(i).expect("fresh channel");
     }
-    ready_tx.send(Ready { slot: 0, frame: 0 }).expect("fresh channel");
 
     let info = Arc::new(info);
     let stats = ClipStats::register(label.clone());
@@ -759,7 +797,7 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
         want_rx,
         ready_tx,
         free_rx,
-        in_flight: [Some(0), None, None, None],
+        in_flight: [None; RING_SLOTS],
         raw,
         blocks,
         label: label.clone(),
@@ -789,7 +827,7 @@ fn open_clip(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
             free_tx,
             ready: Vec::with_capacity(RING_SLOTS),
             recycle: Vec::with_capacity(RING_SLOTS),
-            current: None,
+            current: Some(start),
             last_want: None,
             prev_playhead: None,
             stats,
@@ -813,6 +851,17 @@ fn write_slot(slot: &wgpu::Buffer, blocks: &[u8], layout: Layout) {
             dst[..layout.row_bytes].copy_from_slice(src);
         }
     }
+}
+
+/// `shown` is close enough to `wanted` (frames of an `n`-frame loop) to
+/// present: within four render frames of playhead advance (`step_frames`
+/// per frame), at least four clip frames, either way round the loop — so a
+/// decoder a few frames behind, or a rate flipping direction, never reads
+/// as stale, while a stream that sat idle for a while does.
+fn near_playhead(shown: u32, wanted: u32, n: u32, step_frames: f64) -> bool {
+    let d = ahead(shown, wanted, 1, n);
+    let tolerance = (4.0 * step_frames.abs()).ceil().max(4.0) as u32;
+    d.min(n.max(1) - d) <= tolerance
 }
 
 /// Forward distance from `a` to `b` along `dir` (±1), modulo `n`.
@@ -1157,6 +1206,33 @@ mod tests {
         assert_eq!(info.frame_at(4.0), 0); // loops
         assert_eq!(info.frame_at(9.5), 45);
         assert_eq!(info.frame_at(-1.0 / 30.0), 119); // reverse wraps
+    }
+
+    #[test]
+    fn near_playhead_tolerates_lag_but_not_an_idle_gap() {
+        // 1× at 60 Hz on a 30 fps, 300-frame clip: half a frame per tick.
+        assert!(near_playhead(100, 100, 300, 0.5));
+        assert!(near_playhead(97, 100, 300, 0.5)); // decoder a few behind
+        assert!(near_playhead(298, 1, 300, 0.5)); // across the loop seam
+        assert!(near_playhead(101, 100, 300, 0.5)); // reversed rate
+        assert!(!near_playhead(40, 100, 300, 0.5)); // woke after 2 s idle
+        // 8×: four frames of playhead per tick widen the window to 16.
+        assert!(near_playhead(86, 100, 300, 4.0));
+        assert!(!near_playhead(60, 100, 300, 4.0));
+    }
+
+    /// A clip opens with the playhead frame already uploaded — never
+    /// black, never frame 0 first.
+    #[test]
+    fn open_starts_on_the_playhead_frame() {
+        let Some(gpu) = crate::compositor::tests::test_gpu() else {
+            eprintln!("no BC-capable adapter — skipping");
+            return;
+        };
+        let source = ImageSource::open(&gpu, &fixture("hap.mov"), 1.25).unwrap();
+        let SourceKind::Clip(c) = &source.kind else { panic!("clip expected") };
+        assert_eq!(c.current, Some(5)); // 4 fps: 1.25 s → frame 5
+        assert!(source.is_current(1.25, 0.0));
     }
 
     #[test]

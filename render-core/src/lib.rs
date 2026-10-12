@@ -17,11 +17,13 @@
 
 pub mod alignment;
 pub mod app;
+pub mod bench;
 pub mod compositor;
 pub mod core;
 pub mod drivers;
 pub mod effects;
 pub mod gpu;
+pub mod gpu_timing;
 pub mod osc;
 pub mod pack;
 pub mod perf;
@@ -103,7 +105,22 @@ pub struct Cli {
     /// measure the monitor's own overhead.
     #[arg(long, value_enum, default_value = "on")]
     pub perf: PerfMode,
+
+    /// Per-pass GPU timestamps for the `perf` channel's `gpu` columns
+    /// (PM2): time one frame in N. A timed frame costs the render thread
+    /// ~60–80 µs (wgpu encodes a query reset ahead of every timed pass),
+    /// so the default samples; `1` times every frame. `0` = off (no
+    /// timestamp feature requested, `gpu: null`) — the A/B switch for
+    /// measuring its overhead. Ignored with `--perf off` or on adapters
+    /// without `TIMESTAMP_QUERY`.
+    #[arg(long, default_value_t = DEFAULT_GPU_TIMING)]
+    pub gpu_timing: u32,
 }
+
+/// `--gpu-timing` default: time 1 frame in 30 (2 Hz at 60 fps — the
+/// `perf` emit rate). Keeps the amortised cost at a few µs/frame and the
+/// timed frames under 5 %, so they never move `cpu.work` p95.
+pub const DEFAULT_GPU_TIMING: u32 = 30;
 
 /// `--perf on|off`.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]

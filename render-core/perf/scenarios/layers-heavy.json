@@ -1,0 +1,17 @@
+{
+  "description": "40 bindings x the four built-ins on every layer, audio pinned to 1.0 over OSC (the probe's worst case).",
+  "scene": "../scenes/layers-heavy.scene.json",
+  "warmup_frames": 120,
+  "frames": 900,
+  "audio": {
+    "lmh": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "onset_hz": 8
+  },
+  "gate": {
+    "steady": true
+  }
+}

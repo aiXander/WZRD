@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::alignment::{self, AlignmentDoc, AlignmentState};
-use crate::compositor::{resolve_effect_def, PassPlan};
+use crate::compositor::{resolve_effect_def, Carry, PassPlan};
 use crate::drivers::{Crossfade, Masters, ParamOverrides, SliderBank, Transport};
 use crate::effects::{EffectKind, EffectRegistry, InputSlot};
 use crate::gpu::{
@@ -45,7 +45,8 @@ use crate::rpc::{
     self, parking_lot_lite::SwapValue, Actor, EngineCommand, PackInfo, PackInfoCell, RpcContext,
 };
 use crate::scene::{resolve_selector, SceneFile};
-use crate::perf::{self, Perf, Stage};
+use crate::gpu_timing::GpuTimer;
+use crate::perf::{self, GpuPass, Perf, Stage};
 use crate::session::{self, SessionFile};
 use crate::telemetry::{
     AudioSnapshot, Bus, ChangeLog, Connectivity, ConnectivityCell, DeckSnapshot, DriverSnapshot,
@@ -77,11 +78,19 @@ enum PromotePhase {
         armed_bar: u64,
     },
     /// Fade in flight — `mix` ramps 0→1 over `fade_ms` of wall time.
+    /// While `gated`, the fade holds at 0 until every clip the design leg
+    /// draws shows its playhead frame (`start` = when the TAKE armed).
     Ramping {
         start: Instant,
         fade_ms: f32,
+        gated: bool,
     },
 }
+
+/// Longest a TAKE waits for the design leg's clips to show their playhead
+/// frame — normally one or two frames after an idle design leg wakes; the
+/// bound keeps a stuck decoder from ever blocking a TAKE.
+const PROMOTE_CLIP_GATE: Duration = Duration::from_millis(250);
 
 /// Which composite a preview view samples. Wire form of [`Leg`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -329,6 +338,11 @@ pub struct Core {
     /// stage of the per-frame host contract is a span into it; see
     /// `perf.rs` for the hot-path rules.
     perf: Perf,
+    /// PM2 GPU timing stride (`--gpu-timing`; 0 = off, also with
+    /// `--perf off`) and the timer, created with the GPU context when the
+    /// adapter offers timestamp queries.
+    gpu_timing_every: u32,
+    gpu_timer: Option<GpuTimer>,
 }
 
 impl Core {
@@ -336,6 +350,13 @@ impl Core {
     /// load, effect registry, OSC listener, telemetry bus, WS server.
     /// GPU resources arrive later via [`Core::init_gpu`].
     pub fn new(cli: &Cli) -> Result<Self> {
+        Self::with_topology(cli, cli.ws_addr.is_some())
+    }
+
+    /// [`Core::new`] with the §5.6 topology chosen explicitly instead of
+    /// inferred from `--ws-addr`. The PM3 bench host (`bench.rs`) uses it
+    /// to run the operator app's two-leg topology without a WS server.
+    pub fn with_topology(cli: &Cli, two_leg: bool) -> Result<Self> {
         let scene_path = cli.scene.canonicalize().with_context(|| {
             format!("resolving --scene path {}", cli.scene.display())
         })?;
@@ -397,8 +418,8 @@ impl Core {
         }
 
         // §5.6: a control surface (WS server — set by the Tauri host too)
-        // means the two-deck topology; headless-only runs stay single-leg.
-        let two_leg = cli.ws_addr.is_some();
+        // means the two-deck topology; headless-only runs stay single-leg
+        // (`two_leg`, decided by the caller — see `Core::new`).
 
         let sliders = SliderBank::new();
         let masters = Masters::new();
@@ -511,6 +532,7 @@ impl Core {
         if !perf.on() {
             log::info!("perf monitor off (--perf off)");
         }
+        let gpu_timing_every = if perf.on() { cli.gpu_timing } else { 0 };
         let rpc_ctx = RpcContext {
             pack: Arc::new(PackInfoCell::new(PackInfo::from_pack(&pack))),
             changes: Arc::clone(&changes),
@@ -615,6 +637,8 @@ impl Core {
             frame_budget,
             last_redraw_request: None,
             perf,
+            gpu_timing_every,
+            gpu_timer: None,
         })
     }
 
@@ -640,8 +664,46 @@ impl Core {
             height,
             &self.pack,
             self.two_leg,
+            self.gpu_timing_every > 0,
         ))
         .context("initialising wgpu")?;
+        self.adopt_gpu(gpu)
+    }
+
+    /// Perf-monitor PM3 `--bench`: bring up the GPU with no window — the
+    /// final pass renders into an offscreen `width × height` texture
+    /// (see `GpuContext::new_offscreen`). The host then drives `redraw`
+    /// exactly as a windowed host does; `acquire` is the offscreen
+    /// backpressure (two submits in flight; `vsync_hz` = `--paced`).
+    pub fn init_gpu_offscreen(&mut self, width: u32, height: u32, vsync_hz: Option<f64>) -> Result<()> {
+        if self.gpu.is_some() {
+            return Ok(());
+        }
+        let gpu = pollster::block_on(GpuContext::new_offscreen(
+            width,
+            height,
+            vsync_hz,
+            &self.pack,
+            self.two_leg,
+            self.gpu_timing_every > 0,
+        ))
+        .context("initialising wgpu (offscreen)")?;
+        self.adopt_gpu(gpu)
+    }
+
+    /// Everything after the GPU context exists: timer, alignment output
+    /// size, live + design plans, design-draft restore, watcher.
+    fn adopt_gpu(&mut self, gpu: GpuContext) -> Result<()> {
+        if gpu.timestamps_supported {
+            let timer = GpuTimer::new(&gpu.device, &gpu.queue, gpu.backend(), self.gpu_timing_every);
+            log::info!(
+                "perf GPU timing on: 1 frame in {}, {} ns/tick",
+                timer.every(),
+                timer.period_ns()
+            );
+            self.perf.set_gpu_timing(timer.period_ns(), timer.every());
+            self.gpu_timer = Some(timer);
+        }
         // §5.14 — publish the output size the alignment document is expressed
         // against before any client can read it.
         let (lut_w, lut_h) = gpu.warp_size();
@@ -668,10 +730,12 @@ impl Core {
                     registry,
                     scene,
                     scene_path,
+                    plan: live,
                     ..
                 } = self;
+                let carry = live.as_ref().map_or(Carry::Fresh, Carry::Mirror);
                 gpu.as_mut()
-                    .and_then(|g| match PassPlan::build(g, pack, scene, registry, scene_dir(scene_path)) {
+                    .and_then(|g| match PassPlan::build(g, pack, scene, registry, scene_dir(scene_path), carry) {
                         Ok(p) => Some(p),
                         Err(e) => {
                             log::error!("design leg initial build failed: {e:#}");
@@ -750,6 +814,7 @@ impl Core {
             &self.scene,
             &self.registry,
             scene_dir(&self.scene_path),
+            self.plan.as_ref().map_or(Carry::Fresh, Carry::Replace),
         ) {
             Ok(plan) => {
                 log::info!("scene plan built ({} layer passes)", plan.layer_passes.len());
@@ -1157,7 +1222,7 @@ impl Core {
             self.pending_apply = Some(pending);
             return;
         };
-        if !pending.session.step(gpu) {
+        if !pending.session.step(gpu, self.gpu_timer.as_mut()) {
             self.pending_apply = Some(pending);
             return;
         }
@@ -1249,10 +1314,17 @@ impl Core {
                 pack,
                 registry,
                 scene_path,
+                design,
                 ..
             } = self;
             let gpu = gpu.as_mut().expect("apply_design_scene checked gpu");
-            PassPlan::build(gpu, pack, &scene, registry, scene_dir(scene_path))
+            // Same leg: clips the old design plan plays carry straight over
+            // — an edit never reopens, blanks or jumps them.
+            let carry = design
+                .as_ref()
+                .and_then(|d| d.plan.as_ref())
+                .map_or(Carry::Fresh, Carry::Replace);
+            PassPlan::build(gpu, pack, &scene, registry, scene_dir(scene_path), carry)
         };
         match build {
             Ok(plan) => {
@@ -1519,6 +1591,7 @@ impl Core {
                 self.promote = PromotePhase::Ramping {
                     start: Instant::now(),
                     fade_ms,
+                    gated: true,
                 };
                 "ramping"
             }
@@ -1566,10 +1639,12 @@ impl Core {
                 pack,
                 registry,
                 scene_path,
+                plan: live,
                 ..
             } = self;
             let gpu = gpu.as_mut().ok_or_else(|| "engine not ready".to_string())?;
-            PassPlan::build(gpu, pack, &live_scene, registry, scene_dir(scene_path))
+            let carry = live.as_ref().map_or(Carry::Fresh, Carry::Mirror);
+            PassPlan::build(gpu, pack, &live_scene, registry, scene_dir(scene_path), carry)
                 .map_err(|e| format!("{e:#}"))?
         };
         let design = self
@@ -1675,12 +1750,47 @@ impl Core {
                     self.promote = PromotePhase::Ramping {
                         start: Instant::now(),
                         fade_ms,
+                        gated: true,
                     };
                     self.mix = 0.0;
                     self.emit_deck();
                 }
             }
-            PromotePhase::Ramping { start, fade_ms } => {
+            PromotePhase::Ramping {
+                start,
+                fade_ms,
+                gated,
+            } => {
+                // Clip gate: a design leg that sat unrendered holds stale
+                // clip frames (or none bound yet). Hold the fade at 0 for
+                // the frame or two its decoders need, so neither a cut nor
+                // a fade ever puts an old or blank clip frame on the
+                // projector.
+                let start = if gated {
+                    let ready = self
+                        .design
+                        .as_ref()
+                        .and_then(|d| d.plan.as_ref())
+                        .is_none_or(PassPlan::clips_ready);
+                    if !ready && start.elapsed() < PROMOTE_CLIP_GATE {
+                        return;
+                    }
+                    if !ready {
+                        log::warn!(
+                            "promote: design clips not caught up after {} ms — taking anyway",
+                            PROMOTE_CLIP_GATE.as_millis()
+                        );
+                    }
+                    let now = Instant::now();
+                    self.promote = PromotePhase::Ramping {
+                        start: now,
+                        fade_ms,
+                        gated: false,
+                    };
+                    now
+                } else {
+                    start
+                };
                 self.mix = if fade_ms <= 0.0 {
                     1.0
                 } else {
@@ -1746,11 +1856,15 @@ impl Core {
                 registry,
                 design,
                 scene_path,
+                plan: live,
                 ..
             } = self;
             let design = design.as_mut().expect("checked above");
+            // Design reopens its own streams (never shared across legs) at
+            // the playheads live just adopted, so the next TAKE is seamless.
+            let carry = live.as_ref().map_or(Carry::Fresh, Carry::Mirror);
             gpu.as_mut().and_then(
-                |g| match PassPlan::build(g, pack, &design.scene, registry, scene_dir(scene_path)) {
+                |g| match PassPlan::build(g, pack, &design.scene, registry, scene_dir(scene_path), carry) {
                     Ok(p) => Some(p),
                     Err(e) => {
                         log::error!("design rebuild after promote failed: {e:#}");
@@ -1957,15 +2071,16 @@ impl Core {
     /// view runs the projector's exact uniforms (mix, live masters, warp,
     /// test pattern); otherwise one leg — LIVE with the real masters, DESIGN
     /// un-mastered (§5.4 convention) — then dim / photo / light weights.
-    fn present_preview(&self) {
+    fn present_preview(&mut self) {
         if !self.preview_visible {
             return;
         }
-        let Some(gpu) = self.gpu.as_ref() else { return };
         let (input, uniforms) = self.preview_uniforms();
+        let Some(gpu) = self.gpu.as_ref() else { return };
         let p = self.preview_params;
         let extra = PreviewExtraUniforms::new(p.dim, p.photo_weight, p.light_weight);
-        if let Err(e) = gpu.render_preview(input, uniforms, extra) {
+        let ts = self.gpu_timer.as_mut().and_then(|t| t.writes(GpuPass::Preview));
+        if let Err(e) = gpu.render_preview(input, uniforms, extra, ts) {
             log::warn!("preview present failed: {e}");
         }
     }
@@ -2193,28 +2308,36 @@ impl Core {
         // `acquire` is vsync backpressure, timed even when it errors so a
         // `SurfaceError` frame's wait still lands somewhere.
         let span = self.perf.begin();
-        let acquired = gpu.surface.get_current_texture();
+        let timed = self.gpu_timer.as_ref().is_some_and(GpuTimer::recording);
+        let acquired = gpu.acquire_output(timed);
         let span = self.perf.lap(Stage::Acquire, span);
         let frame = acquired?;
-        let swap_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
+        // Perf PM2: the previous frame's timestamps resolve here — every
+        // pass of that frame has been submitted by now.
+        if let Some(t) = self.gpu_timer.as_mut() {
+            t.encode_resolve(&mut encoder);
+        }
         // 0) §5.14 warp bake — edit-triggered, not per frame, and encoded
         //    into this same encoder so it costs no extra submit. The dirty
         //    flags are consumed *after* the swapchain frame is in hand, so a
         //    `SurfaceError` bail-out can't swallow a pending rebake.
         if self.alignment.take_render_dirty() || gpu.warp_needs_bake() {
             gpu.write_warp_uniforms(&self.alignment.bake_uniforms());
-            gpu.encode_warp_bake(&mut encoder);
+            gpu.encode_warp_bake(&mut encoder, timer_writes(&mut self.gpu_timer, GpuPass::WarpBake));
         }
         // 1) Live leg → live composite (clip uploads first, same encoder).
         plan.encode_uploads(&mut encoder);
-        plan.encode_composite(gpu, &mut encoder, &gpu.composite_view);
+        plan.encode_composite(
+            gpu,
+            &mut encoder,
+            &gpu.composite_view,
+            timer_writes(&mut self.gpu_timer, GpuPass::CompositeLive),
+        );
         // 2) Design leg → design composite, only when something consumes it.
         //    An idle design leg asks its clips for nothing, so they decode
         //    nothing.
@@ -2222,7 +2345,12 @@ impl Core {
             if let (Some(d), Some(view)) = (self.design.as_mut(), gpu.design_view.as_ref()) {
                 if let Some(p) = d.plan.as_mut() {
                     p.encode_uploads(&mut encoder);
-                    p.encode_composite(gpu, &mut encoder, view);
+                    p.encode_composite(
+                        gpu,
+                        &mut encoder,
+                        view,
+                        timer_writes(&mut self.gpu_timer, GpuPass::CompositeDesign),
+                    );
                 }
             }
         }
@@ -2230,18 +2358,24 @@ impl Core {
         //    → alignment warp → swapchain. Brightness/saturation refresh per
         //    presented frame so a master move lands next frame.
         gpu.write_final_pass(&self.final_pass_uniforms());
-        gpu.encode_final(&mut encoder, &swap_view);
+        gpu.encode_final(&mut encoder, frame.view(), timer_writes(&mut self.gpu_timer, GpuPass::Final));
         let commands = encoder.finish();
         let span = self.perf.lap(Stage::Encode, span);
-        gpu.queue.submit(std::iter::once(commands));
+        let submitted = gpu.queue.submit(std::iter::once(commands));
         let span = self.perf.lap(Stage::Submit, span);
-        frame.present();
+        gpu.present(frame, submitted);
         let span = self.perf.lap(Stage::Present, span);
         self.perf.after_submit();
         self.after_submit_legs();
+        if let Some(t) = self.gpu_timer.as_mut() {
+            t.after_submit(&mut self.perf);
+        }
         let span = self.perf.lap(Stage::Submit, span);
 
         self.present_preview();
+        if let Some(t) = self.gpu_timer.as_mut() {
+            t.end_frame(&mut self.perf);
+        }
         let span = self.perf.lap(Stage::PreviewPresent, span);
         let counts = self.frame_counts();
         self.fps.mark(&self.bus, counts, true);
@@ -2282,6 +2416,9 @@ impl Core {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("offscreen frame encoder"),
                 });
+            if let Some(t) = self.gpu_timer.as_mut() {
+                t.encode_resolve(&mut encoder);
+            }
             // The program-view preview (Align) reads the warp LUT, so alignment
             // edits must rebake it even while the projector is buried.
             if self.preview_visible
@@ -2289,15 +2426,25 @@ impl Core {
                 && (self.alignment.take_render_dirty() || gpu.warp_needs_bake())
             {
                 gpu.write_warp_uniforms(&self.alignment.bake_uniforms());
-                gpu.encode_warp_bake(&mut encoder);
+                gpu.encode_warp_bake(&mut encoder, timer_writes(&mut self.gpu_timer, GpuPass::WarpBake));
             }
             plan.encode_uploads(&mut encoder);
-            plan.encode_composite(gpu, &mut encoder, &gpu.composite_view);
+            plan.encode_composite(
+                gpu,
+                &mut encoder,
+                &gpu.composite_view,
+                timer_writes(&mut self.gpu_timer, GpuPass::CompositeLive),
+            );
             if design_demand {
                 if let (Some(d), Some(view)) = (self.design.as_mut(), gpu.design_view.as_ref()) {
                     if let Some(p) = d.plan.as_mut() {
                         p.encode_uploads(&mut encoder);
-                        p.encode_composite(gpu, &mut encoder, view);
+                        p.encode_composite(
+                            gpu,
+                            &mut encoder,
+                            view,
+                            timer_writes(&mut self.gpu_timer, GpuPass::CompositeDesign),
+                        );
                     }
                 }
             }
@@ -2309,10 +2456,16 @@ impl Core {
         let span = self.perf.begin();
         self.perf.after_submit();
         self.after_submit_legs();
+        if let Some(t) = self.gpu_timer.as_mut() {
+            t.after_submit(&mut self.perf);
+        }
         let span = self.perf.lap(Stage::Submit, span);
         // The native preview keeps presenting while the projector window is
         // buried — that's the whole point of the occluded path.
         self.present_preview();
+        if let Some(t) = self.gpu_timer.as_mut() {
+            t.end_frame(&mut self.perf);
+        }
         let span = self.perf.lap(Stage::PreviewPresent, span);
         let counts = self.frame_counts();
         self.fps.mark(&self.bus, counts, false);
@@ -2550,9 +2703,10 @@ impl Core {
             .iter()
             .chain(self.design.as_ref().and_then(|d| d.plan.as_ref()));
         for plan in plans {
-            total += plan.images.iter().map(|i| i.source.gpu_bytes()).sum::<u64>();
+            total += plan.images.iter().map(|i| i.gpu_bytes()).sum::<u64>();
         }
         total += self.preview.gpu_bytes();
+        total += self.gpu_timer.as_ref().map_or(0, GpuTimer::gpu_bytes);
         Some(total)
     }
 
@@ -2678,6 +2832,22 @@ impl Core {
     /// Test/host hook: is a probe currently holding a design apply?
     pub fn probe_in_flight(&self) -> bool {
         self.pending_apply.is_some()
+    }
+
+    /// PM3 bench host: the frame profiler (to record the measured window).
+    pub fn perf_mut(&mut self) -> &mut Perf {
+        &mut self.perf
+    }
+
+    /// PM3 bench host: wgpu live-resource counts (the leak signal) and the
+    /// adapter the context runs on; `None` before `init_gpu*`.
+    pub fn gpu_resources(&self) -> Option<serde_json::Value> {
+        let g = self.gpu.as_ref()?;
+        Some(perf::wgpu_resources(g.instance(), g.backend()))
+    }
+
+    pub fn adapter_info(&self) -> Option<wgpu::AdapterInfo> {
+        self.gpu.as_ref().map(GpuContext::adapter_info)
     }
 
     pub fn pace_frame(&mut self) {
@@ -2810,4 +2980,10 @@ fn write_agent_mirror(scene_path: &std::path::Path, raw: &str) -> Result<()> {
     std::fs::write(&tmp, raw.as_bytes())?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// Perf PM2: this frame's `timestamp_writes` for `pass`, if GPU timing is
+/// on and the frame is sampled.
+fn timer_writes(timer: &mut Option<GpuTimer>, pass: GpuPass) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+    timer.as_mut().and_then(|t| t.writes(pass))
 }

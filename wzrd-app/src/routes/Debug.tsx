@@ -351,7 +351,10 @@ function PerfPanel() {
     <div className="text-xs space-y-3">
       <PerfSummary perf={perf} />
       <div className="grid grid-cols-2 gap-4">
-        <StageTable perf={perf} />
+        <div className="space-y-3">
+          <StageTable perf={perf} />
+          <GpuTable perf={perf} />
+        </div>
         <div className="space-y-3">
           <ThreadsTable perf={perf} />
           <ClipsTable perf={perf} />
@@ -375,6 +378,10 @@ function PerfSummary({ perf }: { perf: PerfPayload }) {
         <div className={`font-mono ${tint}`}>{h == null ? '—' : `${Math.round(h * 100)} %`}</div>
       </div>
       <Stat label="cpu work p50 / p95" value={`${perf.frame.work.p50.toFixed(2)} / ${ms(perf.frame.work.p95)}`} />
+      <Stat
+        label="gpu total p50 / p95"
+        value={perf.gpu?.total ? `${perf.gpu.total.p50.toFixed(2)} / ${ms(perf.gpu.total.p95)}` : '—'}
+      />
       <Stat label={`interval p95 (budget ${perf.budget_ms.toFixed(1)})`} value={ms(perf.frame.interval.p95)} />
       <Stat label="dropped (window / total)" value={`${perf.dropped.window} / ${perf.dropped.total}`} />
       <Stat label="mode" value={perf.presenting ? 'presenting' : 'offscreen'} />
@@ -412,6 +419,37 @@ function StageTable({ perf }: { perf: PerfPayload }) {
             </tr>
           );
         })}
+      </tbody>
+    </table>
+  );
+}
+
+function GpuTable({ perf }: { perf: PerfPayload }) {
+  const gpu = perf.gpu;
+  if (!gpu) {
+    return <div className="text-fg3">gpu timing off (WZRD_GPU_TIMING=0) or no timestamp queries on this GPU</div>;
+  }
+  const rows = Object.entries(gpu.passes).sort((a, b) => b[1].p95 - a[1].p95);
+  return (
+    <table className="w-full">
+      <PerfHead cols={[`gpu pass (1 in ${gpu.every}, ${gpu.frames} frames)`, 'p50', 'p95', 'n']} />
+      <tbody className="font-mono">
+        {rows.map(([name, p]) => (
+          <tr key={name} className="border-t border-line">
+            <td>{name}</td>
+            <td className="text-right">{p.p50.toFixed(3)}</td>
+            <td className="text-right">{p.p95.toFixed(3)}</td>
+            <td className="text-right">{p.n}</td>
+          </tr>
+        ))}
+        {gpu.total && (
+          <tr className="border-t border-line text-fg2">
+            <td>total</td>
+            <td className="text-right">{gpu.total.p50.toFixed(3)}</td>
+            <td className="text-right">{gpu.total.p95.toFixed(3)}</td>
+            <td className="text-right">{gpu.frames}</td>
+          </tr>
+        )}
       </tbody>
     </table>
   );

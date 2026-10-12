@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "pack": "../../../test_results/layerpack/pack",
+  "transport": {
+    "bpm": 120
+  },
+  "bindings": [
+    {
+      "id": "facade_tint",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#3a5cff"
+      }
+    },
+    {
+      "id": "towers_hue",
+      "select": {
+        "group": "towers"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "wall",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "churn_fx",
+      "params": {
+        "speed": 1.5
+      }
+    }
+  ],
+  "post": []
+}

@@ -1,0 +1,11 @@
+{
+  "description": "The E1 gate scene: seven 1080p HAP clips (videoClip) — decode p95 and stale frames.",
+  "scene": "../scenes/clips7.scene.json",
+  "warmup_frames": 180,
+  "frames": 900,
+  "gate": {
+    "steady": true,
+    "stale": "zero",
+    "media": "clips"
+  }
+}

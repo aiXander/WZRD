@@ -1,0 +1,42 @@
+{
+  "description": "Two legs at 60 Hz (paced — stale frames are judged at the show's rate): every 2 s a clip-set swap — scene.load (the other four clips) onto design, then promote with a 400 ms fade. Guards the E1b/E2 TAKE trap: stale clip frames, rebuild time.",
+  "scene": "../scenes/clips7.scene.json",
+  "warmup_frames": 60,
+  "frames": 480,
+  "timeline": [
+    {
+      "at_frame": 30,
+      "every_frames": 120,
+      "count": 4,
+      "method": "scene.load",
+      "params": {
+        "json": {
+          "$alt": [
+            {
+              "$scene": "../scenes/clips7-b.scene.json"
+            },
+            {
+              "$scene": "../scenes/clips7.scene.json"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "at_frame": 90,
+      "every_frames": 120,
+      "count": 4,
+      "method": "promote",
+      "params": {
+        "fade_ms": 400,
+        "quantize": "now"
+      }
+    }
+  ],
+  "gate": {
+    "stale": "track",
+    "media": "clips",
+    "gpu": false
+  },
+  "paced": true
+}

@@ -22,7 +22,8 @@
 //! the WS and webview hops). Their registries are only locked when a
 //! thread/clip registers and at aggregation.
 //!
-//! GPU pass times are PM2 (`gpu: null` until then).
+//! GPU pass times (PM2) arrive from `gpu_timing.rs` as [`GpuFrame`]s of raw
+//! ticks; `gpu` is `null` when GPU timing is off or unsupported.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -140,6 +141,81 @@ impl Stage {
     /// time the frame waits, not work it does.
     pub fn is_work(self) -> bool {
         !matches!(self, Stage::Acquire | Stage::Pace)
+    }
+}
+
+/// GPU passes timed with timestamp queries (PM2, `gpu_timing.rs`). Only
+/// passes that already exist — the clip upload copies stay untimed (see
+/// `gpu_timing.rs` for why).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GpuPass {
+    /// §5.14 warp LUT bake (edit-triggered, rare).
+    WarpBake,
+    CompositeLive,
+    CompositeDesign,
+    /// Projector final pass (presented frames only).
+    Final,
+    /// Native preview blit (its own submit).
+    Preview,
+    /// §5.6 pre-flight probe frames (their own submits) — must stay last:
+    /// its query pairs follow the fixed passes.
+    Probe,
+}
+
+impl GpuPass {
+    pub const COUNT: usize = 6;
+    pub const ALL: [GpuPass; GpuPass::COUNT] = [
+        GpuPass::WarpBake,
+        GpuPass::CompositeLive,
+        GpuPass::CompositeDesign,
+        GpuPass::Final,
+        GpuPass::Preview,
+        GpuPass::Probe,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            GpuPass::WarpBake => "warp_bake",
+            GpuPass::CompositeLive => "composite.live",
+            GpuPass::CompositeDesign => "composite.design",
+            GpuPass::Final => "final",
+            GpuPass::Preview => "preview",
+            GpuPass::Probe => "probe",
+        }
+    }
+}
+
+/// One timed GPU frame in raw timestamp ticks (× `period_ns` → ns at
+/// aggregation). Arrives 2–3 frames after the CPU frame it belongs to.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuFrame {
+    pub ticks: [u32; GpuPass::COUNT],
+    /// Bit per [`GpuPass`] that ran (and was timed) this frame.
+    pub ran: u8,
+    /// Σ over the frame's submits of first-begin → last-end.
+    pub total: u32,
+}
+
+/// GPU timing state as `Perf` sees it — `None` in `Perf` = `gpu: null`.
+struct GpuTiming {
+    period_ns: f32,
+    every: u32,
+    frames: Ring<GpuFrame, RING_FRAMES>,
+    /// Sampled frames that found every readback slot in flight.
+    skipped: u64,
+}
+
+impl GpuTiming {
+    /// Samples the aggregate reads: ~10 s worth at the sampling stride
+    /// (20 at the default 1-in-30), never fewer than 16, at most the ring.
+    fn window(&self) -> usize {
+        (2 * RING_FRAMES / self.every.max(1) as usize).clamp(16, RING_FRAMES)
+    }
+
+    /// Newest `n` samples (newest first).
+    fn recent(&self, n: usize) -> impl Iterator<Item = &GpuFrame> {
+        (0..n.min(self.frames.len())).filter_map(move |i| self.frames.back(i))
     }
 }
 
@@ -265,6 +341,11 @@ fn round3(v: f32) -> f32 {
 
 fn us(d: Duration) -> u32 {
     d.as_micros().min(u32::MAX as u128) as u32
+}
+
+/// GPU ticks → µs (aggregation time only).
+fn ticks_us(ticks: u32, period_ns: f64) -> u32 {
+    (ticks as f64 * period_ns / 1000.0).round().min(u32::MAX as f64) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -426,8 +507,25 @@ pub struct Perf {
     resources: Value,
     gpu_mb: Option<f64>,
     rss_mb: Option<f64>,
+    /// PM2 — `None` until a `GpuTimer` exists (`perf.gpu` is then `null`).
+    gpu: Option<Box<GpuTiming>>,
+    /// PM3 `--bench` — the whole measured window (`None` outside a bench).
+    bench: Option<Box<BenchLog>>,
 
     scratch: Vec<u32>,
+}
+
+/// PM3 `--bench`: every record of the measured window, kept whole — the
+/// ring only holds ~5 s and the latency rings 128 samples. Allocated once
+/// at [`Perf::bench_begin`]; pushes stay allocation-free up to `frames`.
+struct BenchLog {
+    frames: Vec<FrameRecord>,
+    gpu: Vec<GpuFrame>,
+    gpu_skipped_at_start: u64,
+    knob_submit: Vec<u32>,
+    rpc_queue: Vec<u32>,
+    stale_at_start: u64,
+    started: Instant,
 }
 
 impl Perf {
@@ -461,6 +559,8 @@ impl Perf {
             resources: Value::Null,
             gpu_mb: None,
             rss_mb: None,
+            gpu: None,
+            bench: None,
             scratch: Vec::with_capacity(RING_FRAMES),
         }
     }
@@ -541,6 +641,9 @@ impl Perf {
         }
         ev.cmd_count = ev.cmd_count.saturating_add(1);
         self.rpc_queue.push(us(queued));
+        if let Some(b) = self.bench.as_mut() {
+            b.rpc_queue.push(us(queued));
+        }
     }
 
     pub fn note_reload(&mut self) {
@@ -570,6 +673,9 @@ impl Perf {
         if self.knob_inflight_us != 0 {
             let lat = mono_us().saturating_sub(self.knob_inflight_us);
             self.knob_submit.push(lat.min(u32::MAX as u64) as u32);
+            if let Some(b) = self.bench.as_mut() {
+                b.knob_submit.push(lat.min(u32::MAX as u64) as u32);
+            }
             self.knob_inflight_us = 0;
         }
     }
@@ -612,6 +718,9 @@ impl Perf {
             self.dropped_total += 1;
         }
         self.frames.push(record);
+        if let Some(b) = self.bench.as_mut() {
+            b.frames.push(record);
+        }
 
         if let Some(p) = self.pending_spike.as_mut() {
             p.frames_after += 1;
@@ -660,6 +769,94 @@ impl Perf {
         self.ready_spike = Some(Box::new(cap));
     }
 
+    // ----- GPU timing (PM2) -----
+
+    /// A `GpuTimer` exists: from now on `perf.gpu` reports. `period_ns`
+    /// converts ticks; `every` is the sampling stride (1 = every frame).
+    pub fn set_gpu_timing(&mut self, period_ns: f32, every: u32) {
+        if self.on {
+            self.gpu = Some(Box::new(GpuTiming {
+                period_ns,
+                every,
+                frames: Ring::new(),
+                skipped: 0,
+            }));
+        }
+    }
+
+    /// One read-back GPU frame (render thread, after a submit).
+    pub fn push_gpu(&mut self, frame: GpuFrame) {
+        if let Some(g) = self.gpu.as_mut() {
+            g.frames.push(frame);
+            if let Some(b) = self.bench.as_mut() {
+                b.gpu.push(frame);
+            }
+        }
+    }
+
+    /// A sampled frame found every readback slot in flight — not timed.
+    pub fn note_gpu_skipped(&mut self) {
+        if let Some(g) = self.gpu.as_mut() {
+            g.skipped += 1;
+        }
+    }
+
+    /// p50/p95/max (ms) of `pass` over the newest `frames` timed GPU frames
+    /// in which it ran — `None` without GPU timing or samples. The per-leg
+    /// composite accessor the E2 probation window reads
+    /// (`GpuPass::CompositeLive` / `CompositeDesign`): unlike frame
+    /// interval, a TAKE crossfade rendering both legs doesn't move it.
+    pub fn gpu_pass_recent(&mut self, pass: GpuPass, frames: usize) -> Option<Pct> {
+        let g = self.gpu.as_ref()?;
+        let bit = 1u8 << pass as u8;
+        let ns = g.period_ns as f64;
+        self.scratch.clear();
+        self.scratch.extend(
+            g.recent(frames)
+                .filter(|f| f.ran & bit != 0)
+                .map(|f| ticks_us(f.ticks[pass as usize], ns)),
+        );
+        (!self.scratch.is_empty()).then(|| Pct::of(&mut self.scratch))
+    }
+
+    /// The `perf.gpu` object, or `null`.
+    fn gpu_json(&mut self) -> (Value, Option<Pct>) {
+        let Some(g) = self.gpu.as_ref() else {
+            return (Value::Null, None);
+        };
+        let ns = g.period_ns as f64;
+        let window = g.window();
+        self.scratch.clear();
+        self.scratch.extend(g.recent(window).map(|f| ticks_us(f.total, ns)));
+        let n = self.scratch.len();
+        let total = (n > 0).then(|| Pct::of(&mut self.scratch));
+        let mut passes = Map::new();
+        for pass in GpuPass::ALL {
+            let bit = 1u8 << pass as u8;
+            self.scratch.clear();
+            self.scratch.extend(
+                g.recent(window)
+                    .filter(|f| f.ran & bit != 0)
+                    .map(|f| ticks_us(f.ticks[pass as usize], ns)),
+            );
+            if self.scratch.is_empty() {
+                continue;
+            }
+            let count = self.scratch.len();
+            let mut row = Pct::of(&mut self.scratch).json();
+            row["n"] = json!(count);
+            passes.insert(pass.name().into(), row);
+        }
+        let json = json!({
+            "every": g.every,
+            "frames": n,
+            "skipped": g.skipped,
+            "total": total.map(Pct::json),
+            "passes": passes,
+        });
+        (json, total)
+    }
+
     // ----- aggregation (2 Hz, inside the `telemetry` stage) -----
 
     /// True when the 1 Hz slow inputs (resource counts, GPU-MB) are due;
@@ -703,6 +900,115 @@ impl Perf {
         self.cur.monitor_us = self.cur.monitor_us.saturating_add(us(t0.elapsed()));
     }
 
+    // ----- PM3 bench window -----
+
+    /// Start recording the measured window (drops any previous one).
+    /// `frames` sizes the buffers so the frame path never reallocates.
+    pub fn bench_begin(&mut self, frames: usize) {
+        if !self.on {
+            return;
+        }
+        self.bench = Some(Box::new(BenchLog {
+            frames: Vec::with_capacity(frames + 16),
+            gpu: Vec::with_capacity(frames + 16),
+            gpu_skipped_at_start: self.gpu.as_ref().map_or(0, |g| g.skipped),
+            knob_submit: Vec::with_capacity(frames * 2 + 16),
+            rpc_queue: Vec::with_capacity(1024),
+            stale_at_start: STALE_TOTAL.load(Ordering::Relaxed),
+            started: Instant::now(),
+        }));
+    }
+
+    /// Frames recorded since [`Perf::bench_begin`].
+    pub fn bench_frames(&self) -> usize {
+        self.bench.as_ref().map_or(0, |b| b.frames.len())
+    }
+
+    /// The Tier-A aggregate over the whole measured window (same stage /
+    /// pass / percentile definitions as the `perf` channel), then stop
+    /// recording. `null` when no window was recorded.
+    pub fn bench_report(&mut self) -> Value {
+        let Some(b) = self.bench.take() else { return Value::Null };
+        let mut scratch: Vec<u32> = Vec::with_capacity(b.frames.len().max(b.knob_submit.len()));
+        let mut pct = |vals: &mut dyn Iterator<Item = u32>| {
+            scratch.clear();
+            scratch.extend(vals);
+            (!scratch.is_empty()).then(|| Pct::of(&mut scratch))
+        };
+        let mut cpu = Map::new();
+        for stage in Stage::ALL {
+            let p = pct(&mut b.frames.iter().map(|r| r.stages_us[stage as usize])).unwrap_or_default();
+            cpu.insert(stage.name().into(), p.json());
+        }
+        let row = |p: Option<Pct>| p.map_or(Value::Null, Pct::json);
+        let frame = json!({
+            "interval": row(pct(&mut b.frames.iter().map(|r| r.interval_us))),
+            "work": row(pct(&mut b.frames.iter().map(FrameRecord::work_us))),
+            "unaccounted": row(pct(&mut b.frames.iter().map(FrameRecord::unaccounted_us))),
+            "monitor": row(pct(&mut b.frames.iter().map(|r| r.monitor_us))),
+        });
+        let gpu = match self.gpu.as_ref() {
+            None => Value::Null,
+            Some(g) => {
+                let ns = g.period_ns as f64;
+                let mut passes = Map::new();
+                for pass in GpuPass::ALL {
+                    let bit = 1u8 << pass as u8;
+                    let mut it = b
+                        .gpu
+                        .iter()
+                        .filter(|f| f.ran & bit != 0)
+                        .map(|f| ticks_us(f.ticks[pass as usize], ns));
+                    let n = b.gpu.iter().filter(|f| f.ran & bit != 0).count();
+                    if let Some(p) = pct(&mut it) {
+                        let mut r = p.json();
+                        r["n"] = json!(n);
+                        passes.insert(pass.name().into(), r);
+                    }
+                }
+                json!({
+                    "every": g.every,
+                    "frames": b.gpu.len(),
+                    "skipped": g.skipped.saturating_sub(b.gpu_skipped_at_start),
+                    "total": row(pct(&mut b.gpu.iter().map(|f| ticks_us(f.total, ns)))),
+                    "passes": passes,
+                })
+            }
+        };
+        let lat = |p: Option<Pct>, n: usize| {
+            p.map_or(Value::Null, |p| {
+                let mut r = p.json();
+                r["n"] = json!(n);
+                r
+            })
+        };
+        let knob = lat(pct(&mut b.knob_submit.iter().copied()), b.knob_submit.len());
+        let queue = lat(pct(&mut b.rpc_queue.iter().copied()), b.rpc_queue.len());
+        let dropped = b
+            .frames
+            .iter()
+            .filter(|r| r.presenting && r.interval_us > self.budget_us * 3 / 2)
+            .count();
+        let (streams, decode_p95) = clip_decode_summary();
+        let seconds = b.started.elapsed().as_secs_f64();
+        json!({
+            "frames": b.frames.len(),
+            "seconds": (seconds * 1000.0).round() / 1000.0,
+            "fps": ((b.frames.len() as f64 / seconds.max(1e-6)) * 10.0).round() / 10.0,
+            "budget_ms": round3(self.budget_us as f32 / 1000.0),
+            "cpu": cpu,
+            "frame": frame,
+            "dropped": dropped,
+            "gpu": gpu,
+            "latency": { "knob_submit": knob, "rpc_queue": queue },
+            "clips": {
+                "streams": streams,
+                "decode_p95": decode_p95.map(round3),
+                "stale": STALE_TOTAL.load(Ordering::Relaxed).saturating_sub(b.stale_at_start),
+            },
+        })
+    }
+
     fn pct_of(&mut self, f: impl Fn(&FrameRecord) -> u32) -> Pct {
         self.scratch.clear();
         self.scratch.extend(self.frames.iter().map(&f));
@@ -738,7 +1044,10 @@ impl Perf {
             .iter()
             .filter(|r| r.presenting && r.interval_us > self.budget_us * 3 / 2)
             .count();
-        let headroom = if n == 0 { None } else { Some(round3(1.0 - work.p95 / budget_ms)) };
+        let (gpu, gpu_total) = self.gpu_json();
+        // Whichever side is closer to the budget sets the headroom.
+        let busiest = gpu_total.map_or(work.p95, |g| g.p95.max(work.p95));
+        let headroom = if n == 0 { None } else { Some(round3(1.0 - busiest / budget_ms)) };
 
         let knob = Self::pct_samples(&mut self.scratch, &self.knob_submit).map(|p| round3(p.p95));
         let queue = Self::pct_samples(&mut self.scratch, &self.rpc_queue).map(|p| round3(p.p95));
@@ -758,7 +1067,7 @@ impl Perf {
                 "monitor": monitor.json(),
             },
             "dropped": { "window": dropped_window, "total": self.dropped_total },
-            "gpu": Value::Null,
+            "gpu": gpu,
             "threads": thread_rows(),
             "clips": clips,
             "clips_idle": clips_idle,
@@ -1052,6 +1361,9 @@ pub struct ClipStats {
 }
 
 static CLIP_OPENS: AtomicU64 = AtomicU64::new(0);
+/// Stale frames across every stream ever opened — the PM3 bench diffs it
+/// over its window (streams come and go with plan rebuilds).
+static STALE_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 fn clip_opens() -> u64 {
     CLIP_OPENS.load(Ordering::Relaxed)
@@ -1094,12 +1406,35 @@ impl ClipStats {
     /// 60 Hz engine wanting the same frame twice) is *not* stale.
     pub fn mark_stale(&self) {
         self.stale.fetch_add(1, Ordering::Relaxed);
+        STALE_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Render thread: decoded frames waiting to be uploaded.
     pub fn set_queue(&self, depth: usize) {
         self.queue.store(depth as u32, Ordering::Relaxed);
     }
+}
+
+/// PM3 bench: (active streams, worst per-stream decode p95 in ms) over each
+/// stream's last [`DECODE_SAMPLES`] decodes. Read-only — unlike
+/// [`clip_rows`] it doesn't advance the per-window stale counters.
+fn clip_decode_summary() -> (usize, Option<f32>) {
+    let Ok(reg) = clip_registry().lock() else { return (0, None) };
+    let mut scratch = Vec::with_capacity(DECODE_SAMPLES);
+    let mut active = 0;
+    let mut worst: Option<f32> = None;
+    for c in reg.iter().filter_map(Weak::upgrade) {
+        let n = (c.decode_n.load(Ordering::Relaxed) as usize).min(DECODE_SAMPLES);
+        if n == 0 {
+            continue;
+        }
+        active += 1;
+        scratch.clear();
+        scratch.extend(c.decode_us[..n].iter().map(|a| a.load(Ordering::Relaxed)));
+        let p95 = Pct::of(&mut scratch).p95;
+        worst = Some(worst.map_or(p95, |w| w.max(p95)));
+    }
+    (active, worst)
 }
 
 /// One row per *active* clip stream. A stream that has never decoded and
@@ -1374,7 +1709,74 @@ mod tests {
         assert_eq!(agg["cpu"]["acquire"]["p50"], 12.0);
         let headroom = agg["headroom"].as_f64().unwrap() as f32;
         assert!((headroom - (1.0 - 4.0 / budget_ms)).abs() < 1e-3);
-        assert!(agg["gpu"].is_null(), "gpu columns are PM2");
+        // No `GpuTimer` (`--gpu-timing 0`, or the adapter lacks
+        // TIMESTAMP_QUERY) → the GPU columns are null, headroom is CPU-only.
+        assert!(agg["gpu"].is_null());
+    }
+
+    fn gpu_frame(passes: &[(GpuPass, u32)], total: u32) -> GpuFrame {
+        let mut f = GpuFrame {
+            total,
+            ..Default::default()
+        };
+        for (pass, t) in passes {
+            f.ticks[*pass as usize] = *t;
+            f.ran |= 1 << *pass as u8;
+        }
+        f
+    }
+
+    #[test]
+    fn gpu_pass_names_are_unique_and_complete() {
+        let names: std::collections::HashSet<_> = GpuPass::ALL.iter().map(|p| p.name()).collect();
+        assert_eq!(names.len(), GpuPass::COUNT);
+        for (i, p) in GpuPass::ALL.iter().enumerate() {
+            assert_eq!(*p as usize, i, "GpuPass::ALL must be in discriminant order");
+        }
+        assert!(GpuPass::COUNT <= 8, "GpuFrame::ran is a u8 bitmask");
+    }
+
+    #[test]
+    fn gpu_columns_fill_and_headroom_takes_the_busier_side() {
+        let mut p = Perf::new(true);
+        let budget_ms = p.budget_us as f32 / 1000.0;
+        p.set_gpu_timing(1.0, 1); // 1 ns per tick (Apple Silicon)
+        for _ in 0..100 {
+            push(&mut p, frame(&[(Stage::Encode, 4_000), (Stage::Acquire, 12_000)], 16_667));
+            p.push_gpu(gpu_frame(
+                &[(GpuPass::CompositeLive, 6_000_000), (GpuPass::Final, 1_000_000)],
+                10_000_000,
+            ));
+        }
+        p.push_gpu(gpu_frame(&[(GpuPass::WarpBake, 500_000)], 500_000));
+        p.note_gpu_skipped();
+        let agg = p.aggregate(None);
+        let gpu = &agg["gpu"];
+        assert_eq!(gpu["every"], 1);
+        assert_eq!(gpu["frames"], 101);
+        assert_eq!(gpu["skipped"], 1);
+        assert_eq!(gpu["total"]["p95"], 10.0);
+        assert_eq!(gpu["passes"]["composite.live"]["p95"], 6.0);
+        assert_eq!(gpu["passes"]["composite.live"]["n"], 100);
+        assert_eq!(gpu["passes"]["warp_bake"]["n"], 1);
+        assert!(gpu["passes"].get("composite.design").is_none(), "passes that never ran are omitted");
+        // GPU 10 ms > CPU work 4 ms → the GPU sets the headroom.
+        let headroom = agg["headroom"].as_f64().unwrap() as f32;
+        assert!((headroom - (1.0 - 10.0 / budget_ms)).abs() < 1e-3);
+        // E2's per-leg accessor reads the same samples.
+        let live = p.gpu_pass_recent(GpuPass::CompositeLive, 10).unwrap();
+        assert_eq!(live.p95, 6.0);
+        assert!(p.gpu_pass_recent(GpuPass::CompositeDesign, 10).is_none());
+    }
+
+    #[test]
+    fn gpu_timing_stays_null_with_the_monitor_off() {
+        let mut p = Perf::new(false);
+        p.set_gpu_timing(1.0, 1);
+        p.push_gpu(gpu_frame(&[(GpuPass::Final, 1_000)], 1_000));
+        assert!(p.aggregate(None)["gpu"].is_null());
+        assert!(p.gpu_pass_recent(GpuPass::Final, 10).is_none());
+        set_enabled(true); // process-global; leave it on for other tests
     }
 
     #[test]
@@ -1506,6 +1908,16 @@ mod tests {
             p.end_frame(true, 0);
         }
         let per_frame_ns = t.elapsed().as_nanos() as f64 / frames as f64;
+        // A full GPU ring, so the aggregate below pays for the `gpu` columns.
+        p.set_gpu_timing(1.0, 1);
+        for i in 0..RING_FRAMES as u32 {
+            let mut f = GpuFrame { total: 900_000 + i, ..Default::default() };
+            for pass in [GpuPass::CompositeLive, GpuPass::Final, GpuPass::Preview] {
+                f.ticks[pass as usize] = 300_000 + i;
+                f.ran |= 1 << pass as u8;
+            }
+            p.push_gpu(f);
+        }
         let n = 200;
         let t = Instant::now();
         for _ in 0..n {
@@ -1518,6 +1930,56 @@ mod tests {
              (= {:.1} µs/frame amortised at 60 Hz)",
             emit_us * 2.0 / 60.0
         );
+        gpu_timing_overhead();
+    }
+
+    /// PM2's share of [`perf_overhead`]: the engine-shaped frame (3 main
+    /// passes + a preview submit, each drawing at 1080p) on a real device,
+    /// GPU timing on vs off, interleaved in rounds so machine drift hits
+    /// both. Reports render-thread CPU per frame (encode + submits + timer
+    /// calls) and CPU + GPU drain (the extra GPU work: per-pass query
+    /// resets, the resolve, the readback copy).
+    fn gpu_timing_overhead() {
+        use crate::gpu_timing::{GpuTimer, Rig};
+        let Some(rig) = Rig::new() else {
+            println!("gpu timing: no adapter with TIMESTAMP_QUERY — skipped");
+            return;
+        };
+        let mut perf = Perf::new(true);
+        let mut timer = GpuTimer::new(&rig.device, &rig.queue, rig.backend, 1);
+        perf.set_gpu_timing(timer.period_ns(), timer.every());
+        let (rounds, per_round) = (20, 200);
+        let (mut cpu, mut all) = ([Duration::ZERO; 2], [Duration::ZERO; 2]);
+        for _ in 0..20 {
+            rig.frame(None, &mut perf); // warm-up
+            rig.device.poll(wgpu::Maintain::Wait);
+        }
+        for _ in 0..rounds {
+            for (k, timed) in [false, true].into_iter().enumerate() {
+                for _ in 0..per_round {
+                    let t = Instant::now();
+                    cpu[k] += rig.frame(timed.then_some(&mut timer), &mut perf);
+                    rig.device.poll(wgpu::Maintain::Wait);
+                    all[k] += t.elapsed();
+                }
+            }
+        }
+        let per = |d: Duration| d.as_nanos() as f64 / 1000.0 / (rounds * per_round) as f64;
+        println!(
+            "gpu timing, per timed frame: render-thread cpu {:.1} → {:.1} µs (+{:.1}); \
+             cpu + gpu drain {:.1} → {:.1} µs (+{:.1}); {} gpu frames read back. \
+             At the default 1-in-{}: +{:.1} µs/frame cpu amortised",
+            per(cpu[0]),
+            per(cpu[1]),
+            per(cpu[1]) - per(cpu[0]),
+            per(all[0]),
+            per(all[1]),
+            per(all[1]) - per(all[0]),
+            perf.gpu.as_ref().map_or(0, |g| g.frames.len()),
+            crate::DEFAULT_GPU_TIMING,
+            (per(cpu[1]) - per(cpu[0])) / crate::DEFAULT_GPU_TIMING as f64,
+        );
+        set_enabled(true);
     }
 
     #[test]

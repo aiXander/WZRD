@@ -1,0 +1,9 @@
+{
+  "description": "Fixed floor: empty scene — final pass + identity warp only.",
+  "scene": "../scenes/idle.scene.json",
+  "warmup_frames": 120,
+  "frames": 1200,
+  "gate": {
+    "steady": true
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "description": "Today's typical scene: four procedural effects (examples/phase3_smoke).",
+  "scene": "../../examples/phase3_smoke.scene.json",
+  "warmup_frames": 120,
+  "frames": 900,
+  "gate": {
+    "steady": true
+  }
+}

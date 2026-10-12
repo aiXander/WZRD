@@ -1,0 +1,13 @@
+{
+  "description": "Informational, never FAIL: replicate the scene's one 1080p HAP clip binding N times (clip files and layers round-robin) and find the largest N this machine holds with headroom >= 0 (uncapped GPU and CPU p95 under 16.7 ms) and 0 stale frames — the number VJs compare.",
+  "scene": "../scenes/capacity-clip.scene.json",
+  "warmup_frames": 120,
+  "frames": 480,
+  "gate": {
+    "capacity": {
+      "max": 64
+    },
+    "media": "clips",
+    "runs": 1
+  }
+}

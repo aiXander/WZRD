@@ -10,6 +10,7 @@
 //!     render-core --scene scene.json --display 1
 //!     render-core --scene scene.json --windowed
 //!     render-core --scene scene.json --ws-addr 127.0.0.1:9123    # Phase 4 IPC
+//!     render-core --bench perf/scenarios/smoke.json --bench-out r.json  # PM3 perf bench
 
 use anyhow::Result;
 use clap::Parser;
@@ -53,6 +54,11 @@ fn main() -> Result<()> {
     log::set_max_level(inner.filter());
     log::set_boxed_logger(Box::new(TeeLogger { inner })).expect("logger already set");
 
+    // PM3: `--bench` is its own grammar (no `--scene`, no window) — the
+    // engine `Cli` the Tauri host shares stays untouched.
+    if std::env::args().any(|a| a == "--bench" || a.starts_with("--bench=")) {
+        return render_core::bench::run(render_core::bench::BenchArgs::parse());
+    }
     let cli = render_core::Cli::parse();
     render_core::run(cli)
 }

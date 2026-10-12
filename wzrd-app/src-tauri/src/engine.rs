@@ -524,6 +524,12 @@ impl EngineHandle {
             ws_addr: Some(ws_addr),
             frame_cap_hz: 240,
             perf: render_core::PerfMode::On,
+            // `WZRD_GPU_TIMING=0` turns the perf channel's GPU columns off
+            // (overhead A/B); N times one frame in N.
+            gpu_timing: std::env::var("WZRD_GPU_TIMING")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(render_core::DEFAULT_GPU_TIMING),
         };
         let mut core = Core::new(&cli).context("initialising engine core")?;
         let (ctx, cmd_tx) = core.control_channel();

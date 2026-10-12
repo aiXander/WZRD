@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "pack": "../../../test_results/layerpack/pack",
+  "transport": {
+    "bpm": 120
+  },
+  "post": [],
+  "bindings": [
+    {
+      "id": "clip_00",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "videoClip",
+      "params": {
+        "image": {
+          "clip": "../.media/clip_0.mov"
+        },
+        "gain": 0.6
+      }
+    }
+  ]
+}

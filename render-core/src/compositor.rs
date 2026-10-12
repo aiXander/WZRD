@@ -14,7 +14,8 @@
 use anyhow::{anyhow, Result};
 use wgpu::util::DeviceExt;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::drivers::{FrameContext, ParamOverrides, PickRate, ScalarValue};
 use crate::telemetry::DriverRow;
@@ -71,9 +72,68 @@ pub struct LayerPass {
 /// An opened image input and the binding that reads it.
 pub struct BindingImage {
     pub binding_id: String,
-    pub source: ImageSource,
+    /// Resolved file — with `binding_id`, the key a rebuild matches on.
+    path: PathBuf,
+    /// Shared only with the plan this one replaced on the same leg
+    /// ([`Carry::Replace`]), which is dropped right after the swap — never
+    /// with the other leg (playheads are per leg).
+    source: Arc<Mutex<ImageSource>>,
     /// C5 playhead rate.
     pub rate: f32,
+    /// Playhead = leg clock × `rate` + `offset_sec`. Zero for a freshly
+    /// bound clip (the stateless C5 playhead); a rebuild that changes the
+    /// rate moves it so the position holds (a rate slider bends playback,
+    /// never jumps it).
+    offset_sec: f64,
+    /// Playhead advance over the last tick — the staleness tolerance.
+    step_sec: f64,
+    /// The texture shows the playhead frame (set in `tick`): passes bind
+    /// it only then, so a stream waking from idle never flashes old frames.
+    current: bool,
+}
+
+impl BindingImage {
+    fn playhead(&self, clock_sec: f64) -> f64 {
+        clock_sec * self.rate as f64 + self.offset_sec
+    }
+
+    fn source(&self) -> MutexGuard<'_, ImageSource> {
+        // A panic mid-upload leaves nothing half-written that matters here.
+        self.source.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Perf-monitor PM1 GPU-MB inventory.
+    pub fn gpu_bytes(&self) -> u64 {
+        self.source().gpu_bytes()
+    }
+}
+
+/// What a new plan inherits from the one it follows — the clip-continuity
+/// rule: no operator or agent edit may restart, blank or jump a playing
+/// clip.
+#[derive(Clone, Copy)]
+pub enum Carry<'a> {
+    /// No predecessor (boot): clips open at the stateless playhead.
+    Fresh,
+    /// The plan this one replaces on the **same leg** (any scene edit,
+    /// effect save, identity change, headless hot-reload): a clip it
+    /// already plays for the same binding + file is handed on as-is — no
+    /// reopen, no black frame, no texture swap — with its playhead held
+    /// continuous across a rate change.
+    Replace(&'a PassPlan),
+    /// The **other** leg's plan (pull; design's rebuild after promote):
+    /// streams are never shared across legs, so clips reopen, but at the
+    /// same playhead (offsets copied) so the two legs stay frame-identical.
+    Mirror(&'a PassPlan),
+}
+
+impl<'a> Carry<'a> {
+    fn plan(self) -> Option<&'a PassPlan> {
+        match self {
+            Carry::Fresh => None,
+            Carry::Replace(p) | Carry::Mirror(p) => Some(p),
+        }
+    }
 }
 
 /// §5.2 pick state for one binding. All member passes stay in the plan;
@@ -92,7 +152,8 @@ pub struct PickGroup {
     last_cycle: Option<u64>,
 }
 
-/// Compiled pass plan. Rebuilt on every scene hot-reload.
+/// Compiled pass plan. Rebuilt on every scene hot-reload — seamlessly: the
+/// rebuild inherits its predecessor's clips via [`Carry`].
 pub struct PassPlan {
     pub layer_passes: Vec<LayerPass>,
     pub picks: Vec<PickGroup>,
@@ -107,6 +168,10 @@ pub struct PassPlan {
     /// This plan's leg transport time at the last tick — the C5 playhead
     /// clock (× each binding's rate).
     clock_sec: f64,
+    /// Every clip a drawing pass samples shows its playhead frame (last
+    /// tick). Promote waits on this so a TAKE never projects a stale or
+    /// unbound clip frame.
+    clips_ready: bool,
     /// Per-plan FrameState uniform (§5.6 full-control-switch): the two legs
     /// tick with *different* contexts (own transport speed, own audioListen),
     /// so the buffer can't be shared on the GpuContext — and it must travel
@@ -122,14 +187,18 @@ impl PassPlan {
     /// On error the caller keeps the previous plan rendering (§3.6
     /// swap-on-success); see `main.rs::rebuild_plan`.
     ///
-    /// `scene_dir` resolves the relative clip paths of C5 `image` params.
+    /// `scene_dir` resolves the relative clip paths of C5 `image` params;
+    /// `carry` says what the plan inherits from its predecessor (clip
+    /// streams + playhead continuity — see [`Carry`]).
     pub fn build(
         gpu: &mut GpuContext,
         pack: &LoadedPack,
         scene: &SceneFile,
         registry: &EffectRegistry,
         scene_dir: &Path,
+        carry: Carry<'_>,
     ) -> Result<Self> {
+        let clock_sec = carry.plan().map_or(0.0, |p| p.clock_sec);
         let mut passes: Vec<LayerPass> = Vec::new();
         let mut picks: Vec<PickGroup> = Vec::new();
         let mut images: Vec<BindingImage> = Vec::new();
@@ -165,17 +234,37 @@ impl PassPlan {
 
             // C5 — open the binding's image once; every resolved layer
             // samples the same texture, each placed in its own box. A bad
-            // clip is a warning, never a plan failure.
+            // clip is a warning, never a plan failure. A clip the
+            // predecessor already plays keeps its position (and, on the same
+            // leg, its very stream — see `Carry`).
             let image = resolved.image.as_ref().and_then(|param| {
                 let path = scene_dir.join(&param.clip);
-                match ImageSource::open(gpu, &path) {
+                let prev = carry.plan().and_then(|p| {
+                    p.images
+                        .iter()
+                        .find(|i| i.binding_id == binding.id && i.path == path)
+                });
+                let offset_sec =
+                    prev.map_or(0.0, |i| i.playhead(clock_sec) - clock_sec * param.rate as f64);
+                let playhead = clock_sec * param.rate as f64 + offset_sec;
+                let source = match (carry, prev) {
+                    (Carry::Replace(_), Some(i)) => Ok(Arc::clone(&i.source)),
+                    _ => ImageSource::open(gpu, &path, playhead).map(|s| Arc::new(Mutex::new(s))),
+                };
+                match source {
                     Ok(source) => {
-                        let encoding = source.encoding();
-                        let size = source.size();
+                        let (encoding, size, current) = {
+                            let s = source.lock().unwrap_or_else(|e| e.into_inner());
+                            (s.encoding(), s.size(), s.is_current(playhead, 0.0))
+                        };
                         images.push(BindingImage {
                             binding_id: binding.id.clone(),
+                            path,
                             source,
                             rate: param.rate,
+                            offset_sec,
+                            step_sec: prev.map_or(0.0, |i| i.step_sec),
+                            current,
                         });
                         Some((images.len() - 1, param.placement, encoding, size))
                     }
@@ -239,7 +328,7 @@ impl PassPlan {
                     &resolved.colors,
                 );
                 if let Some((i, b, enc)) = pass_image {
-                    if images[i].source.has_frame() {
+                    if images[i].current {
                         initial = initial.with_image(b, enc);
                     }
                 }
@@ -251,13 +340,15 @@ impl PassPlan {
                     contents: bytemuck::bytes_of(&initial),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
+                let source = image.map(|(i, ..)| images[i].source());
                 let bind_group = layer_bind_group(
                     gpu,
                     &format!("layer bg [{} slice {}]", binding.id, slice),
                     &frame_state,
                     &layer_buffer,
-                    image.map(|(i, ..)| images[i].source.view()),
+                    source.as_ref().map(|s| s.view()),
                 );
+                drop(source);
 
                 passes.push(LayerPass {
                     binding_id: binding.id.clone(),
@@ -298,7 +389,8 @@ impl PassPlan {
             clear_color: wgpu::Color::BLACK,
             images,
             warnings,
-            clock_sec: 0.0,
+            clock_sec,
+            clips_ready: true,
             frame_state,
         })
     }
@@ -309,7 +401,7 @@ impl PassPlan {
     /// cycle counters) advances here. The §5.5 override table wins over the
     /// scene-authored value wherever a (binding, param) entry exists.
     pub fn tick(&mut self, gpu: &GpuContext, ctx: &FrameContext, overrides: &ParamOverrides) {
-        self.clock_sec = ctx.elapsed_sec as f64;
+        let prev_clock = std::mem::replace(&mut self.clock_sec, ctx.elapsed_sec as f64);
         // §5.2 picks — re-roll when a group's cycle counter changes. The
         // choice is stateless (pure hash of binding id + cycle), so there's
         // no RNG to seed or persist.
@@ -373,6 +465,21 @@ impl PassPlan {
             pass.opacity = layer_opacity(overrides, &pass.binding_id, any_solo);
         }
 
+        // Which clips show their playhead frame. A stream that sat idle
+        // (muted, picked out, design leg unrendered) holds an old frame; it
+        // stays unbound (transparent) for the frame or two the decoder
+        // needs, instead of flashing stale content.
+        let drawn = self.drawn_images();
+        let mut ready = true;
+        for (img, drawn) in self.images.iter_mut().zip(drawn) {
+            img.step_sec = (self.clock_sec - prev_clock) * img.rate as f64;
+            let playhead = img.playhead(self.clock_sec);
+            let current = img.source().is_current(playhead, img.step_sec);
+            img.current = current;
+            ready &= !drawn || img.current;
+        }
+        self.clips_ready = ready;
+
         // Per-pass params. Driver evaluation is cheap (a few muls + a few
         // atomic loads); we don't bother with dirty tracking. Inactive
         // (picked-out) passes skip the write — they don't draw this frame,
@@ -403,7 +510,7 @@ impl PassPlan {
             // A clip binds only once its first frame has landed (the zeroed
             // texture would read as a colour cast under HAP Q's YCoCg).
             if let Some((i, b, enc)) = pass.image {
-                if self.images[i].source.has_frame() {
+                if self.images[i].current {
                     params = params.with_image(b, enc);
                 }
             }
@@ -420,28 +527,41 @@ impl PassPlan {
         if self.images.is_empty() {
             return;
         }
+        let drawn = self.drawn_images();
+        for (img, drawn) in self.images.iter().zip(drawn) {
+            // Muted / picked-out clips don't decode: no want, no upload.
+            if drawn {
+                let playhead = img.playhead(self.clock_sec);
+                img.source().encode_upload(encoder, playhead);
+            }
+        }
+    }
+
+    /// Per image: does any pass that samples it draw this frame?
+    fn drawn_images(&self) -> Vec<bool> {
         let mut drawn = vec![false; self.images.len()];
         for p in &self.layer_passes {
             if let Some((i, _, _)) = p.image {
                 drawn[i] |= p.active && p.opacity > 0.0;
             }
         }
-        for (img, drawn) in self.images.iter_mut().zip(drawn) {
-            // Muted / picked-out clips don't decode: no want, no upload.
-            if drawn {
-                img.source
-                    .encode_upload(encoder, self.clock_sec * img.rate as f64);
-            }
-        }
+        drawn
+    }
+
+    /// Every clip a drawing pass samples shows its playhead frame (as of the
+    /// last tick). The promote gate: a TAKE starts once this holds.
+    pub fn clips_ready(&self) -> bool {
+        self.clips_ready
     }
 
     /// Return consumed clip staging slots to their decoders (re-map). Must
     /// follow the submit that carried [`Self::encode_uploads`]' copies.
     pub fn after_submit(&mut self, gpu: &GpuContext) {
         let mut clips = false;
-        for img in &mut self.images {
-            img.source.after_submit();
-            clips |= img.source.is_clip();
+        for img in &self.images {
+            let mut source = img.source();
+            source.after_submit();
+            clips |= source.is_clip();
         }
         if clips {
             // Fire completed map callbacks (non-blocking).
@@ -458,6 +578,7 @@ impl PassPlan {
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         target_view: &wgpu::TextureView,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("composite pass"),
@@ -471,7 +592,7 @@ impl PassPlan {
             })],
             depth_stencil_attachment: None,
             occlusion_query_set: None,
-            timestamp_writes: None,
+            timestamp_writes,
         });
         // Avoid redundant pipeline switches when consecutive layers share one.
         let mut bound: Option<&str> = None;
@@ -688,8 +809,93 @@ fn pick_choice(binding_seed: u32, cycle: u64, member_count: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::drivers::SliderBank;
+    use crate::osc::AudioFeatures;
+
+    /// A one-layer 64×32 pack in a fresh temp dir.
+    fn test_pack() -> LoadedPack {
+        let dir = std::env::temp_dir().join(format!(
+            "wzrd-compositor-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        image::GrayImage::from_pixel(64, 32, image::Luma([255]))
+            .save(dir.join("a.png"))
+            .unwrap();
+        std::fs::write(
+            dir.join("pack.json"),
+            r#"{"version":1,"projector_resolution":[64,32],"layers":[{"id":"a","mask":"a.png"}]}"#,
+        )
+        .unwrap();
+        LoadedPack::load(&dir).unwrap()
+    }
+
+    /// Offscreen device for plan/clip tests; `None` (skip) without an
+    /// adapter or without BC (HAP) support.
+    pub(crate) fn test_gpu() -> Option<GpuContext> {
+        let pack = test_pack();
+        let gpu = pollster::block_on(GpuContext::new_offscreen(64, 32, None, &pack, false, false)).ok()?;
+        gpu.bc_supported.then_some(gpu)
+    }
+
+    fn clip_scene(file: &str, rate: f32) -> SceneFile {
+        let clip = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(file);
+        SceneFile::parse(&format!(
+            r#"{{"version":1,"pack":"pack","bindings":[{{"id":"c","select":{{"id":"a"}},
+               "effect":"videoClip","params":{{"image":{{"clip":{clip:?},"rate":{rate}}}}}}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    /// The clip-continuity rule (`Carry`): a same-leg rebuild hands the very
+    /// stream on, a rate edit holds the position, a cross-leg mirror opens
+    /// its own stream at the same position.
+    #[test]
+    fn rebuilds_carry_clips_without_reopening_or_jumping() {
+        let Some(mut gpu) = test_gpu() else {
+            eprintln!("no BC-capable adapter — skipping");
+            return;
+        };
+        let pack = test_pack();
+        let registry = EffectRegistry::new(None);
+        let (audio, sliders, overrides) = (AudioFeatures::new(), SliderBank::new(), ParamOverrides::new());
+        let ctx = |t: f32| FrameContext {
+            elapsed_sec: t,
+            bpm: 120.0,
+            beat_offset: 0.0,
+            audio: &audio,
+            sliders: &sliders,
+            audio_listen: 1.0,
+        };
+        let dir = Path::new("/");
+
+        let mut a = PassPlan::build(&mut gpu, &pack, &clip_scene("hap.mov", 1.0), &registry, dir, Carry::Fresh).unwrap();
+        a.tick(&gpu, &ctx(1.0), &overrides);
+        assert!(a.images[0].current && a.clips_ready());
+
+        // Same leg, rate 1 → 2 at t = 1 s: same stream, playhead still 1 s.
+        let b = PassPlan::build(&mut gpu, &pack, &clip_scene("hap.mov", 2.0), &registry, dir, Carry::Replace(&a)).unwrap();
+        assert!(Arc::ptr_eq(&a.images[0].source, &b.images[0].source));
+        assert!((b.images[0].playhead(1.0) - 1.0).abs() < 1e-9);
+        assert!((b.images[0].playhead(1.5) - 2.0).abs() < 1e-9); // then 2× on
+        assert!(b.images[0].current, "carried clip binds on the first frame");
+
+        // Other leg: own stream, same position, current from the start.
+        let c = PassPlan::build(&mut gpu, &pack, &clip_scene("hap.mov", 2.0), &registry, dir, Carry::Mirror(&b)).unwrap();
+        assert!(!Arc::ptr_eq(&b.images[0].source, &c.images[0].source));
+        assert!((c.images[0].playhead(1.0) - 1.0).abs() < 1e-9);
+        assert!(c.images[0].current);
+
+        // A different file on the binding is a new clip: its own stream on
+        // the stateless playhead (clock × rate), still current at once.
+        let d = PassPlan::build(&mut gpu, &pack, &clip_scene("hap_q.mov", 2.0), &registry, dir, Carry::Replace(&b)).unwrap();
+        assert!(!Arc::ptr_eq(&b.images[0].source, &d.images[0].source));
+        assert!((d.images[0].playhead(1.0) - 2.0).abs() < 1e-9);
+        assert!(d.images[0].current);
+    }
 
     #[test]
     fn contain_fits_by_pixel_aspect_and_centres() {

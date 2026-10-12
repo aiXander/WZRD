@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "pack": "../../../test_results/layerpack/pack",
+  "transport": {
+    "bpm": 120
+  },
+  "bindings": [
+    {
+      "id": "clip_00",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "videoClip",
+      "params": {
+        "image": {
+          "clip": "../.media/clip_0.mov"
+        },
+        "gain": 0.6
+      }
+    },
+    {
+      "id": "clip_01",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "videoClip",
+      "params": {
+        "image": {
+          "clip": "../.media/clip_1.mov"
+        },
+        "gain": 0.6
+      }
+    },
+    {
+      "id": "clip_02",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "videoClip",
+      "params": {
+        "image": {
+          "clip": "../.media/clip_2.mov"
+        },
+        "gain": 0.6
+      }
+    },
+    {
+      "id": "clip_03",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "videoClip",
+      "params": {
+        "image": {
+          "clip": "../.media/clip_3.mov"
+        },
+        "gain": 0.6
+      }
+    },
+    {
+      "id": "clip_04",
+      "select": {
+        "id": "background"
+      },
+      "effect": "videoClip",
+      "params": {
+        "image": {
+          "clip": "../.media/clip_0.mov"
+        },
+        "gain": 0.6
+      }
+    },
+    {
+      "id": "clip_05",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "videoClip",
+      "params": {
+        "image": {
+          "clip": "../.media/clip_1.mov"
+        },
+        "gain": 0.6
+      }
+    },
+    {
+      "id": "clip_06",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "videoClip",
+      "params": {
+        "image": {
+          "clip": "../.media/clip_2.mov"
+        },
+        "gain": 0.6
+      }
+    }
+  ],
+  "post": []
+}

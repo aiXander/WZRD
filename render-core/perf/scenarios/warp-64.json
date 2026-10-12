@@ -1,0 +1,28 @@
+{
+  "description": "Smoke scene through a 64-handle alignment, plus an edit storm (alignment.set every 4 frames → LUT rebake).",
+  "scene": "../../examples/phase3_smoke.scene.json",
+  "alignment": "../scenes/warp-64.alignment.json",
+  "warmup_frames": 120,
+  "frames": 900,
+  "timeline": [
+    {
+      "at_frame": 120,
+      "every_frames": 4,
+      "count": 225,
+      "method": "alignment.set",
+      "params": {
+        "$alt": [
+          {
+            "$json": "../scenes/warp-64.nudge-a.json"
+          },
+          {
+            "$json": "../scenes/warp-64.nudge-b.json"
+          }
+        ]
+      }
+    }
+  ],
+  "gate": {
+    "steady": true
+  }
+}

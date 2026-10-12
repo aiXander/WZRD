@@ -81,7 +81,8 @@ export type PerfPct = { p50: number; p95: number; max: number };
  * Perf-monitor PM1 — the 2 Hz `perf` channel (not sticky) and the
  * `perf.snapshot` result. `cpu` is keyed by render-thread stage
  * (`inbound.cmds`, `tick.live`, `encode`, `acquire`, `pace`, `host`, …);
- * `frame.work` = Σ stages − acquire − pace; `headroom` = 1 − work p95 / budget.
+ * `frame.work` = Σ stages − acquire − pace; `headroom` =
+ * 1 − max(work p95, gpu.total p95) / budget.
  */
 export type PerfPayload = {
   budget_ms: number;
@@ -91,8 +92,9 @@ export type PerfPayload = {
   cpu: Record<string, PerfPct>;
   frame: { interval: PerfPct; work: PerfPct; unaccounted: PerfPct; monitor: PerfPct };
   dropped: { window: number; total: number };
-  /** PM2 (GPU timestamps) — null until then. */
-  gpu: Record<string, { p50: number; p95: number }> | null;
+  /** PM2 GPU timestamps; null when off (`--gpu-timing 0` / `WZRD_GPU_TIMING=0`)
+   *  or the adapter lacks timestamp queries. Sampled 1 frame in `every`. */
+  gpu: PerfGpu | null;
   /** CPU % of one core; null where the platform has no thread CPU clock. */
   threads: { name: string; cpu_pct: number | null }[];
   clips: {
@@ -119,6 +121,21 @@ export type PerfPayload = {
   telemetry_bps: { ws: Record<string, number>; webview: Record<string, number> };
   last_change: { epoch: number; rev: number; actor: string; facet: string } | null;
   spikes: { trigger_ms: number; total: number; suppressed: number };
+};
+
+/** Perf-monitor PM2 — `perf.gpu`. `total` = Σ per-submit first-begin → last-end
+ *  (the budget truth); `passes` keyed `warp_bake`, `composite.live`,
+ *  `composite.design`, `final`, `preview`, `probe` — only those that ran in the
+ *  window; main-submit passes are charged from the previous pass's end, so they
+ *  tile `total`. Clip uploads are untimed. */
+export type PerfGpu = {
+  every: number;
+  /** Timed frames in the aggregate window (~10 s). */
+  frames: number;
+  /** Sampled frames skipped because every readback slot was in flight. */
+  skipped: number;
+  total: PerfPct | null;
+  passes: Record<string, PerfPct & { n: number }>;
 };
 
 /** Perf-monitor PM1 — one frame of a spike capture (offset 0 = the spike). */

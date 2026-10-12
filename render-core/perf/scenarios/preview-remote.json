@@ -1,0 +1,12 @@
+{
+  "description": "Smoke scene with a remote `preview` subscriber attached (JPEG readback path + design composite awake).",
+  "scene": "../../examples/phase3_smoke.scene.json",
+  "warmup_frames": 120,
+  "frames": 900,
+  "subscribe": [
+    "preview"
+  ],
+  "gate": {
+    "steady": true
+  }
+}

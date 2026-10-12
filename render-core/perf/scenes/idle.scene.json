@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "pack": "../../../test_results/layerpack/pack",
+  "transport": {
+    "bpm": 120
+  },
+  "bindings": [],
+  "post": []
+}

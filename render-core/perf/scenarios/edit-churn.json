@@ -1,0 +1,64 @@
+{
+  "description": "Agent authoring churn on the headless single-leg path (immediate rebuilds, no probe): 300 x effect.upsert (two churn_fx bodies) interleaved with 300 x scene.load (two variants, one binds churn_fx). Resource counts must plateau; every action must succeed.",
+  "scene": "../scenes/churn-a.scene.json",
+  "actor": "agent",
+  "warmup_frames": 120,
+  "frames": 1500,
+  "timeline": [
+    {
+      "at_frame": 0,
+      "every_frames": 4,
+      "count": 300,
+      "method": "effect.upsert",
+      "params": {
+        "name": "churn_fx",
+        "wgsl": {
+          "$alt": [
+            {
+              "$file": "../scenes/churn_fx_a.wgsl"
+            },
+            {
+              "$file": "../scenes/churn_fx_b.wgsl"
+            }
+          ]
+        },
+        "descriptor": {
+          "inputs": [
+            {
+              "name": "speed",
+              "type": "float",
+              "default": 1,
+              "min": 0,
+              "max": 4
+            }
+          ]
+        }
+      }
+    },
+    {
+      "at_frame": 2,
+      "every_frames": 4,
+      "count": 300,
+      "method": "scene.load",
+      "params": {
+        "json": {
+          "$alt": [
+            {
+              "$scene": "../scenes/churn-b.scene.json"
+            },
+            {
+              "$scene": "../scenes/churn-a.scene.json"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "gate": {
+    "resources_flat": true,
+    "runs": 1,
+    "gpu": false,
+    "cpu": false
+  },
+  "two_leg": false
+}

@@ -154,13 +154,18 @@ agents.
   timeout holds even if the render thread wedges — inline methods dispatch
   on the caller.
 
-- **The one GPU-feature exception (gig plan D2, E1b):**
-  `TEXTURE_COMPRESSION_BC` is requested **iff the adapter offers it**
-  (`gpu::GpuContext::bc_supported`) — HAP clips upload as BC1/BC3. Apple
-  Silicon and desktop NVIDIA/AMD/Intel all offer it; without it the engine
-  runs unchanged and every HAP clip fails to open with a named per-binding
-  warning (stills still work). Everything else stays `Features::empty()` /
-  `Limits::default()`. Video decode is pure Rust (hand-written MOV reader +
+- **The two GPU-feature exceptions, both capability-gated.**
+  (1) Gig plan D2/E1b: `TEXTURE_COMPRESSION_BC` is requested **iff the
+  adapter offers it** (`gpu::GpuContext::bc_supported`) — HAP clips upload
+  as BC1/BC3. Apple Silicon and desktop NVIDIA/AMD/Intel all offer it;
+  without it the engine runs unchanged and every HAP clip fails to open
+  with a named per-binding warning (stills still work). (2) Perf-monitor
+  PM2: `TIMESTAMP_QUERY` (`gpu_timing::GpuTimer::FEATURES`) iff the perf
+  monitor wants GPU timing (`--perf on` and `--gpu-timing` ≠ 0) **and** the
+  adapter offers it (`GpuContext::timestamps_supported`); without it
+  `perf.gpu` is `null` and nothing else changes. `_INSIDE_ENCODERS` /
+  `_INSIDE_PASSES` are deliberately not requested (§2.9 says why). Everything
+  else stays `Features::empty()` / `Limits::default()`. Video decode is pure Rust (hand-written MOV reader +
   the `snap` crate) — no ffmpeg link, no VideoToolbox.
 
 **The headless agent path is sacred.** `render-core --scene foo.json` with no
@@ -199,9 +204,11 @@ not "fix" it to alpha blending.
 | `main.rs` | CLI parse + **tee logger** (stderr + `log` telemetry channel via `telemetry::global_bus`). |
 | `core.rs` | **Host-agnostic `Core`** (app-collapse Step 1, 2026-07-10): owns GPU context, pass plan, driver bus, OSC, effect registry, watcher, telemetry, WS server, session persistence (§5.3 restore-at-boot, debounced write, SIGTERM/SIGINT snapshot → `exit_requested()`), plus the policies every host must share — the §3.1 occlusion invariant and frame pacing. Two-stage init: `Core::new(&cli)` pre-window, `Core::init_gpu(impl Into<wgpu::SurfaceTarget>, w, h)` when the host has a window. Per-frame host contract: `poll_inbound()` → `pace_frame()` → `redraw()` \| `render_offscreen_frame()`. Step-2/3 additions: `control_channel()` (hands an embedding host the WS server's `RpcContext` + command sender — one dispatch path for every consumer), `attach_preview_surface`/`resize_preview_surface`/`set_preview_visible`/`set_preview_params` (native preview; host owns §3.1 for it; `PreviewParams` = what the slot shows, see §1b; the surface photo loads on attach), `cmd_preview_snapshot` (`preview.snapshot`), `spike_force_device_loss()` (crash-spike test hook). The command channel + `RpcContext` now always exist (headless just never sends). |
 | `app.rs` | Thin `WinitHost` — window creation/fullscreen/display selection, winit event delegation into `Core`, exit decisions. The only winit-aware file besides `lib.rs`. |
-| `gpu.rs` | wgpu device/surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → §2.8 warp) and `WarpTarget` (the alignment LUT + its bake pipeline). Keeps `instance`/`adapter` so `PreviewTarget` (second swapchain) can attach at runtime: it runs `final_pass.wgsl`'s `fs_preview` entry — the projector math plus a preview-only group 1 (surface photo + dim/photo/light weights) — with a bind group per leg (dummy 1×1 LUT, warp off) and a **program** group on the real LUT (rebuilt in `resize_warp`); `render_preview()` self-heals `Lost`/`Outdated`; `encode_preview_snapshot` renders the same view offscreen. `Downscaler` (`downscale.wgsl`, 3×3 bilinear-tap box filter → `Rgba8UnormSrgb`) makes the JPEG thumbnail on the GPU. Its test module holds the GPU-backed guards worth knowing about: `baked_lut_matches_the_cpu_model`, `final_pass_samples_through_the_warp` and `program_preview_samples_through_the_warp_at_another_size` (all skip cleanly with no adapter), plus a naga parse+validate of the output shaders so a WGSL typo fails on the desk rather than at device creation. |
+| `gpu.rs` | wgpu device + output target — a window surface (takes any `SurfaceTarget` + explicit size — no windowing-crate dependency) or the §2.10 bench's offscreen texture (`Output`, `acquire_output`/`present`), mask atlas upload, per-leg composite targets (§2.6: live always, design in two-leg mode), pipeline cache, WGSL composer (`prelude + body + main`), final-pass pipeline (`encode_final`: live×design lerp by the promote mix → masters → §2.8 warp) and `WarpTarget` (the alignment LUT + its bake pipeline). Keeps `instance`/`adapter` so `PreviewTarget` (second swapchain) can attach at runtime: it runs `final_pass.wgsl`'s `fs_preview` entry — the projector math plus a preview-only group 1 (surface photo + dim/photo/light weights) — with a bind group per leg (dummy 1×1 LUT, warp off) and a **program** group on the real LUT (rebuilt in `resize_warp`); `render_preview()` self-heals `Lost`/`Outdated`; `encode_preview_snapshot` renders the same view offscreen. `Downscaler` (`downscale.wgsl`, 3×3 bilinear-tap box filter → `Rgba8UnormSrgb`) makes the JPEG thumbnail on the GPU. Its test module holds the GPU-backed guards worth knowing about: `baked_lut_matches_the_cpu_model`, `final_pass_samples_through_the_warp` and `program_preview_samples_through_the_warp_at_another_size` (all skip cleanly with no adapter), plus a naga parse+validate of the output shaders so a WGSL typo fails on the desk rather than at device creation. |
 | `alignment.rs` | §2.8 alignment layer: `AlignmentDoc` (the `alignment.json` schema), `homography_from_corners` (Heckbert) + analytic 3×3 inverse, the Wendland C² kernel and its LU solve, `AlignmentState` (solved doc + dirty stamps, shared with the render thread and the RPC surface), `TestPattern`, bake-uniform packing, and the boot migration from the legacy calibration matrix. Talks to no GPU. |
-| `perf.rs` | §2.9 always-on frame profiler (perf-monitor PM1): the fixed `Stage` enum, `Perf` recorder (span/lap/enter tokens into a `[u32; Stage::COUNT]`, 300-frame ring, spike capture, 2 Hz aggregate), the cross-thread `Shared` half in `RpcContext` (knob stamps, trigger, latest snapshot), and the process-global lock-free side probes: `ThreadCpu`, `ClipStats`, `count_telemetry`, plus `wgpu_resources` / `texture_bytes`. |
+| `perf.rs` | §2.9 always-on frame profiler (perf-monitor PM1): the fixed `Stage` enum, `Perf` recorder (span/lap/enter tokens into a `[u32; Stage::COUNT]`, 300-frame ring, spike capture, 2 Hz aggregate), the cross-thread `Shared` half in `RpcContext` (knob stamps, trigger, latest snapshot), and the process-global lock-free side probes: `ThreadCpu`, `ClipStats`, `count_telemetry`, plus `wgpu_resources` / `texture_bytes`. Also the PM2 `GpuPass` taxonomy, the `GpuFrame` ring + `gpu` aggregate, and `gpu_pass_recent` (E2's per-leg accessor). |
+| `bench.rs` | §2.10 PM3 windowless bench host (`render-core --bench`): `BenchArgs`, the scenario format, scene staging, the timeline RPC worker + rate threads, OSC audio pin, telemetry subscribers, the report + machine info. |
+| `gpu_timing.rs` | §2.9 PM2 `GpuTimer`: per-slot timestamp query sets, the 4-slot resolve/readback ring (resolve in the *next* frame's main encoder, `map_async`, collect when the callback fired), sampling stride, per-submit span + pass-charging math (`collect_frame`). Its tests include a real-device round trip and the `Rig` the `perf_overhead` measurement drives. |
 | `probe.rs` | §5.6 shader pre-flight probe: `ProbeThresholds` (A/B atomics, sidecar-persisted), `ProbeSession` (half-res interleaved probe frames, overhead-calibrated full-res p95 prediction, pessimistic driver values), three-band verdict + JPEG thumbnail. |
 | `compositor.rs` | `PassPlan` — scene → ordered layer passes; per-frame `tick(&mut)` (driver eval → uniforms, §5.2 pick re-rolls via `active` flags); `record_and_submit()` (present path), `render_offscreen()` (occluded path), `driver_rows()` (telemetry snapshot). Owns the stable hashes (`fnv1a`/`seed01`/`pick_choice`) behind layer_seed + pick determinism. |
 | `drivers.rs` | Driver bus: `const`, `clock.*`, `audio.band/onset`, `ui.slider`; `SliderBank` (live knob values, written by `param.set`); `Masters` (§5.4 operator globals: brightness/speed/saturation/audioListen, atomics written inline by `master.set`); `Crossfade` (§5.4 engine-wide crossfade-time master — default promote fade in seconds, 0–30 s); `ParamOverrides` (§5.5 per-binding scalar override table); `Transport` (BPM clock — integrates `time += dt·speed` per frame so the speed master bends time instead of jumping it); `PickRate` (§5.2 transport-locked pick cadence). |
@@ -298,10 +305,24 @@ effect input of type `image` takes an object, never a driver:
   exactly, its box; contain is the inverse of the model's cover-crop). One
   binding over N layers opens the clip once and places it in each layer's
   own box.
-- **Playhead is stateless:** `(leg transport seconds × rate) rem_euclid
+- **Playhead:** `(leg transport seconds × rate + offset) rem_euclid
   duration` — the speed master bends it, promote's clock copy keeps it
   continuous across TAKE, and the stream itself moves into live with the
-  plan (it never reopens at TAKE).
+  plan (it never reopens at TAKE). `offset` is 0 for a newly bound clip
+  (stateless) and only moves when a rebuild changes `rate`, so the
+  position holds and a rate slider bends playback instead of jumping it.
+- **Clip continuity (2026-10-12) — no edit restarts a playing clip.**
+  Every plan build says what it inherits (`compositor::Carry`):
+  `Replace(old)` for a same-leg rebuild (any design `scene.load`, effect
+  save/upsert, `identity.setGroups`, headless hot-reload) hands the very
+  stream on for each (binding id, resolved file) the old plan played — no
+  reopen, no texture swap, no black frame; `Mirror(other leg)` (pull,
+  design's rebuild after promote) opens own streams (never shared across
+  legs) at the other leg's playhead; `Fresh` only at boot. Streams are
+  `Arc<Mutex<ImageSource>>`, shared only between a plan and the one
+  replacing it (dropped right after the swap). A new `Carry` call site
+  must pick the right variant — `Fresh` on a rebuild reintroduces the
+  flicker.
 - **A clip that fails to open is a warning, not a load error:** missing
   file, not HAP, no BC on this GPU → that binding draws nothing, the plan
   still swaps in, and the reply carries `warnings: [...]` (also the
@@ -423,7 +444,7 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 | `log` | on event | Info+ engine log lines (via the tee logger). |
 | `masters` | on `master.set`, promote/pull control copies + startup | §5.4/§2.6 — both legs plus the engine-wide crossfade master: `{live: {brightness, speed, saturation, audioListen}, design: {...}, crossfade}` (sticky). |
 | `deck` | on promote/pull/preview transitions + ~10 Hz while ramping | §2.6 snapshot `{promote: idle\|pending\|ramping, mix, fade_ms, quantize, preview_source, two_leg}` (sticky). |
-| `perf` | 2 Hz | §2.9 — the frame-profiler aggregate (headroom, per-stage p50/p95/max, threads, clips, latency, process, telemetry bytes/s). Not sticky. `gpu: null` until PM2. |
+| `perf` | 2 Hz | §2.9 — the frame-profiler aggregate (headroom, per-stage p50/p95/max, per-pass GPU p50/p95 (`gpu`, null when GPU timing is off/unsupported), threads, clips, latency, process, telemetry bytes/s). Not sticky. |
 | `perf_spike` | on a frame over the trigger (≤ 1 per 2 s) | §2.9 — that frame ± 5 neighbours with per-stage ms and what ran in each (sticky). |
 | `alignment` | at boot, on every accepted mutation, on output resize | §2.8 — the whole document plus `weights` and `{output, points_max, test_pattern, solve_ok}` (sticky, so the Align tab hydrates from `lastPayload` and an external camera script sees the UI's edits). |
 
@@ -476,10 +497,16 @@ touching it:
   (decode to linear on sample); HAP Q's scaled YCoCg sits in a non-sRGB
   BC3 texture and `sample_image` converts + sRGB-decodes. Measured against
   the PNG path: all three within ~1/255.
-- **Clip binds late:** a clip pass sets `image_meta.bound` only after its
-  stream uploaded a first frame (a zeroed BC3 texture reads as blue under
-  YCoCg). So the very first frame after a design leg wakes is black where
-  its clips will be — the MCP's `get_preview` skips one frame for this.
+- **A clip binds only while current:** `ImageSource::open` decodes the
+  *playhead* frame synchronously and `write_texture`s it, so a fresh clip
+  is right from its first frame (no black, no frame-0 flash). Each tick
+  the plan checks `is_current` — the texture is within
+  max(4 frames, 4 render-frames of playhead advance) of the playhead
+  (`video::near_playhead`). A stream that sat idle (muted, picked out,
+  unrendered design leg) fails it and stays unbound (transparent) for the
+  frame or two the decoder needs — never a flash of the old frame; normal
+  decode lag at high rates stays inside the tolerance and never blinks.
+  The MCP's `get_preview` one-frame skip predates this and is harmless.
 - **Built-in `videoClip`** = `sample_image(uv) × mask × gain` (gain 0–2).
 - **Decode — the staging-ring invariant (canonical here since §5.9 landed):** one
   decode thread per (plan, binding) stream does all disk I/O + snappy +
@@ -594,7 +621,13 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   samples both composites and lerps by a `mix` uniform ramped over
   `fade_ms` (wall time). On completion live **adopts design's already-built
   plan** (zero rebuild on the projector leg) and design rebuilds from the
-  same scene JSON (pipelines cache-hit — buffers/bind groups only).
+  same scene JSON (pipelines cache-hit — buffers/bind groups only; clips
+  reopen at live's playheads via `Carry::Mirror`). **Clip gate:** every
+  ramp starts `gated` — `mix` holds at 0 until `PassPlan::clips_ready()`
+  (every clip design draws is current), bounded by `PROMOTE_CLIP_GATE`
+  (250 ms, then it takes anyway with a warning). Normally 1–2 frames after
+  an idle design leg wakes; it is what keeps a cut TAKE from projecting a
+  stale or unbound clip frame.
   Semantically a **copy, not an exchange**: design keeps its content, so
   "promote, push further, promote again" needs no `pull` between rounds.
   Re-entrancy (deterministic — the auto-pilot playlist will drive it):
@@ -883,12 +916,13 @@ Headless verification lives in `render-core/tools/align_drag.py` — corner
 sweeps, a live handle demo, and `--verify-isolation`, which asserts
 `alignment.json` comes out byte-identical across a `scene.load` + `pull`.
 
-### 2.9 Frame profiler: `perf` channel (perf-monitor PM1, landed 2026-10-10)
+### 2.9 Frame profiler: `perf` channel (perf-monitor PM1 2026-10-10, PM2 GPU timing 2026-10-12)
 
 `fps`/`frame_stats` time mark-to-mark, so a 2 ms and a 15 ms frame both read
 "60". `perf.rs` times what the frame *spends* its time on and reports
-**headroom = 1 − cpu.work p95 / 16.7 ms** (fixed 60 Hz budget — the engine
-doesn't know the projector's refresh). `fps`/`frame_stats` are untouched
+**headroom = 1 − max(cpu.work p95, gpu.total p95) / 16.7 ms** (fixed 60 Hz
+budget — the engine doesn't know the projector's refresh; CPU-only when
+`gpu` is null). `fps`/`frame_stats` are untouched
 (§3.2's honesty contract).
 
 - **Stages** (`perf::Stage`, fixed enum, no strings in the hot path):
@@ -937,15 +971,188 @@ doesn't know the projector's refresh). `fps`/`frame_stats` are untouched
   frames freezes that frame ± 5 neighbours (stages + `ran: {cmds, reloads,
   probe_steps, clip_opens, rev}`) → sticky `perf_spike` + one `warn` log
   line. At most one capture per 2 s; the rest are `suppressed`.
+- **GPU passes (PM2, `gpu_timing.rs`).** `perf.gpu = {every, frames,
+  skipped, total: {p50,p95,max}, passes: {<pass>: {p50,p95,max,n}}}` — passes
+  `warp_bake`, `composite.live`, `composite.design`, `final`, `preview`,
+  `probe` (`perf::GpuPass`), listed only if they ran in the window (~10 s of
+  samples). How it stays zero-impact, and why each choice:
+  - **Sampled, 1 frame in 30 by default** (`--gpu-timing N`, Tauri host
+    `WZRD_GPU_TIMING`; `0` = off, `1` = every frame). A timed frame costs the
+    render thread **~73 µs**: wgpu-core 22 encodes a query *reset* (on Metal a
+    blit encoder + fill) ahead of every pass that carries `timestamp_writes`,
+    ~30 µs for the first timed pass + ~10 µs per further pass, plus the
+    resolve/map. Every-frame timing measurably raised `encode`/`submit` p95
+    (~+0.2 ms); 1-in-30 is ~2.4 µs/frame amortised, keeps timed frames < 5 %
+    (so they never move `cpu.work` p95), and matches the 2 Hz emit.
+    `cargo test --release perf_overhead -- --ignored --nocapture` reprints
+    both numbers.
+  - **Only existing passes carry timestamps.** Clip **uploads are untimed**:
+    `write_timestamp` outside a pass needs `TIMESTAMP_QUERY_INSIDE_ENCODERS`,
+    and on Apple Silicon (no blit-boundary sampling) wgpu-hal's Metal backend
+    then opens a dummy blit encoder + fill per sample
+    (`wgpu-hal-22/src/metal/command.rs::enter_blit`). Live uploads therefore
+    sit outside `total`; design uploads land in `composite.design`.
+  - **Never blocks.** Frame N's queries (probe, main, preview submits) are
+    resolved by frame N+1's main encoder, `map_async`ed after that submit,
+    and read once the callback fired — `queue.submit`'s own maintain fires it,
+    no extra `poll`. 4 slots; a sampled frame with every slot in flight is
+    skipped (`skipped`). Nothing allocates per frame; ticks → ms at the 2 Hz
+    aggregate.
+  - **`total` = Σ per submit of first-begin → last-end**, not first-to-last
+    over the whole frame (that would count the `acquire` vsync wait between
+    the probe and main submits). It's the budget truth.
+  - **Main-submit passes are charged `end − max(begin, previous pass's
+    end)`**, so they tile `total`. Raw stage-boundary stamps overlap on
+    Apple's TBDR GPU: the final pass's start-of-vertex fires during the
+    composite's fragments — raw `final` read 7.5 ms on a scene whose final
+    pass costs 0.09 ms. Preview and probe (own submits) are raw; `probe` is
+    the timed probe frames' mean × every probe frame that ran (≤ 8 timed per
+    engine frame).
+  - **Metal quirks handled:** a pass with no draws gets no end-of-fragment
+    sample (empty composite → dropped for that frame; a frame with nothing
+    sane isn't a sample). **wgpu-hal 22 bug:** Metal `copy_query_results`
+    passes `NSRange::new(start, end)` — end as *length* — so any resolve not
+    starting at query 0 is wrong and overruns. Hence one query set per slot,
+    resolved whole (`0..26`) on Metal; other backends resolve per written
+    pair so Vulkan never reads an unwritten query. Drop the workaround when
+    wgpu is upgraded past the fix.
+  - **Read GPU ms knowing the clock.** Apple GPUs downclock when lightly
+    loaded: the smoke scene's composite reads ~7.5 ms at 60 fps (GPU ~45 %
+    busy) but ~3.4 ms when the engine runs uncapped. At 60 Hz, `gpu.total`
+    is honest about *this* frame but pessimistic as a capacity number — the
+    GPU clocks up before it runs out. PM3's uncapped bench is the
+    capacity measure.
+  - **E2 hook:** `Perf::gpu_pass_recent(GpuPass::CompositeLive |
+    CompositeDesign, n)` → p50/p95 over the newest n samples — per-leg GPU
+    cost that a TAKE crossfade (both legs rendering) doesn't inflate.
 - **Consumer:** Debug room → "Performance (frame profiler)" panel
-  (`routes/Debug.tsx` `PerfPanel`; types `PerfPayload`/`PerfSpike` in
-  `api/ipc.ts`, store `perf`/`perfSpike`, `perf_spike` hydrated from
-  `lastPayload`). The graphed panel, GPU timestamps, `--bench` gate and
-  `perf.profile` are PM2–PM4 in [../TODO/perf-monitor.md](../TODO/perf-monitor.md).
+  (`routes/Debug.tsx` `PerfPanel` incl. `GpuTable` + a "gpu total" stat;
+  types `PerfPayload`/`PerfGpu`/`PerfSpike` in `api/ipc.ts`, store
+  `perf`/`perfSpike`, `perf_spike` hydrated from `lastPayload`). The
+  regression gate is §2.10; the graphed panel and `perf.profile` are PM4 in
+  [../TODO/perf-monitor.md](../TODO/perf-monitor.md).
 
 What it showed on day one (2026-10-10, M2): smoke scene headroom ~0.93
 (work p95 ~1.2 ms); fixture-a with two HAP clips decodes in ~0.1 ms p95,
-0 stale. Two real findings are logged in §4 (#9, #10).
+0 stale. Two real findings are logged in §4 (#9, #10). PM2 (2026-10-12,
+release, 60 Hz presenting): **the GPU, not the CPU, sets the headroom** —
+smoke `gpu.total` p50/p95 7.7/8.7 ms vs `cpu.work` p95 ~1.7 ms → headroom
+~0.48; nine bindings incl. five HAP clips 8.3/9.4 ms. `composite.live` is
+nearly all of it (the four procedural effects; one `silk` binding alone
+~2.6 ms); `final` ~0.1 ms. GPU timing on (1-in-30) vs off: `cpu.work` p95
+and interval p95 within run-to-run noise.
+
+
+### 2.10 Perf bench + gate: `--bench`, scenarios, `perf_gate.py` (perf-monitor PM3, 2026-10-12)
+
+The regression gate every engine change runs (rule in §6). Three parts:
+
+- **`render-core --bench <scenario.json> --bench-out <report.json>`**
+  (`bench.rs`) — a third host beside `WinitHost` and TauriHost: no window,
+  no surface. `main.rs` routes `--bench` to its own grammar (`BenchArgs`),
+  so the engine `Cli` the Tauri host builds stays untouched.
+  `Core::with_topology(cli, two_leg)` picks the §5.6 topology without a WS
+  server (scenarios default to two legs, like the operator app);
+  `Core::init_gpu_offscreen(w, h, vsync_hz)` builds
+  `GpuContext::new_offscreen` (adapter with `compatible_surface: None`,
+  final pass into a `Bgra8UnormSrgb` texture at the scenario size, default
+  1920×1080). The host then runs the normal `poll_inbound` → `pace_frame` →
+  `redraw` contract; `redraw` goes through `GpuContext::acquire_output` /
+  `present`, which on a window are exactly the old swapchain calls.
+  Offscreen, **`acquire` is the backpressure** (a wait, not work): ≤ 2
+  submits in flight (a swapchain's frame latency), and `--paced` /
+  `"paced": true` adds a virtual 60 Hz vsync on a fixed grid. Uncapped is
+  the default — it measures *cost*; paced is for latency/jitter and stale
+  clip frames, which are judged at the show's rate.
+- **GPU timing in the bench: 1 frame in 4, each timed frame alone on the
+  GPU** (`--gpu-timing`, default `DEFAULT_BENCH_GPU_TIMING` = 4; the
+  offscreen output drains the queue before a frame `GpuTimer::recording()`
+  says is sampled). Measured why: with two frames in flight Apple's GPU
+  starts a frame's first pass while the previous one still draws, and the
+  per-submit span counts that wait — smoke read 3.9 ms at two in flight,
+  6.4 ms at three, **2.4 ms isolated**, at the same 2.6 ms/frame
+  throughput. Draining *every* frame instead lets the GPU idle and
+  downclock (4.5 ms). Untimed frames keep the queue full, so the GPU stays
+  clocked up. `GpuTimer` itself is unchanged (the getter is read-only); a
+  timed frame still costs the render thread ~0.07 ms (§2.9), a constant
+  baselines compare like with like.
+- **Report** = `Perf::bench_report()`: the Tier-A aggregate over the
+  *whole* measured window (`Perf::bench_begin` keeps every `FrameRecord`,
+  `GpuFrame` and latency sample — the live rings hold ~5 s), plus clip
+  totals (`perf::STALE_TOTAL` diffed over the window, worst decode p95),
+  wgpu resource counts at window start/end, per-method RPC round-trips
+  (n, errors, p50/p95/max, skipped), subscriber message counts, and
+  machine info (adapter, backend, OS, build profile, git sha + dirty).
+
+**Scenario format** (`render-core/perf/scenarios/*.json`; scenes and
+fixtures in `perf/scenes/`): `{description, scene, size?, warmup_frames?,
+frames, paced?, two_leg? (default true), alignment?, audio?: {lmh,
+onset_hz}, subscribe?: [channel], actor? ("ui"), timeline?: [...], gate?}`.
+Paths are relative to the scenario file. Timeline entries are `{at_frame,
+method, params, every_frames?, count?}` (frames count from the first
+warm-up frame) or `{at_frame, hz, method, params}` (a background thread at
+a fixed rate — knob storms); they go through `rpc::dispatch` from a worker
+thread, exactly like a WS connection, so they exercise the real `promote` /
+`param.set` / `scene.load` paths. Param directives: `{"$alt": [a, b]}`
+(by repetition), `{"$scene": file}` (staged scene JSON string for
+`scene.load`), `{"$file": file}` (text, e.g. WGSL), `{"$json": file}`.
+`audio` feeds the engine's own OSC listener on a free port (the real ingest
+path). `gate` is read only by the gate script. **The scene is staged**
+into a temp dir first (scene + a copy of `effects/` + optional alignment;
+pack and `image.clip` paths made absolute; never `session.json` or
+`.wzrd/` drafts), so a bench never writes into a real project.
+
+| Scenario | Guards | Mode |
+|---|---|---|
+| `idle` | fixed floor: final pass + identity warp | uncapped |
+| `smoke` | today's typical scene (`examples/phase3_smoke`) | uncapped |
+| `layers-heavy` | 40 built-in bindings, audio pinned to 1.0 over OSC | uncapped |
+| `clips-7` | seven 1080p HAP clips: decode, **stale = 0** | uncapped |
+| `take-crossfade` | clip-set swap TAKE every 2 s (scene.load → promote 400 ms) | paced |
+| `warp-64` | 64-handle alignment + `alignment.set` every 4 frames (rebake) | uncapped |
+| `edit-churn` | 300 × `effect.upsert` + 300 × `scene.load`, single leg: resource counts flat, rebuild ms | uncapped |
+| `preview-remote` | a `preview` subscriber (JPEG readback + design leg awake) | uncapped |
+| `knob-latency` | `param.set` at 100 Hz → knob→submit p95 | paced |
+| `capacity-clips` | info only: largest N clip bindings with headroom ≥ 0 and no stale | uncapped |
+
+Clip scenarios read four 3 s 1080p30 HAP clips with grain (≈ 1 MB/frame,
+so the decoder does real work) that the gate encodes once into
+`render-core/perf/.media/` (gitignored, like `perf/.work/`). **A new cost
+path adds or extends a scenario in the same change.**
+
+**`scripts/perf_gate.py`** (`uv run`, stdlib only): `cargo build
+--release`, builds the example pack if missing, runs each scenario 3×,
+compares with `render-core/perf/baselines/<adapter>__<hostname>.json`
+(committed; `apple-m2__xanders-macbook-pro.json` is the first), prints one
+table (scenario × metric, baseline → now, Δ, verdict), exits 1 on FAIL.
+Budgets and thresholds are named constants at the top of the script.
+Choices the measurements forced, all on 2026-10-12 with other agents and
+Chrome on the machine:
+
+- **CPU/GPU costs take the best of the 3 runs, latency and counts the
+  median.** Noise only adds time; a median of 3 still flapped (smoke
+  `cpu.work` p95 0.15–0.39 ms run to run).
+- **Regression = > 15 % and > 0.5 ms for GPU passes, > 1 ms for CPU
+  stages, > 2 ms for latency**, stale counts on tracked scenarios
+  (> 1.5× and > +10). Every stage/pass is checked; only failures get rows.
+- **"No frame > 33 ms" judges render-thread work, not the interval**:
+  uncapped, the interval's `acquire` is GPU backpressure, and the desktop's
+  GPU stalls ~45 ms for other apps' compositing about one run in five.
+- A failing scenario re-runs once before it fails; > 10 % *and* > 0.3 ms
+  spread prints NOISY. Paced scenarios never judge GPU ms (the GPU
+  downclocks at 60 Hz, §2.9). No baseline for the machine → budgets only.
+- `--update-baseline --reason "…"` rewrites the baseline and appends
+  `{date, machine, sha, reason, deltas}` to `perf/baselines/history.jsonl`.
+  A scenario file path argument runs that file judged against its stem's
+  baseline — how the gate was proven red (a 24-octave `silk` in a scratch
+  copy of `smoke`: `gpu.total` p95 2.46 → 8.45 ms, FAIL on budget and
+  regression).
+
+A full run takes **~100–110 s** (+ ~10 s for the capacity search) and
+measures, on the M2: smoke `gpu.total` p95 2.5 ms, preview-remote 4.8,
+warp-64 5.9 (the 64-handle rebake is ~3.4 ms of it), `knob→submit` p95
+~33.5 ms (§4 #9), 0 wgpu objects gained over edit-churn, ≥ 64 clip
+bindings held. Findings it surfaced are §4 #12.
 
 ---
 
@@ -1104,7 +1311,17 @@ Ranked; none currently show-stopping at 5–20 layers.
    pass, buffer, and bind group. Fine at current scale; will hurt at ~100
    layers × many bindings. The v1 plan (§4.2) already mandates stable
    binding ids as the diff key — implement diff-based rebuild when scenes
-   get big enough to notice (see §5.6).
+   get big enough to notice (see §5.6). Since 2026-10-12 a rebuild is
+   *visually* seamless (clips carry over, §2.1 clip continuity); the cost
+   is CPU on the render thread only.
+1b. **Render-thread hitches on genuinely new content (not edits).** A
+   rebuild that introduces a *new* user pipeline compiles it synchronously
+   in `apply_design_scene` (Metal compile, tens of ms — a held frame on
+   live), and a newly bound *still* decodes its PNG/JPEG synchronously in
+   `open_still` (a 4K PNG ≈ 100 ms); a new HAP clip's first-frame decode
+   is a few ms. Param/rate/colour/mod edits hit neither. Fix when it bites:
+   compile on a worker thread (wgpu `Device` is `Send + Sync`) and decode
+   stills off-thread, swapping in when ready.
 2. **Polling IPC loops.** The engine WS connection threads sleep 8 ms
    between polls (~8 ms worst-case added RPC latency for *remote* clients,
    constant low CPU). Local Tauri commands are direct dispatch since the
@@ -1135,15 +1352,16 @@ Ranked; none currently show-stopping at 5–20 layers.
    renders to its own FBO first).
 7. **Fixed WS port 9123.** A stale engine process blocks respawn. Use port
    0 + handshake, or kill-by-pidfile, when it bites.
-8. **No GPU-side timing.** The §2.9 profiler is CPU-only; wgpu timestamp
-   queries would attribute cost per pass (PM2), plus the regression gate
-   (PM3): [../TODO/perf-monitor.md](../TODO/perf-monitor.md).
+8. ~~No regression gate~~ — **resolved 2026-10-12**: §2.10 (`--bench` +
+   `scripts/perf_gate.py`).
 9. **Knob → submit is ~2 frames, not ≤ 1** (§2.9 measured `knob_submit_p95`
    ≈ 31 ms at 60 Hz). Legs tick *before* `acquire`, and `acquire` is where
    the frame waits for vsync, so a value read at tick reaches the GPU one
    vsync wait later — and a write landing during that wait misses the tick.
    Ticking after `acquire` would cut ~one frame; not done (behaviour change,
-   needs the probe/timing re-checked).
+   needs the probe/timing re-checked). The §2.10 `knob-latency` scenario
+   measures 33.3–34.7 ms p95 with a 100 Hz knob (ceiling 2 × 16.7 ms), so
+   its budget is 36 ms until the tick moves.
 10. ~~Dev builds drop frames on the preview JPEG~~ — **resolved 2026-10-12**:
    dependencies build optimized in dev (`[profile.dev.package."*"]` in both
    manifests), the shell subscribes to `preview` only on demand, and the
@@ -1156,6 +1374,19 @@ Ranked; none currently show-stopping at 5–20 layers.
    `predicted_p95_ms` leaves out the real texture reads. Compile + timing
    of the ALU work are still real. Fix: bind the binding's image (or a
    representative still) in probe items.
+
+12. **A clip-swap TAKE is visible** (found by the §2.10 `take-crossfade`
+   scenario, 2026-10-12, gated as regression-only until fixed): 4 TAKEs of
+   seven 1080p clips at 60 Hz show **~28 stale clip frames** (median) and
+   frames of 34–45 ms — opening seven clips in `scene.load` costs ~13 ms in
+   `inbound.cmds`, and the promote's first ramp frames spend 14–23 ms in
+   `tick.live` with clip opens in the same frame. The design leg's clips
+   decode nothing until the fade makes design demanded, so the fade's
+   first frames want frames that aren't there. This is the E1b/E2 trap in
+   [../TODO/gig-2026-11-live-video.md](../TODO/gig-2026-11-live-video.md);
+   fixing it should drive the scenario's stale count to 0 — then make it
+   `"stale": "zero"`. Related: in two-leg mode an `effect.upsert` compiles
+   its pipeline on the render thread (one 116 ms frame seen; #1b).
 
 **Latent safety/scaling risks (from v1 §9 — not yet bitten at 5–20 layers):**
 - **Pathological user-WGSL.** `naga` catches syntax/type errors, but an
@@ -1174,7 +1405,9 @@ Ranked; none currently show-stopping at 5–20 layers.
   §2.4), FBO targets from a deleted slow-path
   layer, naga handles after effect removal. Swap-on-success gives every
   pipeline a single owner; verify GPU memory *plateaus* under rapid edit/save
-  loops rather than climbing.
+  loops rather than climbing — §2.10's `edit-churn` scenario now checks the
+  wgpu counts (0 objects gained over 600 edits, single leg).
+
 
 ---
 
@@ -1219,6 +1452,13 @@ All **§5.x** references in this doc resolve there (numbering preserved).
   engine. Don't add a third path.
 - **`cargo test` in `render-core/` + `pnpm build` in `wzrd-app/` must pass**
   before declaring a change done. There is no CI; you are the CI.
+- **Run the perf gate.** After any change under `render-core/` or
+  `wzrd-app/src-tauri/` — or a UI change that subscribes to a high-rate
+  channel — run `uv run scripts/perf_gate.py` (~2 min, windowless — it
+  runs from any shell, nothing needs to be in front) and paste its table
+  into your summary. A FAIL is not done. A cost you added on purpose:
+  add/extend a scenario that covers it, then `--update-baseline --reason
+  "…"`. The webview's own cost is not gated yet (§2.10).
 - When you change engine RPC or telemetry shapes, update **both** this doc
   (§2.3) and the TS types in `wzrd-app/src/{api/ipc.ts, state/store.ts}`.
 

@@ -1,4 +1,5 @@
-//! wgpu state: surface, device, queue, mask-atlas texture, pipelines.
+//! wgpu state: output target (window surface or offscreen), device, queue,
+//! mask-atlas texture, pipelines.
 //!
 //! Phase 3 widens what Phase 2 had:
 //!
@@ -13,7 +14,9 @@
 //! The compositor in `compositor.rs` owns the pass plan and ticks
 //! `FrameState` each frame; this file just exposes the bricks.
 
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -356,18 +359,155 @@ pub struct WarpTarget {
     needs_bake: std::cell::Cell<bool>,
 }
 
+/// Offscreen output format: what a Metal/Vulkan swapchain picks (the first
+/// sRGB format), so the final pass compiles and costs the same as on a
+/// window.
+const OFFSCREEN_OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+/// Submits allowed in flight offscreen — the swapchain's
+/// `desired_maximum_frame_latency`.
+const OFFSCREEN_FRAME_LATENCY: usize = 2;
+
+/// The projector final pass's destination.
+enum Output {
+    /// A window swapchain (winit / Tauri hosts).
+    Window(wgpu::Surface<'static>),
+    /// No window (perf-monitor PM3 `--bench`).
+    Offscreen(OffscreenOutput),
+}
+
+struct OffscreenOutput {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    /// Submits that drew into it and may still be on the GPU, oldest first.
+    /// Without a swapchain nothing else stops the CPU from queueing
+    /// unbounded work, and an uncapped bench would measure the queue.
+    in_flight: RefCell<VecDeque<wgpu::SubmissionIndex>>,
+    /// `--paced`: the virtual vsync period and the next tick.
+    vsync: Option<(Duration, Cell<Option<Instant>>)>,
+}
+
+impl OffscreenOutput {
+    fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, vsync_hz: Option<f64>) -> Self {
+        let (texture, view) = create_offscreen_output(device, config);
+        Self {
+            texture,
+            view,
+            in_flight: RefCell::new(VecDeque::new()),
+            vsync: vsync_hz
+                .filter(|hz| *hz > 0.0)
+                .map(|hz| (Duration::from_secs_f64(1.0 / hz), Cell::new(None))),
+        }
+    }
+
+    fn resize(&mut self, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) {
+        let (texture, view) = create_offscreen_output(device, config);
+        self.texture = texture;
+        self.view = view;
+    }
+
+    /// Block until this frame may start drawing: the in-flight cap, then
+    /// (paced) the next vsync tick on a fixed grid — a late frame snaps to
+    /// the next tick, as a real swapchain would.
+    ///
+    /// `timed` (the perf GPU timer samples this frame): wait for the queue
+    /// to drain first, so the frame runs **alone** on the GPU. With two
+    /// frames in flight Apple's GPU starts a frame's first pass while the
+    /// previous frame is still drawing, and the per-submit span then
+    /// counts that wait — measured: smoke 3.9 ms at two in flight, 6.4 ms
+    /// at three, 2.4 ms isolated, at an identical 2.6 ms/frame throughput.
+    /// Untimed frames keep the queue full, so the GPU stays clocked up
+    /// (draining *every* frame lets it downclock: 4.5 ms).
+    fn wait_turn(&self, device: &wgpu::Device, timed: bool) {
+        let cap = if timed { 1 } else { OFFSCREEN_FRAME_LATENCY };
+        let mut q = self.in_flight.borrow_mut();
+        while q.len() >= cap {
+            if let Some(idx) = q.pop_front() {
+                device.poll(wgpu::Maintain::WaitForSubmissionIndex(idx));
+            }
+        }
+        drop(q);
+        if let Some((period, next)) = &self.vsync {
+            let now = Instant::now();
+            let mut tick = next.get().unwrap_or(now);
+            while tick < now {
+                tick += *period;
+            }
+            if tick > now {
+                std::thread::sleep(tick - now);
+            }
+            next.set(Some(tick + *period));
+        }
+    }
+}
+
+fn create_offscreen_output(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen output"),
+        size: wgpu::Extent3d {
+            width: config.width,
+            height: config.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+fn new_instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    })
+}
+
+/// One acquired output frame (see [`GpuContext::acquire_output`]).
+pub enum OutputFrame<'a> {
+    Swapchain {
+        frame: wgpu::SurfaceTexture,
+        view: wgpu::TextureView,
+    },
+    Offscreen {
+        view: &'a wgpu::TextureView,
+    },
+}
+
+impl OutputFrame<'_> {
+    pub fn view(&self) -> &wgpu::TextureView {
+        match self {
+            OutputFrame::Swapchain { view, .. } => view,
+            OutputFrame::Offscreen { view } => view,
+        }
+    }
+}
+
 pub struct GpuContext {
     /// Kept so additional surfaces (the preview) can be created against the
     /// same instance/adapter the device came from.
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
-    pub surface: wgpu::Surface<'static>,
+    /// Where the projector final pass lands — the window's swapchain, or
+    /// (perf-monitor PM3 `--bench`) an offscreen texture. See [`Output`].
+    output: Output,
+    /// The output's format + size. For a window it's the live swapchain
+    /// configuration; offscreen only `format`/`width`/`height` mean anything.
     pub surface_config: wgpu::SurfaceConfiguration,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     /// Whether the device was created with `TEXTURE_COMPRESSION_BC` (HAP
     /// clips need it; stills don't).
     pub bc_supported: bool,
+    /// Whether the device was created with `TIMESTAMP_QUERY` (perf PM2 GPU
+    /// columns) — only when asked for *and* offered.
+    pub timestamps_supported: bool,
 
     /// Attached/detached by the host at runtime (None headless / pre-attach).
     pub preview: Option<PreviewTarget>,
@@ -435,25 +575,56 @@ impl GpuContext {
     /// one. Headless single-leg passes `false` and stays byte-identical to
     /// the pre-two-deck engine (the homography bind group then binds the
     /// live composite to both texture slots; mix is 0).
+    ///
+    /// `want_timestamps`: request `TIMESTAMP_QUERY` for the perf monitor's
+    /// GPU columns (if the adapter offers it). `false` keeps the feature set
+    /// exactly as without PM2.
     pub async fn new(
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
         pack: &LoadedPack,
         two_leg: bool,
+        want_timestamps: bool,
     ) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
-        });
+        let instance = new_instance();
         let surface = instance
             .create_surface(target)
             .context("creating wgpu surface for window")?;
+        Self::build(instance, Some(surface), width, height, None, pack, two_leg, want_timestamps).await
+    }
 
+    /// Perf-monitor PM3 `--bench`: no window and no surface — the adapter is
+    /// requested with `compatible_surface: None` and the final pass renders
+    /// into an offscreen `width × height` texture in the format a swapchain
+    /// would pick. `vsync_hz`: `Some` = `--paced` (acquire waits for a
+    /// virtual vsync, like a real swapchain); `None` = uncapped.
+    pub async fn new_offscreen(
+        width: u32,
+        height: u32,
+        vsync_hz: Option<f64>,
+        pack: &LoadedPack,
+        two_leg: bool,
+        want_timestamps: bool,
+    ) -> Result<Self> {
+        Self::build(new_instance(), None, width, height, vsync_hz, pack, two_leg, want_timestamps).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build(
+        instance: wgpu::Instance,
+        surface: Option<wgpu::Surface<'static>>,
+        width: u32,
+        height: u32,
+        vsync_hz: Option<f64>,
+        pack: &LoadedPack,
+        two_leg: bool,
+        want_timestamps: bool,
+    ) -> Result<Self> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
+                compatible_surface: surface.as_ref(),
                 force_fallback_adapter: false,
             })
             .await
@@ -470,15 +641,27 @@ impl GpuContext {
         if !bc_supported {
             log::warn!("GPU adapter lacks TEXTURE_COMPRESSION_BC — HAP clips will not play");
         }
+        // The second exception (perf-monitor PM2): timestamp queries for the
+        // `perf` channel's per-pass GPU columns — requested only when the
+        // perf monitor wants them and the adapter offers them (Apple Silicon
+        // at pass boundaries; Vulkan/NVIDIA). Without it `perf.gpu` is null.
+        let timestamps_supported = want_timestamps
+            && adapter.features().contains(crate::gpu_timing::GpuTimer::FEATURES);
+        if want_timestamps && !timestamps_supported {
+            log::info!("GPU adapter lacks TIMESTAMP_QUERY — perf GPU columns stay null");
+        }
+        let mut required_features = wgpu::Features::empty();
+        if bc_supported {
+            required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
+        }
+        if timestamps_supported {
+            required_features |= crate::gpu_timing::GpuTimer::FEATURES;
+        }
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("render-core device"),
-                    required_features: if bc_supported {
-                        wgpu::Features::TEXTURE_COMPRESSION_BC
-                    } else {
-                        wgpu::Features::empty()
-                    },
+                    required_features,
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
@@ -487,24 +670,43 @@ impl GpuContext {
             .await
             .context("requesting wgpu device")?;
 
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(surface_caps.formats[0]);
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: width.max(1),
-            height: height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+        let (output, surface_config) = match surface {
+            Some(surface) => {
+                let surface_caps = surface.get_capabilities(&adapter);
+                let surface_format = surface_caps
+                    .formats
+                    .iter()
+                    .copied()
+                    .find(|f| f.is_srgb())
+                    .unwrap_or(surface_caps.formats[0]);
+                let surface_config = wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format: surface_format,
+                    width: width.max(1),
+                    height: height.max(1),
+                    present_mode: wgpu::PresentMode::AutoVsync,
+                    alpha_mode: surface_caps.alpha_modes[0],
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                };
+                surface.configure(&device, &surface_config);
+                (Output::Window(surface), surface_config)
+            }
+            None => {
+                let config = wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format: OFFSCREEN_OUTPUT_FORMAT,
+                    width: width.max(1),
+                    height: height.max(1),
+                    present_mode: wgpu::PresentMode::AutoVsync,
+                    alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                };
+                let output = Output::Offscreen(OffscreenOutput::new(&device, &config, vsync_hz));
+                (output, config)
+            }
         };
-        surface.configure(&device, &surface_config);
 
         let composite_width = pack.atlas_width;
         let composite_height = pack.atlas_height;
@@ -577,11 +779,12 @@ impl GpuContext {
         Ok(Self {
             instance,
             adapter,
-            surface,
+            output,
             surface_config,
             device,
             queue,
             bc_supported,
+            timestamps_supported,
             preview: None,
             photo_texture,
             photo_view,
@@ -615,7 +818,10 @@ impl GpuContext {
         }
         self.surface_config.width = width;
         self.surface_config.height = height;
-        self.surface.configure(&self.device, &self.surface_config);
+        match &mut self.output {
+            Output::Window(surface) => surface.configure(&self.device, &self.surface_config),
+            Output::Offscreen(o) => o.resize(&self.device, &self.surface_config),
+        }
         // §5.14 — the LUT is one texel per output pixel, so it follows the
         // swapchain. Recreating it invalidates the final bind group.
         self.resize_warp(width, height);
@@ -699,11 +905,59 @@ impl GpuContext {
             + self.warp.buffer.size()
             + self.final_buffer.size()
             + texture_bytes(&self.photo_texture)
-            + swapchain(&self.surface_config);
+            + match &self.output {
+                Output::Window(_) => swapchain(&self.surface_config),
+                Output::Offscreen(o) => texture_bytes(&o.texture),
+            };
         if let Some(p) = self.preview.as_ref() {
             total += swapchain(&p.config) + p.buffer.size() + p.extra_buffer.size();
         }
         total
+    }
+
+    /// The frame the final pass draws into: the swapchain's next image, or
+    /// the offscreen output. Offscreen, this is where backpressure lives
+    /// (charged to `acquire` like a vsync wait): at most two submits stay
+    /// in flight (a swapchain's frame latency), a GPU-`timed` frame first
+    /// waits for the queue to drain (see `OffscreenOutput::wait_turn`), and
+    /// `--paced` waits for the next virtual vsync. `timed` is ignored on a
+    /// window.
+    pub fn acquire_output(&self, timed: bool) -> Result<OutputFrame<'_>, wgpu::SurfaceError> {
+        match &self.output {
+            Output::Window(surface) => {
+                let frame = surface.get_current_texture()?;
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                Ok(OutputFrame::Swapchain { frame, view })
+            }
+            Output::Offscreen(o) => {
+                o.wait_turn(&self.device, timed);
+                Ok(OutputFrame::Offscreen { view: &o.view })
+            }
+        }
+    }
+
+    /// Present a frame from [`GpuContext::acquire_output`]; `submitted` is
+    /// the submit that drew it (offscreen tracks it for the in-flight cap).
+    pub fn present(&self, frame: OutputFrame<'_>, submitted: wgpu::SubmissionIndex) {
+        match (frame, &self.output) {
+            (OutputFrame::Swapchain { frame, .. }, _) => frame.present(),
+            (OutputFrame::Offscreen { .. }, Output::Offscreen(o)) => {
+                o.in_flight.borrow_mut().push_back(submitted);
+            }
+            (OutputFrame::Offscreen { .. }, Output::Window(_)) => {}
+        }
+    }
+
+    /// True when there is no window surface (PM3 bench).
+    pub fn is_offscreen(&self) -> bool {
+        matches!(self.output, Output::Offscreen(_))
+    }
+
+    /// Adapter name + backend for the bench report's machine info.
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.adapter.get_info()
     }
 
     /// True while the LUT holds undefined contents (freshly allocated or just
@@ -720,7 +974,11 @@ impl GpuContext {
     /// Encode the LUT refill as step 0 of the frame — same encoder, same
     /// submit. Edit-triggered, never per frame: if this ever starts running
     /// every frame the design has gone wrong (§6).
-    pub fn encode_warp_bake(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn encode_warp_bake(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("warp bake pass"),
@@ -734,7 +992,7 @@ impl GpuContext {
                 })],
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
-                timestamp_writes: None,
+                timestamp_writes,
             });
             pass.set_pipeline(&self.warp.pipeline);
             pass.set_bind_group(0, &self.warp.bind_group, &[]);
@@ -867,6 +1125,7 @@ impl GpuContext {
         input: PreviewInput,
         mut uniforms: FinalPassUniforms,
         extra: PreviewExtraUniforms,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
         let Some(pv) = self.preview.as_ref() else {
             return Ok(());
@@ -894,7 +1153,7 @@ impl GpuContext {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("preview blit encoder"),
             });
-        Self::encode_preview_pass(pv, &mut encoder, &view, input);
+        Self::encode_preview_pass(pv, &mut encoder, &view, input, timestamp_writes);
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
@@ -908,6 +1167,7 @@ impl GpuContext {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         input: PreviewInput,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("preview blit pass"),
@@ -921,7 +1181,7 @@ impl GpuContext {
             })],
             depth_stencil_attachment: None,
             occlusion_query_set: None,
-            timestamp_writes: None,
+            timestamp_writes,
         });
         pass.set_pipeline(&pv.pipeline);
         pass.set_bind_group(
@@ -968,7 +1228,7 @@ impl GpuContext {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Self::encode_preview_pass(pv, encoder, &view, input);
+        Self::encode_preview_pass(pv, encoder, &view, input, None);
         let (buffer, bytes_per_row) = self.encode_readback(encoder, &texture, width, height);
         let bgra = matches!(
             format,
@@ -1035,7 +1295,12 @@ impl GpuContext {
     /// of `PassPlan` so the §5.6 frame orchestration in `Core` owns pass
     /// ordering: warp bake (when dirty), live composite, design composite (on
     /// demand), then this.
-    pub fn encode_final(&self, encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+    pub fn encode_final(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("final pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1048,7 +1313,7 @@ impl GpuContext {
             })],
             depth_stencil_attachment: None,
             occlusion_query_set: None,
-            timestamp_writes: None,
+            timestamp_writes,
         });
         pass.set_pipeline(&self.final_pipeline);
         pass.set_bind_group(0, &self.final_bind_group, &[]);

@@ -1,0 +1,650 @@
+{
+  "version": 1,
+  "pack": "../../../test_results/layerpack/pack",
+  "transport": {
+    "bpm": 120
+  },
+  "bindings": [
+    {
+      "id": "heavy_00",
+      "select": {
+        "id": "background"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_01",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_02",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_03",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_04",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_05",
+      "select": {
+        "id": "background"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_06",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_07",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_08",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_09",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_10",
+      "select": {
+        "id": "background"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_11",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_12",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_13",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_14",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_15",
+      "select": {
+        "id": "background"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_16",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_17",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_18",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_19",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_20",
+      "select": {
+        "id": "background"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_21",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_22",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_23",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_24",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_25",
+      "select": {
+        "id": "background"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_26",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_27",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_28",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_29",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_30",
+      "select": {
+        "id": "background"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_31",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_32",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_33",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_34",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_35",
+      "select": {
+        "id": "background"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    },
+    {
+      "id": "heavy_36",
+      "select": {
+        "id": "main_facade"
+      },
+      "effect": "flash",
+      "params": {
+        "envelope": {
+          "driver": "audio.onset",
+          "band": "low",
+          "decay": 0.2
+        },
+        "base": {
+          "driver": "audio.band",
+          "band": "mid"
+        },
+        "color": "#ffd0a0"
+      }
+    },
+    {
+      "id": "heavy_37",
+      "select": {
+        "id": "left_tower"
+      },
+      "effect": "wobble",
+      "params": {
+        "amp": {
+          "driver": "audio.band",
+          "band": "high",
+          "range": [
+            0.0,
+            0.08
+          ]
+        },
+        "freq": 12,
+        "time": {
+          "driver": "clock.time"
+        },
+        "color": "#a0c8ff"
+      }
+    },
+    {
+      "id": "heavy_38",
+      "select": {
+        "id": "right_wing"
+      },
+      "effect": "hueCycle",
+      "params": {
+        "phase": {
+          "driver": "clock.phase",
+          "rate": 0.25
+        }
+      }
+    },
+    {
+      "id": "heavy_39",
+      "select": {
+        "id": "base_wall"
+      },
+      "effect": "tint",
+      "params": {
+        "color": "#40ff90"
+      }
+    }
+  ],
+  "post": []
+}

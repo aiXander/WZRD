@@ -354,8 +354,13 @@ impl ProbeSession {
     }
 
     /// Run probe frames until the per-iteration budget is spent. Returns
-    /// true once every item has finished (call `finalize` then).
-    pub fn step(&mut self, gpu: &GpuContext) -> bool {
+    /// true once every item has finished (call `finalize` then). `timer`
+    /// (perf PM2) puts timestamps on the probe passes for `perf.gpu.probe`.
+    pub fn step(
+        &mut self,
+        gpu: &GpuContext,
+        mut timer: Option<&mut crate::gpu_timing::GpuTimer>,
+    ) -> bool {
         let slice_start = Instant::now();
         while slice_start.elapsed() < STEP_BUDGET {
             let Some(item) = self.items.get_mut(self.current) else {
@@ -414,7 +419,9 @@ impl ProbeSession {
                     })],
                     depth_stencil_attachment: None,
                     occlusion_query_set: None,
-                    timestamp_writes: None,
+                    timestamp_writes: timer
+                        .as_deref_mut()
+                        .and_then(|t| t.writes(crate::perf::GpuPass::Probe)),
                 });
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &item.bind_group, &[]);
