@@ -72,11 +72,11 @@ only its conclusions. Scratchpad = `$S` below (your session scratchpad).
   the app with synthetic input, and their traps.
 - [implementer-brief.md](implementer-brief.md) — the build gate / GPU lock /
   worktree protocol every implementer follows.
-- `scripts/ab.py`, `scripts/appcpu.sh`, `scripts/spikes.py` — the helpers.
+- `scripts/ab.py`, `scripts/appcpu.sh`, `scripts/spikes.py`, `scripts/appenv.sh` (drive a running app: `js`/`room`/`rpc`/`snap`/`knobs`/`sidebyside`) — the helpers.
 - What the 2026-10-12 hunt already fixed (don't re-audit these): region
   scissor per layer pass, per-plan uniform buffer, design leg sampled for a
   JPEG-only consumer, parallel clip opens + one decode per clip frame,
   batched demand-gated app telemetry, sampled cue monitor, opacity-only UI
   animations, bench teardown that never hangs, legs ticking after `acquire`
-  (knob→submit ≈ 1 frame), isolated GPU timing on timed window frames. Current state lives in
+  (knob→submit ≈ 1 frame), isolated GPU timing on timed window frames — all verified on screen the same evening. Current state lives in
   `docs/reference/render-engine.md` and `operator-ui.md`.

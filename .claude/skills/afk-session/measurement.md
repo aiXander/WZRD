@@ -39,15 +39,20 @@ uncapped ones and are the closer stand-in for a show.
 - **fps gates** need the engine window uncovered: a covered window reads
   27–33 ms. In the Tauri app the engine output window sits *under* the main
   window by default — move or shrink one so they don't overlap.
-- **Windowed GPU timing** over-read on 2026-10-12 (app `gpu.total` p95
-  29.8 ms at a solid 60 fps); timed window frames are now isolated like the
-  bench's, unverified on screen until AFK block B7 passes. Until then trust
-  bench GPU numbers over in-app ones for costs.
+- **Windowed GPU timing** is trustworthy since P6 (verified 2026-10-12:
+  app `gpu.total` p95 7.4 ms at 60 fps, was 29.8). Paced in-app passes still
+  read ~3× the uncapped bench (GPU downclock), so costs come from the bench.
 - **App idle cost:** `scripts/appcpu.sh <label> perform live` — per-process
   CPU of `wzrd-app`, its WebKit processes and WindowServer. WebContent is the
-  number UI changes move (8.7 % → 3.8 % for batched, demand-gated telemetry).
-  The `wzrd-app` process includes the engine (dev build: render-core at
-  opt-level 1).
+  number UI changes move. The `wzrd-app` process includes the engine (dev
+  build: render-core at opt-level 1). **Only compare back-to-back runs on
+  the same machine state**: under load 11 the same build read WebContent
+  3.8 %, quiet it reads 6.7 %. To measure an old build, `git worktree add
+  --detach <dir> <sha>`, clone `src-tauri/target` + `node_modules` with
+  `cp -Rc`, symlink `projects/`, and run a copy of `appcpu.sh` whose `cd`
+  points at the worktree. 2026-10-12 quiet, Perform/LIVE, engine window in
+  front: 366aa13 28.9 % / 13.0 % → main ~18 % / ~6.7 % (WindowServer
+  27 → 31.5 %, open in perf-monitor.md).
 - **Frame spikes during an action:** start `scripts/spikes.py 12 &` first,
   then act; ≥ 500 ms is a fail, ~35 ms on minimize/room switch is normal.
 - **Screen recordings:** `ffmpeg -f avfoundation -framerate 60 -capture_cursor 0 -i "1:none" -t 4 -vf "scale=1440:-2,format=yuv420p" -r 60 -c:v h264_videotoolbox …`
@@ -59,8 +64,14 @@ uncapped ones and are the closer stand-in for a show.
 
 ## Driving the app unattended
 
-- Helpers (`js`, `room`, `rpc`, `shot`) are in `docs/TODO/afk-test-session.md`
-  block B2's setup; `scripts/cgmouse.swift` clicks/drags.
+- Helpers: `source scripts/appenv.sh` (here) gives `js`, `room`, `rpc`,
+  `snap`, `knobs`, `sidebyside`, `shot`; the repo's `scripts/cgmouse.swift`
+  clicks/drags. Hover needs a real `mouseMoved` CGEvent (cgmouse has none:
+  a 5-line Swift `CGEvent(mouseEventSource:mouseType:.mouseMoved…)`), and
+  only after a click on empty chrome made the window key — the cue
+  thumbnail's label turning "live peek" is the check that it landed.
+- Counting UI refreshes from a recording: per-frame `signalstats` YDIF on a
+  crop, frames with YDIF > 0.3 (YAVG equality counts H.264 noise).
 - The first synthetic click after activating the app only makes the main
   window key (the engine output window had focus) — click empty chrome
   first, then verify clicks land with a capture-phase `pointerdown` probe.

@@ -200,15 +200,6 @@ heavy scenes — the probe path is covered by `take-crossfade`). Done — see
 [reference/render-engine.md](../reference/render-engine.md) §2.10.
 
 Open from PM3:
-- **Verify on screen: windowed GPU timing over-reads (AFK B3, 2026-10-12).**
-  The app at 60 fps read `preview` (a blit) p50 8.0 ms, `composite.live`
-  p95 14.4 and `gpu.total` p95 29.8 ms (negative headroom, no drops).
-  Fixed 2026-10-12 without a screen (reference §2.9 "GPU passes"): a timed
-  window frame drains the queue before its main submit, and the preview
-  blit is charged from the main span's end with `total` = the union. The
-  screen check is AFK block B7 in [afk-test-session.md](afk-test-session.md):
-  `preview` ≲ 0.5 ms, `gpu.total` p95 < 16.7 ms, and no extra drops with
-  timing on (the drain must not cost a vsync 1 frame in 30).
 - **`take-crossfade` stale frames are gated regression-only** (~28 stale
   clip frames over 4 TAKEs today — reference §4 #12). When E1b/E2 fix the
   TAKE trap, set its `gate.stale` to `"zero"` and re-baseline.
@@ -216,6 +207,12 @@ Open from PM3:
   load reaches us as telemetry bandwidth (`telemetry_bps`) and shared
   cores/GPU. A dev-only rAF jank meter in the Debug panel covers it until a
   real problem shows up.
+- **WindowServer +4–5 points since the 2026-10-12 perf pass** (unexplained).
+  App idle in Perform/LIVE with the engine window in front, quiet machine:
+  366aa13 wzrd-app 28.9 % / WebContent 13.0 % / WindowServer 27.0 %; main
+  after the pass 17–19 % / 6.6–7.3 % / 31.5 %. The rise came in by 6a45324
+  (P4 app UI + P5 merged), so suspect P4's UI changes (opacity-only
+  animations, NativeSlot/SurfaceMap) first. Net is still −13 points.
 - **`capacity-clips` reuses 4 clip files**, so it measures decode + GPU,
   mostly from the page cache — a show with N distinct clips also pays disk
   I/O. It hits the search cap (≥ 64) on the M2; raise `gate.capacity.max`

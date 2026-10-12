@@ -1093,8 +1093,10 @@ budget — the engine doesn't know the projector's refresh; CPU-only when
     60 fps). Offscreen, `wait_turn` drains before acquire (§2.10); on a
     window `GpuContext::drain_before_timed_submit` polls `Maintain::Wait`
     right before the main submit (after encoding, so it waits only for
-    what's left; charged to `acquire`). Untimed frames never wait. Not yet
-    verified on a visible window — AFK block B7 (`docs/TODO/afk-test-session.md`).
+    what's left; charged to `acquire`). Untimed frames never wait. Verified on a
+    visible window 2026-10-12: app `gpu.total` p95 7.4 ms at 60 fps,
+    interval p95 17.50 ms with timing on and off, 0 window drops; `preview`
+    reads 0.0 (p50 and max).
   - **Metal quirks handled:** a pass with no draws gets no end-of-fragment
     sample (empty composite → dropped for that frame; a frame with nothing
     sane isn't a sample). **wgpu-hal 22 bug:** Metal `copy_query_results`
@@ -1475,7 +1477,8 @@ Ranked; none currently show-stopping at 5–20 layers.
    runs acquire → clocks + promote step → tick both legs → encode → submit;
    the bench's virtual vsync sits in the same `acquire`. `knob-latency`:
    p95 33.3 → ~18 ms, p50 28 → 12 (a write waits ≤ 1 frame for the next
-   tick, then ~1 ms tick → submit); budget 22 ms. Clip decode lead is
+   tick, then ~1 ms tick → submit); budget 22 ms. On a real swapchain (app,
+   2026-10-12): 32.7 → 16.7 ms p95. Clip decode lead is
    unchanged (the decoder `want` was already sent in `encode_uploads`,
    after acquire); stale stays 0 on `clips-7`/`preview-clips`. The
    occluded path (`render_offscreen_frame`) has no vsync wait and is

@@ -1,7 +1,7 @@
 # Native preview underlay — what's left (sprint plan, 2026-10-12)
 
-**Status:** U0–U6 **landed 2026-10-12** (same day as the plan). Open: the
-interaction checks (AFK session block B2), then **U7** (soak → delete the
+**Status:** U0–U6 **landed 2026-10-12** (same day as the plan). Open: Xander's look at
+Prepare's BOTH backdrop, then **U7** (soak → delete the
 fallback). Current
 state lives in [render-engine.md](../reference/render-engine.md) §1b
 ("Native preview — the underlay") and [operator-ui.md](../reference/operator-ui.md)
@@ -17,17 +17,10 @@ hatch until the soak has run. Don't let it linger past the gig.
 
 ## Open
 
-### Manual checks → AFK test session block B2
+### Needs Xander's eyes
 
-All interaction and window-robustness checks passed on 2026-10-12
-(clicks and a dropdown over the image, resize / fullscreen / minimize, fast
-room switching, Align handle drag) except **the TAKE crossfade on the
-PROGRAM monitor**: the projector faded, the monitor held the old look and
-jumped at the end. Fixed the same day (the LIVE preview now applies the
-fade mix), still to watch on screen — **step 8 of block B2 in
-[afk-test-session.md](afk-test-session.md)**; a pass retires this section.
-
-Not in B2 — needs Xander's eyes: Prepare BOTH vs. the old look; tune
+All interaction and window checks passed on screen 2026-10-12 (the TAKE
+crossfade on the PROGRAM monitor included, after its fix). Left: Prepare BOTH vs. the old look; tune
 `BACKDROP_PARAMS.both.photo_weight` in `SurfaceMap.tsx` (0.15 now) if the
 photo reads too dim/bright — tune the weight, not the space (linear
 additive is the physics).
