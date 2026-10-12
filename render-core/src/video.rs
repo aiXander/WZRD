@@ -29,9 +29,9 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
@@ -43,6 +43,9 @@ use crate::perf::{ClipStats, ThreadCpu};
 /// Staging slots per clip stream: up to three prefetched frames plus one in
 /// transit back to the decoder.
 pub const RING_SLOTS: usize = 4;
+
+/// The slot that carries the frame a clip opens on (see `open_clip`).
+const FIRST_SLOT: usize = 0;
 
 /// An opened image input.
 pub struct ImageSource {
@@ -63,6 +66,54 @@ impl ImageSource {
     /// Open `path` by extension: `.mov` → HAP clip stream, `.png`/`.jpg` →
     /// still. A clip starts with the frame at `playhead_sec` in its texture.
     pub fn open(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<Self> {
+        Self::open_with(OpenGpu::of(gpu), path, playhead_sec)
+    }
+
+    /// [`Self::open`] for many inputs at once, in parallel — one result per
+    /// `(path, playhead_sec)` job, in job order. Each open is file I/O, a
+    /// first-frame decode (or a whole still) and GPU creation: a few ms per
+    /// clip, which a plan build that brings in many clips (a clip-set
+    /// `scene.load`, the design rebuild after a TAKE) used to pay serially
+    /// on the render thread. Workers are capped at the core count.
+    pub fn open_many(gpu: &GpuContext, jobs: &[(PathBuf, f64)]) -> Vec<Result<Self>> {
+        let ctx = OpenGpu::of(gpu);
+        let workers = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .min(jobs.len());
+        if workers <= 1 {
+            return jobs.iter().map(|(p, t)| Self::open_with(ctx, p, *t)).collect();
+        }
+        let next = AtomicUsize::new(0);
+        let mut out: Vec<Option<Result<Self>>> = jobs.iter().map(|_| None).collect();
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut done = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some((path, t)) = jobs.get(i) else { break };
+                            done.push((i, Self::open_with(ctx, path, *t)));
+                        }
+                        done
+                    })
+                })
+                .collect();
+            for h in handles {
+                // A panicked worker's jobs stay `None` → an error below.
+                if let Ok(done) = h.join() {
+                    for (i, r) in done {
+                        out[i] = Some(r);
+                    }
+                }
+            }
+        });
+        out.into_iter()
+            .map(|r| r.unwrap_or_else(|| Err(anyhow!("opening the image panicked"))))
+            .collect()
+    }
+
+    fn open_with(gpu: OpenGpu<'_>, path: &Path, playhead_sec: f64) -> Result<Self> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -147,7 +198,42 @@ impl ImageSource {
     }
 }
 
-fn open_still(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
+/// What opening an image needs from the GPU: `Copy` + `Sync` (wgpu's
+/// `Device`/`Queue` are), so [`ImageSource::open_many`] can open on worker
+/// threads.
+#[derive(Clone, Copy)]
+struct OpenGpu<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    bc_supported: bool,
+}
+
+impl<'a> OpenGpu<'a> {
+    fn of(gpu: &'a GpuContext) -> Self {
+        Self {
+            device: &gpu.device,
+            queue: &gpu.queue,
+            bc_supported: gpu.bc_supported,
+        }
+    }
+}
+
+/// Positional read (`pread` on unix: no shared seek cursor, one syscall).
+fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_exact_at(buf, offset)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = file;
+        f.seek(SeekFrom::Start(offset))?;
+        f.read_exact(buf)
+    }
+}
+
+fn open_still(gpu: OpenGpu<'_>, path: &Path) -> Result<ImageSource> {
     let img = image::open(path)
         .with_context(|| format!("opening {}", path.display()))?
         .into_rgba8();
@@ -159,7 +245,7 @@ fn open_still(gpu: &GpuContext, path: &Path) -> Result<ImageSource> {
     // sRGB format: PNG/JPEG texels are sRGB-encoded, and the composite is
     // linear light — the format decodes on sample, the swapchain re-encodes.
     let texture = gpu.device.create_texture_with_data(
-        &gpu.queue,
+        gpu.queue,
         &wgpu::TextureDescriptor {
             label: Some(&format!("image input [{}]", path.display())),
             size: wgpu::Extent3d {
@@ -600,21 +686,47 @@ fn decode_chunked(payload: &[u8], out: &mut Vec<u8>) -> Result<()> {
             sizes.len()
         );
     }
-    out.clear();
-    let mut cursor = 0usize;
-    for (i, (&comp, &len)) in compressors.iter().zip(&sizes).enumerate() {
+    // Size `out` once for the whole frame, then decompress every chunk in
+    // place: `out` keeps the previous frame's length, so a same-size frame
+    // resizes for free — clearing and growing it chunk by chunk would
+    // zero-fill the whole frame before each decode.
+    let chunk = |i: usize, cursor: usize| -> Result<&[u8]> {
         let off = offsets.as_ref().map_or(cursor, |o| o[i]);
-        let chunk = data
-            .get(off..off + len)
-            .ok_or_else(|| anyhow!("HAP chunk {i} overruns the frame"))?;
-        let at = out.len();
-        match comp {
-            0x0A => out.extend_from_slice(chunk),
-            0x0B => snappy_into(chunk, out, at)?,
+        data.get(off..off + sizes[i])
+            .ok_or_else(|| anyhow!("HAP chunk {i} overruns the frame"))
+    };
+    let mut total = 0usize;
+    let mut cursor = 0usize;
+    for (i, &comp) in compressors.iter().enumerate() {
+        let c = chunk(i, cursor)?;
+        total += match comp {
+            0x0A => c.len(),
+            0x0B => snap::raw::decompress_len(c).context("snappy header")?,
             c => bail!("unsupported HAP chunk compressor 0x{c:02X}"),
-        }
-        cursor = off + len;
+        };
+        cursor = offsets.as_ref().map_or(cursor, |o| o[i]) + sizes[i];
     }
+    out.resize(total, 0);
+    let (mut at, mut cursor) = (0usize, 0usize);
+    let mut snappy = snap::raw::Decoder::new();
+    for (i, &comp) in compressors.iter().enumerate() {
+        let c = chunk(i, cursor)?;
+        let n = match comp {
+            0x0A => {
+                out[at..at + c.len()].copy_from_slice(c);
+                c.len()
+            }
+            _ => {
+                let n = snap::raw::decompress_len(c).context("snappy header")?;
+                snappy
+                    .decompress(c, &mut out[at..at + n])
+                    .context("snappy decompress")?
+            }
+        };
+        at += n;
+        cursor = offsets.as_ref().map_or(cursor, |o| o[i]) + sizes[i];
+    }
+    out.truncate(at);
     Ok(())
 }
 
@@ -665,17 +777,26 @@ struct ClipStream {
     ready: Vec<Ready>,
     /// Slots consumed (or gone stale) this frame — re-mapped after submit.
     recycle: Vec<usize>,
-    /// Frame currently in the texture.
+    /// Frame currently in the texture (counting `first_upload`, which the
+    /// next `encode_upload` puts there before anything samples it).
     current: Option<u32>,
+    /// The staging slot holding the frame opened on, not yet copied.
+    first_upload: Option<usize>,
     last_want: Option<(u32, i32)>,
     /// Previous call's playhead, to estimate frames per render frame.
     prev_playhead: Option<f64>,
+    /// The last [`STEP_HISTORY`] playhead advances (clip frames per render
+    /// frame, signed), newest at `step_i - 1`; the prefetch stride is their
+    /// median, so one hitch (or a stream waking from idle) doesn't send the
+    /// decoder off prefetching at a stride of 2+ for nothing.
+    steps: [f64; STEP_HISTORY],
+    step_i: usize,
     /// Perf-monitor PM1: decode ms (written by the decoder), stale frames
     /// + ready-queue depth (written here).
     stats: Arc<ClipStats>,
 }
 
-fn open_clip(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<ImageSource> {
+fn open_clip(gpu: OpenGpu<'_>, path: &Path, playhead_sec: f64) -> Result<ImageSource> {
     if !gpu.bc_supported {
         bail!(
             "this GPU adapter has no BC texture compression \
@@ -708,8 +829,7 @@ fn open_clip(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<ImageSo
     let start = info.frame_at(playhead_sec);
     let first = info.samples[start as usize];
     let mut raw = vec![0u8; first.size as usize];
-    file.seek(SeekFrom::Start(first.offset))?;
-    file.read_exact(&mut raw)
+    read_at(&file, first.offset, &mut raw)
         .with_context(|| format!("reading frame {start} of {}", path.display()))?;
     let mut blocks = Vec::new();
     let got = decode_hap_frame(&raw, &mut blocks)
@@ -744,29 +864,12 @@ fn open_clip(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<ImageSo
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    // Plan build is off the per-frame path, so the first frame goes up
-    // directly; the staging ring is for steady-state playback.
-    gpu.queue.write_texture(
-        wgpu::ImageCopyTexture {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &blocks,
-        wgpu::ImageDataLayout {
-            offset: 0,
-            bytes_per_row: Some(row_bytes as u32),
-            rows_per_image: Some(layout.block_rows as u32),
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-
-    // Every slot starts free (mapped, owned by the decoder).
+    // Every slot starts mapped. The first frame goes up through slot 0 —
+    // copied by the stream's first `encode_upload`, which every composite
+    // that samples it is preceded by — not `queue.write_texture`: that
+    // serializes on the queue (≈ 0.3 ms per 1080p clip, with multi-ms
+    // spikes), which made parallel opens queue up behind each other. The
+    // other slots start free (owned by the decoder).
     let slots: Vec<wgpu::Buffer> = (0..RING_SLOTS)
         .map(|i| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -777,14 +880,18 @@ fn open_clip(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<ImageSo
             })
         })
         .collect();
+    write_slot(&slots[FIRST_SLOT], &blocks, layout);
+    slots[FIRST_SLOT].unmap();
     let slots = Arc::new(slots);
 
     let (want_tx, want_rx) = crossbeam_channel::bounded::<Want>(8);
     let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Ready>(RING_SLOTS);
     let (free_tx, free_rx) = crossbeam_channel::bounded::<usize>(RING_SLOTS);
-    for i in 0..RING_SLOTS {
+    for i in (0..RING_SLOTS).filter(|&i| i != FIRST_SLOT) {
         free_tx.send(i).expect("fresh channel");
     }
+    let mut in_flight = [None; RING_SLOTS];
+    in_flight[FIRST_SLOT] = Some(start);
 
     let info = Arc::new(info);
     let stats = ClipStats::register(label.clone());
@@ -797,7 +904,11 @@ fn open_clip(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<ImageSo
         want_rx,
         ready_tx,
         free_rx,
-        in_flight: [None; RING_SLOTS],
+        in_flight,
+        // The texture already holds `start`: a first want for it decodes
+        // nothing.
+        want_frame: Some(start),
+        served: Some(start),
         raw,
         blocks,
         label: label.clone(),
@@ -828,8 +939,11 @@ fn open_clip(gpu: &GpuContext, path: &Path, playhead_sec: f64) -> Result<ImageSo
             ready: Vec::with_capacity(RING_SLOTS),
             recycle: Vec::with_capacity(RING_SLOTS),
             current: Some(start),
+            first_upload: Some(FIRST_SLOT),
             last_want: None,
             prev_playhead: None,
+            steps: [0.0; STEP_HISTORY],
+            step_i: 0,
             stats,
         })),
         view,
@@ -864,6 +978,30 @@ fn near_playhead(shown: u32, wanted: u32, n: u32, step_frames: f64) -> bool {
     d.min(n.max(1) - d) <= tolerance
 }
 
+/// Playhead advances the prefetch stride is the median of: one outlier
+/// (a hitch, a stream waking from idle) is ignored, a real rate change
+/// lands within two render frames.
+const STEP_HISTORY: usize = 3;
+
+/// The prefetch stride (signed clip frames per render frame, |step| ≥ 1)
+/// from the last advances in `steps` (`filled` written so far, ring order).
+fn prefetch_step(steps: &[f64; STEP_HISTORY], filled: usize) -> i32 {
+    let s = match filled {
+        0 => return 1,
+        // Fewer than three: the newest.
+        1 | 2 => steps[(filled - 1) % STEP_HISTORY],
+        _ => {
+            let [a, b, c] = *steps;
+            a.min(b).max(a.max(b).min(c))
+        }
+    };
+    match s.round() as i32 {
+        0 if s < 0.0 => -1,
+        0 => 1,
+        r => r,
+    }
+}
+
 /// Forward distance from `a` to `b` along `dir` (±1), modulo `n`.
 fn ahead(a: u32, b: u32, dir: i32, n: u32) -> u32 {
     let n = n.max(1) as i64;
@@ -876,24 +1014,48 @@ fn ahead(a: u32, b: u32, dir: i32, n: u32) -> u32 {
 }
 
 impl ClipStream {
+    /// Encode the copy of staging slot `slot` into the texture.
+    fn encode_copy(&self, encoder: &mut wgpu::CommandEncoder, slot: usize) {
+        encoder.copy_buffer_to_texture(
+            wgpu::ImageCopyBuffer {
+                buffer: &self.slots[slot],
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.layout.padded_row_bytes as u32),
+                    rows_per_image: Some(self.layout.block_rows as u32),
+                },
+            },
+            wgpu::ImageCopyTexture {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: self.info.width,
+                height: self.info.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     fn encode_upload(&mut self, encoder: &mut wgpu::CommandEncoder, playhead_sec: f64) {
+        // The frame the clip opened on, staged at open: always first, so a
+        // newer frame chosen below lands on top of it.
+        if let Some(slot) = self.first_upload.take() {
+            self.encode_copy(encoder, slot);
+            self.recycle.push(slot);
+        }
         let n = self.info.samples.len() as u32;
         let wanted = self.info.frame_at(playhead_sec);
 
         // Frames advanced per render frame (signed), for the prefetch stride.
-        let fps = self.info.fps();
-        let step = match self.prev_playhead {
-            Some(prev) => {
-                let s = ((playhead_sec - prev) * fps).round() as i32;
-                if s == 0 {
-                    if playhead_sec >= prev { 1 } else { -1 }
-                } else {
-                    s
-                }
-            }
-            None => 1,
-        };
+        if let Some(prev) = self.prev_playhead {
+            self.steps[self.step_i % STEP_HISTORY] = (playhead_sec - prev) * self.info.fps();
+            self.step_i += 1;
+        }
         self.prev_playhead = Some(playhead_sec);
+        let step = prefetch_step(&self.steps, self.step_i);
         let dir = step.signum();
         if self.last_want != Some((wanted, step)) {
             // Bounded and never awaited: a full queue just means the
@@ -937,27 +1099,7 @@ impl ClipStream {
 
         let chosen = best.map(|(i, _)| self.ready[i]);
         if let Some(c) = chosen {
-            encoder.copy_buffer_to_texture(
-                wgpu::ImageCopyBuffer {
-                    buffer: &self.slots[c.slot],
-                    layout: wgpu::ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: Some(self.layout.padded_row_bytes as u32),
-                        rows_per_image: Some(self.layout.block_rows as u32),
-                    },
-                },
-                wgpu::ImageCopyTexture {
-                    texture: &self.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: self.info.width,
-                    height: self.info.height,
-                    depth_or_array_layers: 1,
-                },
-            );
+            self.encode_copy(encoder, c.slot);
             self.current = Some(c.frame);
         }
         // Recycle the uploaded slot and every slot that is now behind the
@@ -1017,6 +1159,15 @@ struct Decoder {
     /// Frame held by each slot while it is not free (decoded and with the
     /// render thread, or in transit back).
     in_flight: [Option<u32>; RING_SLOTS],
+    /// Frame of the newest want.
+    want_frame: Option<u32>,
+    /// The want frame has gone to the render thread already (a `Ready` for
+    /// it was sent, or it was in flight when the want arrived). The render
+    /// thread asks again only when its playhead moves to another frame, so
+    /// once its slot comes back the frame must not be decoded again — at a
+    /// 30 fps clip on a 60 Hz output that re-decode used to double the
+    /// decode work, every frame thrown away.
+    served: Option<u32>,
     raw: Vec<u8>,
     blocks: Vec<u8>,
     label: String,
@@ -1032,33 +1183,45 @@ impl Decoder {
         log::debug!("clip {label}: decode thread exited (stream closed)");
     }
 
+    /// A want arrived. A new frame resets `served` — unless that frame is
+    /// already in flight, which serves it.
+    fn take_want(&mut self, w: Want, want: &mut Option<Want>) {
+        if self.want_frame != Some(w.frame) {
+            self.want_frame = Some(w.frame);
+            self.served = self.in_flight.contains(&Some(w.frame)).then_some(w.frame);
+        }
+        *want = Some(w);
+    }
+
     fn run_loop(mut self) {
         let mut free: Vec<usize> = Vec::with_capacity(RING_SLOTS);
+        let mut returned: Option<usize> = None;
         let mut want: Option<Want> = None;
         let (want_rx, free_rx) = (self.want_rx.clone(), self.free_rx.clone());
         loop {
             // Block until there is something to do: a new want, or a slot
-            // coming back. The timeout only bounds exit latency.
+            // coming back. Dropping the stream disconnects `want_rx`, which
+            // wakes this and exits — no timeout needed.
             crossbeam_channel::select! {
                 recv(want_rx) -> w => match w {
-                    Ok(w) => want = Some(w),
+                    Ok(w) => self.take_want(w, &mut want),
                     Err(_) => return, // stream dropped
                 },
-                recv(free_rx) -> s => if let Ok(s) = s {
-                    self.in_flight[s] = None;
-                    free.push(s);
-                },
-                default(Duration::from_millis(250)) => {}
+                recv(free_rx) -> s => returned = s.ok(),
             }
             self.cpu.tick();
+            // Wants before returned slots: the render thread sends the want
+            // for a frame before it consumes that frame's slot, so a slot
+            // coming back must not make a just-consumed frame look unserved.
             loop {
-                match self.want_rx.try_recv() {
-                    Ok(w) => want = Some(w),
+                match want_rx.try_recv() {
+                    Ok(w) => self.take_want(w, &mut want),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return,
                 }
             }
-            while let Ok(s) = self.free_rx.try_recv() {
+            let back = returned.take().into_iter().chain(std::iter::from_fn(|| free_rx.try_recv().ok()));
+            for s in back {
                 self.in_flight[s] = None;
                 free.push(s);
             }
@@ -1070,7 +1233,7 @@ impl Decoder {
                     break;
                 }
                 let frame = (w.frame as i64 + k * w.step as i64).rem_euclid(n) as u32;
-                if self.in_flight.contains(&Some(frame)) {
+                if (k == 0 && self.served == Some(frame)) || self.in_flight.contains(&Some(frame)) {
                     continue;
                 }
                 let slot = free.pop().expect("checked non-empty");
@@ -1079,6 +1242,9 @@ impl Decoder {
                     Ok(()) => {
                         self.stats.record_decode(started.elapsed());
                         self.in_flight[slot] = Some(frame);
+                        if k == 0 {
+                            self.served = Some(frame);
+                        }
                         if self.ready_tx.send(Ready { slot, frame }).is_err() {
                             return;
                         }
@@ -1099,8 +1265,7 @@ impl Decoder {
     fn decode_into(&mut self, frame: u32, slot: usize) -> Result<()> {
         let s = self.info.samples[frame as usize];
         self.raw.resize(s.size as usize, 0);
-        self.file.seek(SeekFrom::Start(s.offset))?;
-        self.file.read_exact(&mut self.raw)?;
+        read_at(&self.file, s.offset, &mut self.raw)?;
         let got = decode_hap_frame(&self.raw, &mut self.blocks)?;
         let expected = self.layout.row_bytes * self.layout.block_rows;
         if got != self.format || self.blocks.len() != expected {
@@ -1233,6 +1398,48 @@ mod tests {
         let SourceKind::Clip(c) = &source.kind else { panic!("clip expected") };
         assert_eq!(c.current, Some(5)); // 4 fps: 1.25 s → frame 5
         assert!(source.is_current(1.25, 0.0));
+    }
+
+    /// `open_many` = `open` per job, results in job order, failures per job.
+    #[test]
+    fn open_many_keeps_job_order() {
+        let Some(gpu) = crate::compositor::tests::test_gpu() else {
+            eprintln!("no BC-capable adapter — skipping");
+            return;
+        };
+        let jobs = [
+            (fixture("hap.mov"), 1.25),
+            (fixture("missing.mov"), 0.0),
+            (fixture("hap_q.mov"), 0.5),
+        ];
+        let out = ImageSource::open_many(&gpu, &jobs);
+        assert_eq!(out.len(), 3);
+        let frame = |r: &Result<ImageSource>| match &r.as_ref().unwrap().kind {
+            SourceKind::Clip(c) => c.current,
+            _ => panic!("clip expected"),
+        };
+        assert_eq!(frame(&out[0]), Some(5));
+        assert!(format!("{:#}", out[1].as_ref().err().unwrap()).contains("missing.mov"));
+        assert_eq!(frame(&out[2]), Some(2));
+        assert_eq!(out[2].as_ref().unwrap().encoding(), ImageEncoding::YCoCg);
+    }
+
+    #[test]
+    fn prefetch_step_ignores_one_outlier() {
+        let step = |v: &[f64]| {
+            let mut ring = [0.0; STEP_HISTORY];
+            for (i, x) in v.iter().enumerate() {
+                ring[i % STEP_HISTORY] = *x;
+            }
+            prefetch_step(&ring, v.len())
+        };
+        assert_eq!(step(&[]), 1);
+        assert_eq!(step(&[0.5, 0.5, 0.5, 0.5]), 1); // 30 fps clip at 60 Hz
+        assert_eq!(step(&[0.5, 0.5, 2.0]), 1); // one hitch
+        assert_eq!(step(&[0.5, 0.5, 60.0, 0.5]), 1); // woke from idle
+        assert_eq!(step(&[0.5, 4.0, 4.0]), 4); // real 8× change, two frames in
+        assert_eq!(step(&[-0.5, -0.5, -0.5]), -1); // reverse
+        assert_eq!(step(&[0.5, -2.0, -2.0]), -2);
     }
 
     #[test]

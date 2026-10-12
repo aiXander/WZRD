@@ -213,7 +213,12 @@ impl PassPlan {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        for binding in &scene.bindings {
+        // C5 — every image this plan opens afresh, opened up front and in
+        // parallel (per binding index; the loop below takes them in order,
+        // so warnings stay deterministic).
+        let mut opened = open_new_images(gpu, scene, registry, scene_dir, carry, clock_sec);
+
+        for (bi, binding) in scene.bindings.iter().enumerate() {
             let def = resolve_effect_def(binding, registry)?;
             let (pipeline_key, effect_id) = ensure_pipeline(gpu, &def)?;
             let resolved = EffectBinding::from_params(def, &binding.params)
@@ -239,17 +244,14 @@ impl PassPlan {
             // leg, its very stream — see `Carry`).
             let image = resolved.image.as_ref().and_then(|param| {
                 let path = scene_dir.join(&param.clip);
-                let prev = carry.plan().and_then(|p| {
-                    p.images
-                        .iter()
-                        .find(|i| i.binding_id == binding.id && i.path == path)
-                });
-                let offset_sec =
-                    prev.map_or(0.0, |i| i.playhead(clock_sec) - clock_sec * param.rate as f64);
-                let playhead = clock_sec * param.rate as f64 + offset_sec;
+                let (prev, offset_sec, playhead) =
+                    image_target(carry, &binding.id, &path, param.rate, clock_sec);
                 let source = match (carry, prev) {
                     (Carry::Replace(_), Some(i)) => Ok(Arc::clone(&i.source)),
-                    _ => ImageSource::open(gpu, &path, playhead).map(|s| Arc::new(Mutex::new(s))),
+                    _ => opened[bi]
+                        .take()
+                        .unwrap_or_else(|| ImageSource::open(gpu, &path, playhead))
+                        .map(|s| Arc::new(Mutex::new(s))),
                 };
                 match source {
                     Ok(source) => {
@@ -740,6 +742,58 @@ pub(crate) fn resolve_effect_def(binding: &BindingSpec, registry: &EffectRegistr
             registry.resolve_inline(&inline_spec)
         }
     }
+}
+
+/// What a binding's image inherits from `carry`'s plan: the predecessor's
+/// image for the same binding + file (if any), the playhead offset that
+/// keeps its position, and the playhead now.
+fn image_target<'p>(
+    carry: Carry<'p>,
+    binding_id: &str,
+    path: &Path,
+    rate: f32,
+    clock_sec: f64,
+) -> (Option<&'p BindingImage>, f64, f64) {
+    let prev = carry
+        .plan()
+        .and_then(|p| p.images.iter().find(|i| i.binding_id == binding_id && i.path == path));
+    let offset_sec = prev.map_or(0.0, |i| i.playhead(clock_sec) - clock_sec * rate as f64);
+    (prev, offset_sec, clock_sec * rate as f64 + offset_sec)
+}
+
+/// C5: open, in parallel, every image `PassPlan::build` would otherwise
+/// open one by one on the render thread — each binding's image that its
+/// `carry` doesn't hand on as a live stream. Indexed by binding; `None` for
+/// a binding with nothing to open (or whose effect/params don't resolve —
+/// `build` reports that, or falls back to opening in line).
+fn open_new_images(
+    gpu: &GpuContext,
+    scene: &SceneFile,
+    registry: &EffectRegistry,
+    scene_dir: &Path,
+    carry: Carry<'_>,
+    clock_sec: f64,
+) -> Vec<Option<Result<ImageSource>>> {
+    let mut slots: Vec<Option<Result<ImageSource>>> = scene.bindings.iter().map(|_| None).collect();
+    let mut jobs: Vec<(usize, (PathBuf, f64))> = Vec::new();
+    for (bi, binding) in scene.bindings.iter().enumerate() {
+        let Ok(def) = resolve_effect_def(binding, registry) else { continue };
+        let Ok(resolved) = EffectBinding::from_params(def, &binding.params) else { continue };
+        let Some(param) = resolved.image else { continue };
+        let path = scene_dir.join(&param.clip);
+        let (prev, _, playhead) = image_target(carry, &binding.id, &path, param.rate, clock_sec);
+        if !matches!((carry, prev), (Carry::Replace(_), Some(_))) {
+            jobs.push((bi, (path, playhead)));
+        }
+    }
+    if jobs.is_empty() {
+        return slots;
+    }
+    let (index, jobs): (Vec<usize>, Vec<(PathBuf, f64)>) = jobs.into_iter().unzip();
+    for (bi, r) in index.into_iter().zip(ImageSource::open_many(gpu, &jobs)) {
+        slots[bi] = Some(r);
+    }
+    slots
 }
 
 /// Make sure the pipeline for this effect is compiled. Returns the cache

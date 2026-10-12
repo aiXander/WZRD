@@ -525,6 +525,8 @@ struct BenchLog {
     knob_submit: Vec<u32>,
     rpc_queue: Vec<u32>,
     stale_at_start: u64,
+    /// `DECODE_TOTAL` at window start: (frames, µs).
+    decodes_at_start: (u64, u64),
     started: Instant,
 }
 
@@ -915,6 +917,7 @@ impl Perf {
             knob_submit: Vec::with_capacity(frames * 2 + 16),
             rpc_queue: Vec::with_capacity(1024),
             stale_at_start: STALE_TOTAL.load(Ordering::Relaxed),
+            decodes_at_start: decode_totals(),
             started: Instant::now(),
         }));
     }
@@ -1005,6 +1008,10 @@ impl Perf {
                 "streams": streams,
                 "decode_p95": decode_p95.map(round3),
                 "stale": STALE_TOTAL.load(Ordering::Relaxed).saturating_sub(b.stale_at_start),
+                // Decode work over the window, all streams: frames decoded
+                // and decode-thread ms (read + decompress + slot write).
+                "decodes": decode_totals().0.saturating_sub(b.decodes_at_start.0),
+                "decode_ms": round3(decode_totals().1.saturating_sub(b.decodes_at_start.1) as f32 / 1000.0),
             },
         })
     }
@@ -1364,6 +1371,14 @@ static CLIP_OPENS: AtomicU64 = AtomicU64::new(0);
 /// Stale frames across every stream ever opened — the PM3 bench diffs it
 /// over its window (streams come and go with plan rebuilds).
 static STALE_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Frames decoded / decode µs across every stream ever opened (PM3 bench
+/// window diff, like `STALE_TOTAL`).
+static DECODE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DECODE_US_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+fn decode_totals() -> (u64, u64) {
+    (DECODE_TOTAL.load(Ordering::Relaxed), DECODE_US_TOTAL.load(Ordering::Relaxed))
+}
 
 fn clip_opens() -> u64 {
     CLIP_OPENS.load(Ordering::Relaxed)
@@ -1398,6 +1413,8 @@ impl ClipStats {
         if enabled() {
             let i = self.decode_n.fetch_add(1, Ordering::Relaxed) as usize % DECODE_SAMPLES;
             self.decode_us[i].store(us(d), Ordering::Relaxed);
+            DECODE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            DECODE_US_TOTAL.fetch_add(us(d) as u64, Ordering::Relaxed);
         }
     }
 

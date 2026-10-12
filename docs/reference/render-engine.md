@@ -498,8 +498,15 @@ touching it:
   BC3 texture and `sample_image` converts + sRGB-decodes. Measured against
   the PNG path: all three within ~1/255.
 - **A clip binds only while current:** `ImageSource::open` decodes the
-  *playhead* frame synchronously and `write_texture`s it, so a fresh clip
-  is right from its first frame (no black, no frame-0 flash). Each tick
+  *playhead* frame synchronously into staging slot 0, and the stream's
+  first `encode_upload` (which precedes every composite that samples it)
+  copies it in, so a fresh clip is right from its first frame (no black,
+  no frame-0 flash). `PassPlan::build` opens every clip it doesn't carry
+  over **in parallel** before its binding loop (`open_new_images` →
+  `ImageSource::open_many`, workers ≤ core count; warnings stay in binding
+  order) — seven 1080p clips ≈ 3–5 ms instead of ≈ 8 ms serial. The floor
+  is the four `mapped_at_creation` staging buffers per clip (~1.3 ms,
+  fresh-memory faults); a staging pool would remove it. Each tick
   the plan checks `is_current` — the texture is within
   max(4 frames, 4 render-frames of playhead advance) of the playhead
   (`video::near_playhead`). A stream that sat idle (muted, picked out,
@@ -515,7 +522,12 @@ touching it:
   (`PassPlan::encode_uploads`, before `encode_composite`) and re-maps used
   slots after submit (`PassPlan::after_submit`). Decode is demand-driven:
   a leg that doesn't render (idle design, muted/picked-out bindings) asks
-  for nothing and decodes nothing. Prefetch strides by the observed
+  for nothing and decodes nothing. **A frame is decoded once:** the
+  decoder remembers it has served the current want's frame (sent, or in
+  flight when the want arrived) and never re-decodes it when its slot
+  comes back — the render thread only re-asks on a frame change, so a
+  30 fps clip on a 60 Hz output used to decode every frame twice.
+  Prefetch strides by the median of the last three observed
   frames-per-render-frame, so 8× speed still lands. Falling behind = the
   previous frame stays up. No stream sharing between legs (playheads are
   per leg); dropping a plan drops its streams and their threads exit on
@@ -1079,7 +1091,8 @@ The regression gate every engine change runs (rule in §6). Three parts:
 - **Report** = `Perf::bench_report()`: the Tier-A aggregate over the
   *whole* measured window (`Perf::bench_begin` keeps every `FrameRecord`,
   `GpuFrame` and latency sample — the live rings hold ~5 s), plus clip
-  totals (`perf::STALE_TOTAL` diffed over the window, worst decode p95),
+  totals (`perf::STALE_TOTAL` diffed over the window, worst decode p95,
+  `decodes` + `decode_ms` = frames decoded / decode-thread ms, all streams),
   wgpu resource counts at window start/end, per-method RPC round-trips
   (n, errors, p50/p95/max, skipped), subscriber message counts, and
   machine info (adapter, backend, OS, build profile, git sha + dirty).
@@ -1318,8 +1331,8 @@ Ranked; none currently show-stopping at 5–20 layers.
    rebuild that introduces a *new* user pipeline compiles it synchronously
    in `apply_design_scene` (Metal compile, tens of ms — a held frame on
    live), and a newly bound *still* decodes its PNG/JPEG synchronously in
-   `open_still` (a 4K PNG ≈ 100 ms); a new HAP clip's first-frame decode
-   is a few ms. Param/rate/colour/mod edits hit neither. Fix when it bites:
+   `open_still` (a 4K PNG ≈ 100 ms); new HAP clips open in parallel,
+   ≈ 3–5 ms for seven (§2.4). Param/rate/colour/mod edits hit neither. Fix when it bites:
    compile on a worker thread (wgpu `Device` is `Send + Sync`) and decode
    stills off-thread, swapping in when ready.
 2. **Polling IPC loops.** The engine WS connection threads sleep 8 ms
@@ -1378,9 +1391,10 @@ Ranked; none currently show-stopping at 5–20 layers.
 12. **A clip-swap TAKE is visible** (found by the §2.10 `take-crossfade`
    scenario, 2026-10-12, gated as regression-only until fixed): 4 TAKEs of
    seven 1080p clips at 60 Hz show **~28 stale clip frames** (median) and
-   frames of 34–45 ms — opening seven clips in `scene.load` costs ~13 ms in
-   `inbound.cmds`, and the promote's first ramp frames spend 14–23 ms in
-   `tick.live` with clip opens in the same frame. The design leg's clips
+   frames of 34–45 ms. The open hitch is mostly gone since clips open in
+   parallel (§2.4; 2026-10-12 A/B: `inbound.cmds` max 11.6 → 4.9 ms,
+   `tick.live` max 27.8 → 7.4 ms, worst frame 28 → 8 ms), but the stale
+   count is unchanged (28): it is the decode trap, not the open. The design leg's clips
    decode nothing until the fade makes design demanded, so the fade's
    first frames want frames that aren't there. This is the E1b/E2 trap in
    [../TODO/gig-2026-11-live-video.md](../TODO/gig-2026-11-live-video.md);
