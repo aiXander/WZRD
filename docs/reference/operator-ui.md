@@ -108,8 +108,11 @@ newest first, placed by the C2 provenance sidecar's `region`.
 - Shell: `src-tauri/src/clips.rs` — `clips_list` (dir scan + sidecars,
   incl. the source mp4's sidecar via `parent` for prompt/tool/cost, plus
   the filing map), `clip_thumb` (base64; the webview has no asset
-  protocol), `clip_file`. Polled every 2 s from `App` (`useClipsPoller`),
-  so NEW is right in every room.
+  protocol), `clip_file`. `clips_list`/`clip_thumb` are `async` commands
+  (off the main thread). Loaded once per project at open (`App` →
+  `useClipsPoller` — that load is NEW's baseline), then polled every 2 s
+  only while a `ClipGrid` is mounted (`useClipsLivePoll`, refcounted). A
+  scan that overlapped a `clip_file` keeps the optimistic filing.
 
 ## Mechanisms worth knowing
 
@@ -131,7 +134,13 @@ newest first, placed by the C2 provenance sidecar's `region`.
   Bars/Slow = clocks) to driver specs; `RangeFader` edits rest→peak, with
   the live value from the `drivers` channel riding inside.
 - **TAKE arming** compares design vs live scene JSON (`designDiffers`,
-  key-sorted, ignoring `transport` because TAP moves both legs live).
+  key-sorted, ignoring `transport` because TAP moves both legs live) **and**
+  the two legs' override tables in the store (mixer `@mute`/`@opacity`/
+  `@solo` + pins; neutral entries ignored) — a design-only mute is a
+  pending TAKE. Only overrides the store knows about count: it's patched by
+  `actions.pin` and re-read by `hydrateOverrides` (hydrate, take, pull), so
+  a `param.set` from an external client (MCP, raw WS) isn't seen until the
+  next hydrate.
   Live JSON is re-read after every ramp completes (`deck` channel → idle).
 - **Looks** are plain scene files in `<scene_dir>/looks/<name>.json` + a
   `.jpg` thumbnail (Tauri commands `looks_list/look_read/look_write/
@@ -160,10 +169,40 @@ newest first, placed by the C2 provenance sidecar's `region`.
   (`api/previewMode.ts`): `underlay`, `window` (`WZRD_PREVIEW=window`, the
   old child window — Perform only, Prepare/Align draw the JPEG) or `none`
   (browser — JPEG everywhere, approximate). Components branch on
-  `nativeUnderlay()`. The JPEG `preview` channel arrives only while a
-  consumer holds `usePreviewJpegDemand` (refcounted `preview_jpeg_demand`);
-  never subscribe to it by default — that kept the JPEG readback and the
-  design leg running in every room.
+  `nativeUnderlay()`. The JPEG `preview` channel is demand-gated like
+  every streaming channel (next bullet); never hold it by default — that
+  kept the JPEG readback and the design leg running in every room.
+- **Telemetry is demand-driven and batched** (`api/telemetryDemand.ts`,
+  shell `engine.rs::ChannelDemand` + `telemetry_loop`). Sticky channels
+  (`deck`, `masters`, `fps`, `hot_reload`, `changes`, `alignment`, …) and
+  `log` always flow. The streaming ones — `preview`, `audio`, `transport`,
+  `drivers`, `frame_stats`, `perf` — reach the webview only while a mounted
+  component holds `useTelemetryDemand(channel, active)` (or
+  `demandChannel` imperatively): Tempo → `transport`, AudioPanel →
+  `audio`, a driven `LayerParams` row → `drivers`, Debug → `frame_stats` +
+  `drivers` + `perf`, JPEG fallbacks → `preview`. The webview refcounts
+  and sends the shell the *union* (`telemetry_demand {channels}`, once per
+  microtask, only on change — a reload can't leak demand). The engine
+  skips the work behind an unsubscribed channel (`audio`/`transport`/
+  `drivers` payloads, the JPEG readback + design leg). A component that
+  shows a streaming channel without demanding it just sees stale data.
+  The shell emits `engine:telemetry` as an array, at most once per ~33 ms
+  (one Tauri emit = one webview eval); within a batch a streaming channel
+  keeps only its newest frame. Select primitives from these slices
+  (`LayerParams` reads the row's `value`, not the row object; Tempo the
+  integer beat) or every frame re-renders the subscriber.
+- **The cue monitor samples design, it doesn't stream it**
+  (`DeckPanel.tsx::CueMonitor`, shown on LIVE). It holds `preview` demand
+  just long enough for one fresh JPEG: on mount, ~250 ms after any design
+  change (applied `hot_reload`, scene, design pins, cue, take/pull phase)
+  and every 1 s; hovering it peeks at full rate. Streaming it made the
+  engine render the whole design leg + a 15 fps readback for a 118 px
+  thumbnail during the whole show.
+- **Idle-cost rules for animations:** animate only `opacity`/`transform`.
+  Glows are pre-painted shadows whose opacity moves (`.arm-glow` on the
+  armed TAKE — the element must not clip, so its fill lives in an inner
+  wrapper; `Lamp`); meters scale with `transform`, no CSS transition; the
+  beat lamps re-render once per beat and decay via `animate-beat`.
 - **The hole rule: nothing between a `<NativeSlot>` and the page root may
   paint a background over it**, or the image silently vanishes. `html`,
   `body`, `#root` go transparent under `:root[data-underlay]`; a `Panel`

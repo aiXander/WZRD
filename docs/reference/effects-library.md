@@ -114,6 +114,11 @@ project with a pack and `generated/*.mov`; it gets one binding per layer
   connection **replaces** the channel set rather than adding to it.
 - **`preview`** — one-layer canvas scene, window screenshot → `preview.jpg`.
 
+**Last full run (2026-10-12, M2 on battery, `projects/fx-bench`):** all 15
+pass — live p95 16.95–17.26 ms (baseline `videoClip` 17.14), live+design
+≤ 17.5, flashes/s ≤ 2.5 (edgeGlow; strobeGate 1.5). Lowest headroom with the
+design leg awake: edgeGlow 0.35 (its 9 clip taps), everything else ≥ 0.69.
+
 **Why not record the `preview` channel (~15 fps)?** Simulated square-wave
 strobes through `check_flash` (2026-10-12): at 15 fps a 7.5 Hz strobe reads
 0 flashes/s and 7–8 Hz read ~2 (false pass), while timing jitter adds +0.5 to

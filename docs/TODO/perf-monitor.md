@@ -200,20 +200,18 @@ heavy scenes — the probe path is covered by `take-crossfade`). Done — see
 [reference/render-engine.md](../reference/render-engine.md) §2.10.
 
 Open from PM3:
-- **Not committed yet (2026-10-12).** PM3's edits to `core.rs`, `gpu.rs`,
-  `perf.rs`, `lib.rs`, `main.rs` sit on top of PM2's uncommitted diff in the
-  same files (and `gpu_timing.rs` is still untracked), so PM3 can't be
-  committed alone without sweeping PM2 in or leaving a commit that doesn't
-  build. Land PM2 + PM3 together (or after PM2's commit) — ask Xander
-  first. PM3's own new files: `render-core/src/bench.rs`, `render-core/perf/`
-  (scenarios, scenes, `baselines/`, `.gitignore`), `scripts/perf_gate.py`;
-  plus its doc edits (reference §2.10/§4/§6, this file, `CLAUDE.md`,
-  afk-test-session B5).
-- **Window path not watched on screen** since `redraw` moved to
-  `acquire_output`/`present`, and the bench's virtual-vsync knob latency
-  isn't cross-checked against a real swapchain yet — both are
-  [afk-test-session.md](afk-test-session.md) block B5 (B3 covers the Tauri
-  side).
+- **Windowed GPU timing over-reads (found by AFK B3, 2026-10-12).** In the
+  Tauri app at a steady 60 fps (`perf-clips` scene, Perform room, window in
+  front) the sampled passes read `composite.live` p50 6.7 / p95 14.4 ms,
+  `preview` p50 8.0 / p95 14.6 ms (a blit; expected ≲ 0.3) and `gpu.total`
+  p95 29.8 ms — more than the frame budget while no frame drops (interval
+  p95 17.3). The bench isolates its timed frame (`wait_turn`, queue drained
+  first); the swapchain path doesn't, so a timed frame's spans include the
+  previous frame's tail and the preview submit's wait behind it. Headroom
+  derived from `gpu.total` therefore reads negative in the app. Fix: on a
+  timed frame in the window path, drain the queue before the first pass
+  (as the bench does), or time each pass's own begin→end only. On vs off
+  costs nothing (work p95 1.78 vs 2.22 ms, interval 17.32 vs 17.56).
 - **`take-crossfade` stale frames are gated regression-only** (~28 stale
   clip frames over 4 TAKEs today — reference §4 #12). When E1b/E2 fix the
   TAKE trap, set its `gate.stale` to `"zero"` and re-baseline.
@@ -257,6 +255,37 @@ p95** — `Perf::gpu_pass_recent(GpuPass::CompositeLive, n)` (at the default
 `--gpu-timing` lower during probation) — that also solves its documented trap (a TAKE crossfade raises total
 frame time because both legs render; per-pass time on the swapped leg
 doesn't).
+
+## 5. Open: the §5.6 probe blocks the render thread (not built)
+
+`ProbeSession::step` (`render-core/src/probe.rs`) times each probe frame
+as wall-clock submit → `device.poll(Maintain::Wait)`, and
+`read_thumbnail` waits the same way. The Wait also drains the live frame
+just submitted, so a probe step shows up as ~10 ms `inbound.probe` and a
+dropped live frame whenever a new shader enters design mid-show.
+Calibration (`PROBE_NULL_WGSL` → `overhead_ms`) and the A/B thresholds
+(8 / 14 ms predicted full-res p95) are tuned to that wall-clock measure, so
+the fix changes what is measured and needs a re-calibration pass:
+
+1. **Timestamps when available.** With `TIMESTAMP_QUERY`, put begin/end
+   timestamps on each probe pass (own `QuerySet` + resolve buffer, the
+   `GpuTimer` pattern in `gpu_timing.rs`), submit without waiting, and read
+   the samples back with `map_async` + `Maintain::Poll` on later loop
+   iterations. Sample = GPU pass time, so the live frame's work no longer
+   inflates it; the overhead calibration then measures only fixed GPU
+   per-pass cost (expect ~0 — re-derive the default thresholds by probing
+   the `layers-heavy` worst case and a known-red `silk` on the M2).
+2. **Fallback without timestamps:** keep wall-clock timing but run at most
+   **one** probe frame per loop iteration, *after* `present` (so the Wait
+   covers only the probe frame plus the already-presented live frame), and
+   keep `STEP_BUDGET` as a cap. Verdict latency grows from ~0.2 s to ~1 s
+   (60 + 40 frames at one per loop) — acceptable for an author reply.
+3. `read_thumbnail` → the `PreviewSampler`-style non-blocking readback,
+   finished on a later iteration before `finalize`.
+4. Gate: `take-crossfade` (two-leg probe path) shows `inbound.probe` p95 <
+   1 ms and no dropped frame on a `scene.load` that introduces a new
+   pipeline; the probe's verdicts for the bundled examples keep their
+   bands.
 
 ## Open questions (for Xander)
 

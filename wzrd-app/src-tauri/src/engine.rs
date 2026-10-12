@@ -28,10 +28,10 @@
 //! context dropped, OSC/WS ports released) followed by a fresh
 //! `start_in_process` on the same windows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use render_core::core::{Core, PreviewParams};
 use render_core::rpc::{self, EngineCommand, JsonRpcRequest, RpcContext};
-use render_core::telemetry::ALL_CHANNELS;
+use render_core::telemetry::{is_sticky, ALL_CHANNELS};
 use render_core::wgpu;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -176,13 +176,58 @@ pub struct EngineWindows {
     /// The engine window is sized to the first pack that boots on it; later
     /// engines keep whatever size/placement the operator gave it.
     sized: AtomicBool,
-    /// Webview consumers of the JPEG `preview` channel currently mounted
-    /// (`preview_jpeg_demand`). The telemetry fan-in subscribes to
-    /// `preview` only while this is > 0 — an always-on subscription kept
-    /// the JPEG readback *and* the design leg running in every room.
-    /// Lives here (not per engine) because the consumers stay mounted
-    /// across an engine restart.
-    jpeg_demand: Arc<AtomicUsize>,
+    /// The streaming telemetry channels the webview currently displays
+    /// (`telemetry_demand`). Lives here (not per engine) because the
+    /// consumers stay mounted across an engine restart.
+    demand: Arc<ChannelDemand>,
+}
+
+/// Which *streaming* telemetry channels the webview wants right now — the
+/// full set, replaced on every `telemetry_demand` call (the webview
+/// refcounts its consumers and sends the union, so a page reload that
+/// skipped unmount cleanups can't leak a channel). Sticky channels and
+/// `log` always flow (cheap, and sticky state must replay); everything
+/// else — `preview`, `audio`, `transport`, `drivers`, `frame_stats`,
+/// `perf` — reaches the webview only while demanded. The engine gates the
+/// work behind them on `subscriber_count` (JPEG readback + the design leg
+/// for `preview`; payload building for `audio`/`transport`/`drivers`), so
+/// an undemanded channel costs nothing anywhere.
+#[derive(Default)]
+pub struct ChannelDemand {
+    set: Mutex<HashSet<String>>,
+    /// Bumped on every change — the fan-in polls this, not the mutex.
+    gen: AtomicU64,
+}
+
+impl ChannelDemand {
+    fn replace(&self, channels: HashSet<String>) {
+        let mut set = self.set.lock().expect("demand lock");
+        if *set != channels {
+            *set = channels;
+            self.gen.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.gen.load(Ordering::Relaxed)
+    }
+
+    /// The fan-in's subscription: always-on channels + the demanded ones.
+    fn channels(&self) -> HashSet<String> {
+        let set = self.set.lock().expect("demand lock");
+        ALL_CHANNELS
+            .iter()
+            .filter(|c| always_on(c) || set.contains(**c))
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
+
+/// Channels the fan-in subscribes to regardless of demand: the sticky
+/// ones (state the UI must always hold; `last_payload` snapshots + replay
+/// depend on them) and `log` (the Debug room shows history).
+fn always_on(channel: &str) -> bool {
+    is_sticky(channel) || channel == "log"
 }
 
 /// Size updates flow window-event thread → render thread through shared
@@ -331,7 +376,7 @@ impl EngineWindows {
             current_stop: Mutex::new(Arc::new(AtomicBool::new(false))),
             preview_cfg: Mutex::new(None),
             sized: AtomicBool::new(false),
-            jpeg_demand: Arc::new(AtomicUsize::new(0)),
+            demand: Arc::new(ChannelDemand::default()),
         });
 
         // Engine-window events: sizes flow to the render thread; closing the
@@ -367,17 +412,16 @@ impl EngineWindows {
         Ok(windows)
     }
 
-    /// Refcounted demand for the JPEG `preview` channel from the webview
-    /// (Prepare's light backdrop, Align's underlay). The fan-in picks the
-    /// change up within one recv timeout.
-    pub fn preview_jpeg_demand(&self, on: bool) {
-        if on {
-            self.jpeg_demand.fetch_add(1, Ordering::Relaxed);
-        } else {
-            let _ = self
-                .jpeg_demand
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
-        }
+    /// Replace the webview's streaming-channel demand (see
+    /// [`ChannelDemand`]). Unknown and always-on names are ignored. The
+    /// fan-in picks the change up within one recv timeout.
+    pub fn telemetry_demand(&self, channels: Vec<String>) {
+        self.demand.replace(
+            channels
+                .into_iter()
+                .filter(|c| ALL_CHANNELS.contains(&c.as_str()) && !always_on(c))
+                .collect(),
+        );
     }
 
     /// `"underlay"` (native view under a transparent webview — HTML draws
@@ -637,7 +681,7 @@ impl EngineHandle {
         {
             let inner = Arc::clone(&inner);
             let bus = ctx.bus.clone();
-            let demand = Arc::clone(&windows.jpeg_demand);
+            let demand = Arc::clone(&windows.demand);
             thread::Builder::new()
                 .name("engine-telemetry".into())
                 .spawn(move || telemetry_loop(inner, app, bus, demand))
@@ -858,67 +902,96 @@ fn render_thread(
     log::info!("engine render thread exiting");
 }
 
-/// Bus subscription → `engine:telemetry` Tauri events + sticky snapshots +
-/// the 1 Hz `engine:status` heartbeat. Exits when the stop flag is set.
+/// Bus subscription → batched `engine:telemetry` Tauri events + sticky
+/// snapshots + the 1 Hz `engine:status` heartbeat. Exits when the stop flag
+/// is set.
 ///
-/// Every channel except `preview`, which is added only while `jpeg_demand`
-/// > 0: the engine gates the JPEG readback and the design leg's render on
-/// `subscriber_count("preview")`, so subscribing unconditionally made both
-/// run in every room, including Perform where nothing shows them.
+/// Subscribes to the always-on channels plus whatever the webview demands
+/// ([`ChannelDemand`]). One Tauri emit is one `webview.eval` of a fresh JS
+/// string, so frames are **batched**: the event payload is an array of
+/// `{channel, payload}`, flushed at most once per `BATCH` (leading edge —
+/// a lone event goes out immediately). Within a batch a streaming channel
+/// keeps only its newest frame; sticky channels and `log` keep every frame
+/// (each `deck` transition / `changes` entry / log line matters).
 fn telemetry_loop(
     inner: Arc<EngineInner>,
     app: AppHandle,
     bus: render_core::telemetry::Bus,
-    jpeg_demand: Arc<AtomicUsize>,
+    demand: Arc<ChannelDemand>,
 ) {
-    let channels_for = |with_preview: bool| -> std::collections::HashSet<String> {
-        ALL_CHANNELS
-            .iter()
-            .filter(|c| with_preview || **c != "preview")
-            .map(|s| s.to_string())
-            .collect()
-    };
-    let mut with_preview = jpeg_demand.load(Ordering::Relaxed) > 0;
-    let (sub_id, rx) = bus.subscribe(channels_for(with_preview));
+    /// ≈ the fastest channel's own rate (audio/transport, 30 Hz).
+    const BATCH: Duration = Duration::from_millis(33);
+    let mut seen_gen = demand.generation();
+    let (sub_id, rx) = bus.subscribe(demand.channels());
     let mut last_status_emit = Instant::now() - Duration::from_secs(1);
+    let mut last_flush = Instant::now() - BATCH;
+    let mut batch: Vec<TelemetryFrameOut> = Vec::with_capacity(16);
     let mut cpu = render_core::perf::ThreadCpu::register("engine-telemetry");
+
+    let push = |batch: &mut Vec<TelemetryFrameOut>, frame: render_core::telemetry::TelemetryFrame| {
+        // Sticky set comes from the engine, never a local copy — a
+        // second list here is how `alignment` went missing from the
+        // Align tab (it only emits at boot, so the snapshot *is* the
+        // hydration path).
+        if is_sticky(&frame.channel) {
+            inner
+                .last_payloads
+                .lock()
+                .expect("last payloads lock")
+                .insert(frame.channel.clone(), frame.payload.clone());
+        } else if !always_on(&frame.channel) {
+            if let Some(slot) = batch.iter_mut().find(|f| f.channel == frame.channel) {
+                slot.payload = frame.payload;
+                return;
+            }
+        }
+        batch.push(TelemetryFrameOut {
+            channel: frame.channel,
+            payload: frame.payload,
+        });
+    };
 
     loop {
         cpu.tick();
-        let want = jpeg_demand.load(Ordering::Relaxed) > 0;
-        if want != with_preview {
-            with_preview = want;
-            bus.update_channels(sub_id, channels_for(want));
+        let gen = demand.generation();
+        if gen != seen_gen {
+            seen_gen = gen;
+            bus.update_channels(sub_id, demand.channels());
         }
-        match rx.recv_timeout(Duration::from_millis(200)) {
+        let timeout = if batch.is_empty() {
+            Duration::from_millis(200)
+        } else {
+            BATCH
+                .saturating_sub(last_flush.elapsed())
+                .max(Duration::from_millis(1))
+        };
+        match rx.recv_timeout(timeout) {
             Ok(frame) => {
-                // Perf PM1 `telemetry_bps.webview` — the webview hop's load.
-                render_core::perf::count_telemetry(
-                    render_core::perf::Hop::Webview,
-                    &frame.channel,
-                    render_core::perf::json_len(&frame.payload),
-                );
-                // Sticky set comes from the engine, never a local copy — a
-                // second list here is how `alignment` went missing from the
-                // Align tab (it only emits at boot, so the snapshot *is* the
-                // hydration path).
-                if render_core::telemetry::is_sticky(&frame.channel) {
-                    inner
-                        .last_payloads
-                        .lock()
-                        .expect("last payloads lock")
-                        .insert(frame.channel.clone(), frame.payload.clone());
+                push(&mut batch, frame);
+                // Emitters fire several channels back to back (audio +
+                // transport + drivers in one engine tick): take them all.
+                while let Ok(frame) = rx.try_recv() {
+                    push(&mut batch, frame);
                 }
-                let _ = app.emit(
-                    "engine:telemetry",
-                    TelemetryFrameOut {
-                        channel: frame.channel,
-                        payload: frame.payload,
-                    },
-                );
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+        if !batch.is_empty() && last_flush.elapsed() >= BATCH {
+            // Perf PM1 `telemetry_bps.webview` — the webview hop's load.
+            // `json_len` re-serializes, so only while the profiler is on.
+            if render_core::perf::enabled() {
+                for f in &batch {
+                    render_core::perf::count_telemetry(
+                        render_core::perf::Hop::Webview,
+                        &f.channel,
+                        render_core::perf::json_len(&f.payload),
+                    );
+                }
+            }
+            let _ = app.emit("engine:telemetry", &batch);
+            batch.clear();
+            last_flush = Instant::now();
         }
         if inner.stop.load(Ordering::Relaxed) {
             break;

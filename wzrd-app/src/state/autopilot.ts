@@ -8,6 +8,7 @@
 
 import { useEffect } from 'react';
 import { create } from 'zustand';
+import { useTelemetryDemand } from '../api/telemetryDemand';
 import { recallLook } from './actions';
 import { useStore } from './store';
 
@@ -21,6 +22,9 @@ export const useAutopilot = create<Auto>((set) => ({
 }));
 
 export function useAutopilotDriver() {
+  // Walks on the live beat clock — demand it while on (the top bar's beat
+  // lamps usually hold it too).
+  useTelemetryDemand('transport', useAutopilot((s) => s.on));
   useEffect(() => {
     let lastCycle: number | null = null;
     return useStore.subscribe((s, prev) => {

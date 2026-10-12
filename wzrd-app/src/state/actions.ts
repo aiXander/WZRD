@@ -31,7 +31,7 @@ import {
 } from '../api/ipc';
 import { commitSceneMutation, commitSceneNow, commitSceneText, settleCommits } from './sceneCommit';
 import { canonical, isDriver, parseScene, type Binding } from './scene';
-import { useStore, type Masters } from './store';
+import { useStore, type Masters, type OverrideTable } from './store';
 
 // ---------- throttle ----------
 
@@ -176,9 +176,18 @@ export function hydrateOverrides(leg: LegName) {
     .catch(warn('param.list'));
 }
 
-/** Design holds something the crowd hasn't seen. Tempo is ignored: TAP
- *  moves both legs live, only scene.json's copy trails on design. */
-export function designDiffers(designJson: string, liveJson: string): boolean {
+/** Design holds something the crowd hasn't seen: a different scene, or
+ *  different per-leg overrides (mixer `@mute`/`@opacity`/`@solo`, pinned
+ *  knobs) — TAKE copies those too, so a design-only mute is a pending
+ *  change. Tempo is ignored: TAP moves both legs live, only scene.json's
+ *  copy trails on design. (Shared `ui.slider` knob values aren't mirrored
+ *  in the store, so they don't count.) */
+export function designDiffers(
+  designJson: string,
+  liveJson: string,
+  designOverrides?: OverrideTable,
+  liveOverrides?: OverrideTable
+): boolean {
   if (!designJson || !liveJson) return false;
   const strip = (j: string) => {
     const s = parseScene(j);
@@ -186,7 +195,21 @@ export function designDiffers(designJson: string, liveJson: string): boolean {
     delete s.transport;
     return canonical(JSON.stringify(s));
   };
-  return strip(designJson) !== strip(liveJson);
+  if (strip(designJson) !== strip(liveJson)) return true;
+  if (!designOverrides || !liveOverrides) return false;
+  return overridesKey(designOverrides) !== overridesKey(liveOverrides);
+}
+
+/** An override table as a comparable string: no-op mixer entries (`@mute`
+ *  0, `@solo` 0, `@opacity` 1) and empty rows dropped, keys sorted. */
+function overridesKey(t: OverrideTable): string {
+  const NEUTRAL: Record<string, number> = { '@mute': 0, '@solo': 0, '@opacity': 1 };
+  const out: OverrideTable = {};
+  for (const [binding, row] of Object.entries(t)) {
+    const kept = Object.entries(row).filter(([p, v]) => NEUTRAL[p] !== v);
+    if (kept.length) out[binding] = Object.fromEntries(kept);
+  }
+  return canonical(JSON.stringify(out));
 }
 
 // ---------- masters (both legs) ----------

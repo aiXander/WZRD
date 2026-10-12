@@ -9,7 +9,8 @@
 // seen yet — the one deliberately loud control (spec: "committing to the
 // crowd should feel like a decision").
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { demandChannel, useTelemetryDemand } from '../api/telemetryDemand';
 import {
   designDiffers,
   getQuantize,
@@ -23,7 +24,6 @@ import {
 import { useStore } from '../state/store';
 import { Btn, Kbd, Seg } from '../ui/primitives';
 import { Fader } from '../ui/Fader';
-import { JpegFeed } from './NativePreview';
 
 const MIN_S = 0.05;
 const MAX_S = 30;
@@ -40,12 +40,12 @@ export function DeckSwitch({ size = 'lg' }: { size?: 'sm' | 'lg' }) {
   const leg = useStore((s) => s.deck?.preview_source ?? 'design');
   const big = size === 'lg';
   return (
-    <div className={'grid grid-cols-2 rounded-lg border border-line bg-bg p-[3px] gap-[3px] ' + (big ? 'h-11' : 'h-7')}>
+    <div className={'grid grid-cols-2 shrink-0 rounded-lg border border-line bg-bg p-[3px] gap-[3px] ' + (big ? 'h-11' : 'h-7')}>
       <button
         onClick={() => setDeck('design')}
         title="Hands on DESIGN — the private scratch leg. Nothing here reaches the wall until TAKE. (D)"
         className={
-          'rounded-md font-semibold tracking-[0.12em] transition-colors ' +
+          'rounded-md font-semibold tracking-[0.12em] whitespace-nowrap transition-colors ' +
           (big ? 'text-[12px]' : 'text-[10px] px-2') +
           ' ' +
           (leg === 'design' ? 'bg-design text-black' : 'text-fg3 hover:text-fg hover:bg-raised')
@@ -57,7 +57,7 @@ export function DeckSwitch({ size = 'lg' }: { size?: 'sm' | 'lg' }) {
         onClick={() => setDeck('live')}
         title="Hands on LIVE — faders and knobs move the projector right now. (L)"
         className={
-          'rounded-md font-semibold tracking-[0.12em] transition-colors flex items-center justify-center gap-1.5 ' +
+          'rounded-md font-semibold tracking-[0.12em] whitespace-nowrap transition-colors flex items-center justify-center gap-1.5 ' +
           (big ? 'text-[12px]' : 'text-[10px] px-2') +
           ' ' +
           (leg === 'live' ? 'bg-live text-white' : 'text-fg3 hover:text-fg hover:bg-raised')
@@ -74,7 +74,12 @@ function useTakeState() {
   const deck = useStore((s) => s.deck);
   const designJson = useStore((s) => s.sceneJson);
   const liveJson = useStore((s) => s.liveSceneJson);
-  const differs = useMemo(() => designDiffers(designJson, liveJson), [designJson, liveJson]);
+  const designOv = useStore((s) => s.overrides.design);
+  const liveOv = useStore((s) => s.overrides.live);
+  const differs = useMemo(
+    () => designDiffers(designJson, liveJson, designOv, liveOv),
+    [designJson, liveJson, designOv, liveOv]
+  );
   return {
     phase: deck?.promote ?? 'idle',
     mix: deck?.mix ?? 0,
@@ -95,26 +100,125 @@ export function TakeButton({ size = 'lg' }: { size?: 'sm' | 'lg' }) {
       disabled={phase === 'ramping'}
       title={`Crossfade the wall to DESIGN over ${fmtFade(fade)}${getQuantize() === 'bar' ? ', starting on the next bar' : ''} (T · ⇧T = cut)`}
       className={
-        'relative overflow-hidden rounded-lg border font-bold tracking-[0.18em] transition-colors ' +
+        // No overflow-hidden here: `.arm-glow`'s pulse lives outside the box.
+        'relative shrink-0 whitespace-nowrap rounded-lg border font-bold tracking-[0.18em] transition-colors ' +
         (big ? 'h-14 text-[15px] w-full' : 'h-7 px-3 text-[11px]') +
         ' ' +
         (phase !== 'idle'
           ? 'border-live bg-live/20 text-white'
           : differs
-          ? 'border-live bg-live/15 text-white animate-arm hover:bg-live/30'
+          ? 'border-live bg-live/15 text-white arm-glow hover:bg-live/30'
           : 'border-line2 bg-panel2 text-fg3 hover:text-fg hover:border-live/60')
       }
     >
-      {phase === 'ramping' && (
-        <span className="absolute inset-y-0 left-0 bg-live/60" style={{ width: `${Math.round(mix * 100)}%` }} />
+      {phase !== 'idle' && (
+        <span className="absolute inset-0 rounded-[inherit] overflow-hidden pointer-events-none">
+          {phase === 'ramping' && (
+            <span className="absolute inset-y-0 left-0 bg-live/60" style={{ width: `${Math.round(mix * 100)}%` }} />
+          )}
+          {phase === 'pending' && <span className="absolute inset-0 bg-live/20 animate-pulse" />}
+        </span>
       )}
-      {phase === 'pending' && <span className="absolute inset-0 bg-live/20 animate-pulse" />}
       <span className="relative flex items-center justify-center gap-2">
         {label}
         {big && phase === 'idle' && <span className="text-[10px] font-medium tracking-normal opacity-70">{fmtFade(fade)}</span>}
       </span>
     </button>
   );
+}
+
+/** How often the cue thumbnail refreshes while design just plays (clips,
+ *  clocks and audio keep it moving; edits refresh it at once). */
+const CUE_REFRESH_MS = 1000;
+/** Give up on a refresh whose frame never arrives (engine busy/down). */
+const CUE_GRAB_TIMEOUT_MS = 1500;
+
+/**
+ * The cue thumbnail: the design composite, sampled — not streamed. Holding
+ * the JPEG `preview` channel makes the engine render the whole design leg
+ * every frame plus a 15 fps readback + encode, for a ~118 px picture in the
+ * normal show posture (hands on LIVE). Instead this holds demand just long
+ * enough for one fresh frame: on mount, shortly after any design change
+ * (applied reload, pins, scene, cue, take/pull), and every
+ * `CUE_REFRESH_MS`. Hovering it "peeks" at full rate.
+ */
+function CueMonitor({ label }: { label: string }) {
+  const preview = useStore((s) => s.preview);
+  const [peek, setPeek] = useState(false);
+  useTelemetryDemand('preview', peek);
+  useCueFrames();
+  return (
+    <div
+      className="rounded-md border border-design/40 overflow-hidden bg-black"
+      onMouseEnter={() => setPeek(true)}
+      onMouseLeave={() => setPeek(false)}
+      title="What TAKE would send. Refreshes on every design change and about once a second; hover to watch it live."
+    >
+      <div className="flex items-center justify-between px-2 h-6 bg-design/10 border-b border-design/30">
+        <span className="text-[9px] font-semibold tracking-[0.14em] text-design">CUED · DESIGN</span>
+        <span className="text-[10px] text-fg3 truncate ml-2">{peek ? 'live peek' : label}</span>
+      </div>
+      <div className="h-[118px] flex items-center justify-center">
+        {preview ? (
+          <img
+            alt=""
+            draggable={false}
+            className="w-full h-full object-contain"
+            src={`data:image/jpeg;base64,${preview.data_b64}`}
+          />
+        ) : (
+          <span className="text-2xs text-fg4">no preview frames</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** One-shot `preview` grabs while mounted (see `CueMonitor`). */
+function useCueFrames() {
+  useEffect(() => {
+    let holding = false;
+    let guard = 0;
+    let soon = 0;
+    const release = () => {
+      window.clearTimeout(guard);
+      if (!holding) return;
+      holding = false;
+      demandChannel('preview', false);
+    };
+    const grab = () => {
+      if (holding || document.hidden) return;
+      holding = true;
+      demandChannel('preview', true);
+      guard = window.setTimeout(release, CUE_GRAB_TIMEOUT_MS);
+    };
+    // Coalesce a burst of edits (a fader drag) into one grab after it.
+    const grabSoon = () => {
+      window.clearTimeout(soon);
+      soon = window.setTimeout(grab, 250);
+    };
+    const unsub = useStore.subscribe((s, prev) => {
+      // A frame arrived while we held demand: it was rendered after we asked.
+      if (holding && s.preview !== prev.preview) release();
+      if (
+        s.hotReload !== prev.hotReload ||
+        s.sceneJson !== prev.sceneJson ||
+        s.overrides.design !== prev.overrides.design ||
+        s.cuedLook !== prev.cuedLook ||
+        s.deck?.promote !== prev.deck?.promote
+      ) {
+        grabSoon();
+      }
+    });
+    grab();
+    const tick = window.setInterval(grab, CUE_REFRESH_MS);
+    return () => {
+      unsub();
+      window.clearInterval(tick);
+      window.clearTimeout(soon);
+      release();
+    };
+  }, []);
 }
 
 export function DeckPanel() {
@@ -139,15 +243,7 @@ export function DeckPanel() {
       {/* Cue monitor: on LIVE the big monitor shows the wall, so this shows
           what's waiting in design. On DESIGN the big monitor already is it. */}
       {leg === 'live' ? (
-        <div className="rounded-md border border-design/40 overflow-hidden bg-black">
-          <div className="flex items-center justify-between px-2 h-6 bg-design/10 border-b border-design/30">
-            <span className="text-[9px] font-semibold tracking-[0.14em] text-design">CUED · DESIGN</span>
-            <span className="text-[10px] text-fg3 truncate ml-2">{cuedLook ?? (differs ? 'unsaved edits' : 'same as live')}</span>
-          </div>
-          <div className="h-[118px] flex items-center justify-center">
-            <JpegFeed />
-          </div>
-        </div>
+        <CueMonitor label={cuedLook ?? (differs ? 'unsaved edits' : 'same as live')} />
       ) : (
         <div className="rounded-md border border-line bg-panel2 px-3 py-2 text-[11px] leading-snug text-fg2">
           {differs ? (

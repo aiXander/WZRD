@@ -1048,7 +1048,7 @@ impl GpuContext {
             contents: bytemuck::bytes_of(&FinalPassUniforms::identity()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let make_group = |label: &str, view: &wgpu::TextureView| {
+        let make_group = |label: &str, view: &wgpu::TextureView, mix_view: &wgpu::TextureView| {
             create_final_bind_group(
                 &self.device,
                 &self.final_bind_group_layout,
@@ -1056,18 +1056,20 @@ impl GpuContext {
                 view,
                 &self.composite_sampler,
                 &buffer,
-                // mix is always 0 on the preview blit; bind the source view
-                // again to satisfy the layout.
-                view,
+                mix_view,
                 // §5.14 — never the real LUT here (see `warp_dummy_view`).
                 &self.warp_dummy_view,
             )
         };
-        let bind_group_live = make_group("preview blit bind group (live)", &self.composite_view);
-        let bind_group_design = make_group(
-            "preview blit bind group (design)",
-            self.design_view.as_ref().unwrap_or(&self.composite_view),
-        );
+        let design_view = self.design_view.as_ref().unwrap_or(&self.composite_view);
+        // LIVE binds the design composite as its mix partner: during a TAKE
+        // the caller passes the promote mix, so the PROGRAM monitor shows the
+        // crossfade the wall gets (mix 0 otherwise — live only). DESIGN's
+        // mix is always 0; it binds itself again to satisfy the layout.
+        let bind_group_live =
+            make_group("preview blit bind group (live)", &self.composite_view, design_view);
+        let bind_group_design =
+            make_group("preview blit bind group (design)", design_view, design_view);
         let bind_group_program = create_final_bind_group(
             &self.device,
             &self.final_bind_group_layout,
@@ -1127,23 +1129,30 @@ impl GpuContext {
     /// §3.1 caveat: the *caller* must ensure the preview view is visible —
     /// `get_current_texture` on an occluded macOS window blocks the render
     /// thread just like the projector swapchain does.
+    ///
+    /// `write_uniforms = false` skips re-uploading `uniforms` / `extra`
+    /// when the caller knows the buffers already hold them (each
+    /// `write_buffer` is a staging allocation in wgpu-core 22).
     pub fn render_preview(
         &self,
         input: PreviewInput,
         mut uniforms: FinalPassUniforms,
         extra: PreviewExtraUniforms,
+        write_uniforms: bool,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
         let Some(pv) = self.preview.as_ref() else {
             return Ok(());
         };
-        if input != PreviewInput::Program {
-            uniforms.adjust[3] = 0.0;
+        if write_uniforms {
+            if input != PreviewInput::Program {
+                uniforms.adjust[3] = 0.0;
+            }
+            self.queue
+                .write_buffer(&pv.buffer, 0, bytemuck::bytes_of(&uniforms));
+            self.queue
+                .write_buffer(&pv.extra_buffer, 0, bytemuck::bytes_of(&extra));
         }
-        self.queue
-            .write_buffer(&pv.buffer, 0, bytemuck::bytes_of(&uniforms));
-        self.queue
-            .write_buffer(&pv.extra_buffer, 0, bytemuck::bytes_of(&extra));
         let frame = match pv.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -1253,12 +1262,29 @@ impl GpuContext {
         width: u32,
         height: u32,
     ) -> (wgpu::Buffer, u32) {
+        self.encode_readback_reusing(encoder, texture, width, height, None)
+    }
+
+    /// [`Self::encode_readback`] into `reuse` (an unmapped readback buffer
+    /// from an earlier call) when its size fits exactly; a new buffer
+    /// otherwise.
+    pub fn encode_readback_reusing(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        reuse: Option<wgpu::Buffer>,
+    ) -> (wgpu::Buffer, u32) {
         let bytes_per_row = (width * 4).div_ceil(256) * 256;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("preview readback"),
-            size: (bytes_per_row * height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+        let size = (bytes_per_row * height) as u64;
+        let buffer = reuse.filter(|b| b.size() == size).unwrap_or_else(|| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("preview readback"),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
         });
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
@@ -1415,11 +1441,13 @@ fn create_layer_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
 /// The layer bind group: shared mask atlas + frame state, the pass's own
 /// uniform, and its image (or the dummy). The one constructor every pass
 /// and probe item goes through, so the slot layout lives in one place.
+/// The two uniforms are buffer *ranges*: a plan packs its FrameState and
+/// every pass's LayerParams into one buffer at aligned offsets.
 pub fn layer_bind_group(
     gpu: &GpuContext,
     label: &str,
-    frame_state: &wgpu::Buffer,
-    layer_params: &wgpu::Buffer,
+    frame_state: wgpu::BufferBinding<'_>,
+    layer_params: wgpu::BufferBinding<'_>,
     image: Option<&wgpu::TextureView>,
 ) -> wgpu::BindGroup {
     gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1436,11 +1464,11 @@ pub fn layer_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: frame_state.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(frame_state),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: layer_params.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(layer_params),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
@@ -2344,6 +2372,9 @@ pub struct Downscaler {
     sampler: wgpu::Sampler,
     /// Reused while the size holds.
     target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+    /// Bind group over the last source composite, reused while the source
+    /// texture is the same object (a resize or leg change re-keys it).
+    source_group: Option<(wgpu::Id<wgpu::Texture>, wgpu::BindGroup)>,
 }
 
 pub const THUMB_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -2421,6 +2452,7 @@ impl Downscaler {
             layout,
             sampler,
             target: None,
+            source_group: None,
         }
     }
 
@@ -2452,22 +2484,27 @@ impl Downscaler {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.target = Some((texture, view, width, height));
         }
+        let src_id = src.global_id();
+        if !matches!(&self.source_group, Some((id, _)) if *id == src_id) {
+            let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("downscale bind group"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            self.source_group = Some((src_id, group));
+        }
         let (texture, view, _, _) = self.target.as_ref().expect("target just ensured");
-        let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("downscale bind group"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&src_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
+        let (_, group) = self.source_group.as_ref().expect("source group just ensured");
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("downscale pass"),
@@ -2484,7 +2521,7 @@ impl Downscaler {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &group, &[]);
+            pass.set_bind_group(0, group, &[]);
             pass.draw(0..3, 0..1);
         }
         texture

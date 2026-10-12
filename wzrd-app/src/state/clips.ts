@@ -1,5 +1,6 @@
 // A2 — the clip grid's data (gig plan D12): the project's HAP clips (C3,
-// polled every 2 s so agent renders appear without a reload), which region
+// loaded at project open and polled every 2 s while a grid is on screen, so
+// agent renders appear without a reload), which region
 // row each sits in (C2 sidecar `region`, overridden by the operator's
 // drag-filing in clipgrid.json), which are NEW, and the one scene write the
 // grid makes: put a clip on a region's binding (C5) on DESIGN.
@@ -38,9 +39,16 @@ export const useClips = create<ClipsState>(() => ({
 const signature = (cs: ClipEntry[]) =>
   cs.map((c) => `${c.path}:${c.mtime_ms}:${c.thumb ?? ''}:${c.sidecar ? 1 : 0}`).join('|');
 
+/** `clips_list` runs off the main thread now (async command), so a scan can
+ *  overtake a `clip_file` write: a poll that overlapped a filing keeps the
+ *  optimistic rows instead of flicking the clip back for one interval. */
+let fileWrites = 0;
+let fileWritesInFlight = 0;
+
 async function poll() {
   const project = useStore.getState().project?.scene_path ?? null;
   if (!project) return;
+  const writes0 = fileWrites;
   let res: Awaited<ReturnType<typeof clipsList>>;
   try {
     res = await clipsList();
@@ -60,23 +68,41 @@ async function poll() {
     });
     return;
   }
-  if (signature(cur.clips) !== signature(res.clips) || JSON.stringify(cur.rows) !== JSON.stringify(res.rows)) {
-    useClips.setState({ clips: res.clips, rows: res.rows ?? {} });
+  const rows = writes0 !== fileWrites || fileWritesInFlight > 0 ? cur.rows : res.rows ?? {};
+  if (signature(cur.clips) !== signature(res.clips) || JSON.stringify(cur.rows) !== JSON.stringify(rows)) {
+    useClips.setState({ clips: res.clips, rows });
   }
 }
 
-/** Mounted once (App): keeps the list fresh in every room, so NEW is
- *  accurate whenever the grid is opened. */
+/** Mounted once (App): loads each project's list as soon as it opens —
+ *  that first load is the NEW baseline (everything present then is "seen"),
+ *  so NEW stays right even for clips that land while no grid is open. */
 export function useClipsPoller() {
   useEffect(() => {
     poll();
-    const t = window.setInterval(poll, POLL_MS);
-    const unsub = useStore.subscribe((s, prev) => {
+    return useStore.subscribe((s, prev) => {
       if (s.project?.scene_path !== prev.project?.scene_path) poll();
     });
+  }, []);
+}
+
+/** Mounted grids (refcount) — the 2 s scan only runs while one is on
+ *  screen. Every other room has nothing to show it in. */
+let gridsMounted = 0;
+let gridTimer = 0;
+
+/** Keep the list fresh while a `ClipGrid` is mounted: scan now, then every
+ *  `POLL_MS` (skipped while the window is hidden). */
+export function useClipsLivePoll() {
+  useEffect(() => {
+    if (gridsMounted++ === 0) {
+      poll();
+      gridTimer = window.setInterval(() => {
+        if (!document.hidden) poll();
+      }, POLL_MS);
+    }
     return () => {
-      window.clearInterval(t);
-      unsub();
+      if (--gridsMounted === 0) window.clearInterval(gridTimer);
     };
   }, []);
 }
@@ -96,7 +122,11 @@ export function rowOf(clip: ClipEntry, rows: Record<string, string | null>, pack
 
 export function fileClip(path: string, region: string | null) {
   useClips.setState((s) => ({ rows: { ...s.rows, [path]: region } }));
-  clipFile(path, region).catch((e) => useStore.getState().toast(`Could not re-file clip: ${e}`, 'bad'));
+  fileWrites++;
+  fileWritesInFlight++;
+  clipFile(path, region)
+    .catch((e) => useStore.getState().toast(`Could not re-file clip: ${e}`, 'bad'))
+    .finally(() => fileWritesInFlight--);
 }
 
 /** region id → clip paths its bindings play, in one leg's scene. Only

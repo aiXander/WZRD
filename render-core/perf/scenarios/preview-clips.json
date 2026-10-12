@@ -1,0 +1,15 @@
+{
+  "description": "Seven HAP clips at 60 Hz (paced) with a remote `preview` subscriber as the design leg's only consumer: design renders on JPEG capture frames only (~15 Hz), so its clips decode at that cadence. Guards the sparse-render path: no stale frames, JPEG rate held.",
+  "scene": "../scenes/clips7.scene.json",
+  "paced": true,
+  "warmup_frames": 120,
+  "frames": 600,
+  "subscribe": [
+    "preview"
+  ],
+  "gate": {
+    "stale": "track",
+    "media": "clips",
+    "gpu": false
+  }
+}

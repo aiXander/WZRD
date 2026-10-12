@@ -92,15 +92,20 @@ JPEG design feed there.
 ## Telemetry channels
 
 Subscribed in-process off the engine's telemetry bus; relayed onto the
-webview's `engine:telemetry` event channel.
+webview's `engine:telemetry` event as **batches** (an array of frames, at
+most one emit per ~33 ms). The streaming channels (`preview`, `audio`,
+`transport`, `drivers`, `frame_stats`, `perf`) flow only while a mounted
+component demands them (`src/api/telemetryDemand.ts` →
+`telemetry_demand`); see `docs/reference/operator-ui.md`.
 
 | channel | rate | consumer |
 |---|---|---|
-| `preview` | ~15 fps | Prepare surface-canvas underlay + Align warp underlay (Perform hero is the native surface, not this channel) |
+| `preview` | ~15 fps | Perform's cue monitor (sampled ≈1 Hz, full rate on hover); Prepare/Align only in `WZRD_PREVIEW=window` / browser mode |
 | `hot_reload` | event | top-bar health + Debug history |
 | `audio_freshness` | 1 Hz heartbeat + transitions | top-bar Audio dot |
 | `fps` | 2 Hz | top-bar FPS + Debug render-stats |
 | `frame_stats` | 2 Hz | Debug render-stats |
+| `perf` | 2 Hz | Debug performance readout |
 | `audio` | 30 Hz (when present) | Perform room meters + onset lamps |
 | `transport` | 30 Hz | top-bar beat lamps + BPM, looks auto-pilot |
 | `drivers` | 10 Hz | live values inside the dials (modulated params) + Debug |

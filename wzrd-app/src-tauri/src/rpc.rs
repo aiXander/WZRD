@@ -359,12 +359,14 @@ pub fn preview_mode(state: State<AppState>) -> &'static str {
     state.windows.preview_mode()
 }
 
-/// Refcounted demand for the JPEG `preview` channel: a webview consumer
-/// calls this with `true` on mount and `false` on unmount. The shell only
-/// subscribes to `preview` while at least one consumer is mounted.
+/// The streaming telemetry channels the webview displays right now (the
+/// full set — `preview`, `audio`, `transport`, `drivers`, `frame_stats`,
+/// `perf`). The webview refcounts its consumers (`api/telemetryDemand.ts`)
+/// and sends the union on every change; sticky channels + `log` always
+/// flow. See `engine::ChannelDemand`.
 #[tauri::command]
-pub fn preview_jpeg_demand(state: State<AppState>, on: bool) {
-    state.windows.preview_jpeg_demand(on);
+pub fn telemetry_demand(state: State<AppState>, channels: Vec<String>) {
+    state.windows.telemetry_demand(channels);
 }
 
 /// Convenience for the front-end: read the project-local effects directory
@@ -415,8 +417,15 @@ pub fn write_scene_file(state: State<AppState>, contents: String) -> Result<(), 
     std::fs::write(&state.session().scene_path, contents).map_err(|e| format!("{e}"))
 }
 
+/// `async`: one call per mask at hydrate — file reads (and a `pack.info`
+/// round trip on a cold cache) stay off the main thread.
 #[tauri::command]
-pub fn read_mask_png(state: State<AppState>, mask_path: String) -> Result<String, String> {
+pub async fn read_mask_png(state: State<'_, AppState>, mask_path: String) -> Result<String, String> {
+    read_mask_png_in(&state, mask_path)
+}
+
+/// `read_mask_png` body — also the devport's entry.
+pub fn read_mask_png_in(state: &AppState, mask_path: String) -> Result<String, String> {
     use std::path::PathBuf;
     // mask_path is relative to the pack directory. The pack dir is static
     // for the engine's lifetime, so resolve it once and cache it instead of
@@ -467,10 +476,16 @@ fn look_stem(name: &str) -> Result<String, String> {
     }
 }
 
+/// `async`: reads every look's thumbnail — off the main thread.
 #[tauri::command]
-pub fn looks_list(state: State<AppState>) -> Result<Vec<Value>, String> {
+pub async fn looks_list(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+    looks_list_in(&state)
+}
+
+/// `looks_list` body — also the devport's entry.
+pub fn looks_list_in(state: &AppState) -> Result<Vec<Value>, String> {
     use base64::Engine;
-    let dir = looks_dir(&state);
+    let dir = looks_dir(state);
     let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(Vec::new()) };
     let mut out: Vec<(std::time::SystemTime, Value)> = Vec::new();
     for entry in entries.flatten() {

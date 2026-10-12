@@ -47,6 +47,10 @@ BASELINES = PERF / "baselines"
 MEDIA = PERF / ".media"
 WORK = PERF / ".work"
 ENGINE = RC / "target" / "release" / "render-core"
+# The engine's own default filter (render-core/src/main.rs). Never plain `info`: wgpu-core logs "Device::maintain:
+# waiting for submission index N" at INFO on every maintain (~180 lines/s), all of it written to stdout and fanned
+# into the `log` telemetry channel — noise that perturbs the very timings a gate measures.
+ENGINE_RUST_LOG = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn"
 PACK = REPO / "test_results" / "layerpack" / "pack"
 
 # --- Budgets (absolute; FAIL regardless of baseline). Proposals pending Xander's confirmation — ----------
@@ -150,18 +154,39 @@ def ensure_clips() -> None:
 
 # ------------------------------------------------------------------------------------------------- running
 
+class BenchFailed(RuntimeError):
+    """One bench run crashed, timed out or wrote no report — the scenario FAILs, the gate carries on."""
+
+
+def bench_timeout_s(scenario: Path) -> float:
+    """Wall-clock cap for one run: `gate.timeout_s`, else 60 s + the run's frames at a pessimistic 20 fps
+    (paced scenarios run at 60, uncapped ones far faster). A hung bench (a teardown deadlock left one sitting
+    at 0 % CPU for 1 h 43 m on 2026-10-12) is killed and FAILs instead of stalling the gate forever."""
+    sc = json.loads(scenario.read_text())
+    if (sc.get("gate") or {}).get("timeout_s"):
+        return float(sc["gate"]["timeout_s"])
+    return 60.0 + (sc.get("warmup_frames", 120) + sc.get("frames", 0)) / 20.0
+
+
 def run_bench(scenario: Path, tag: str, extra: list[str] | None = None) -> dict:
     out = WORK / "reports" / f"{tag}.json"
     log = WORK / "logs" / f"{tag}.log"
     out.parent.mkdir(parents=True, exist_ok=True)
     log.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
+    timeout = bench_timeout_s(scenario)
     with open(log, "w") as fh:
-        proc = subprocess.run([str(ENGINE), "--bench", str(scenario), "--bench-out", str(out), *(extra or [])],
-                              stdout=fh, stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": "info"})
+        try:
+            # subprocess.run SIGKILLs the child on timeout, so a hung bench never outlives the gate.
+            proc = subprocess.run([str(ENGINE), "--bench", str(scenario), "--bench-out", str(out), *(extra or [])],
+                                  stdout=fh, stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": ENGINE_RUST_LOG},
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise BenchFailed(f"bench {tag} hung: killed after {timeout:.0f} s (set gate.timeout_s to raise the cap); "
+                              f"log {log}") from None
     if proc.returncode != 0 or not out.exists():
         tail = log.read_text().splitlines()[-5:]
-        raise RuntimeError(f"bench {tag} failed (exit {proc.returncode}); log {log}:\n  " + "\n  ".join(tail))
+        raise BenchFailed(f"bench {tag} failed (exit {proc.returncode}); log {log}:\n  " + "\n  ".join(tail))
     return json.loads(out.read_text())
 
 
@@ -216,6 +241,21 @@ def median_metrics(reports: list[dict]) -> tuple[dict, dict]:
 
 
 # ------------------------------------------------------------------------------------------------- verdicts
+
+def teardown_rows(name: str, reports: list[dict]) -> list[Row]:
+    """FAIL if any run left a timeline RPC without its reply after the 10 s drain, or a side thread stuck in
+    `rpc::dispatch` at teardown (the bench detaches it and still exits) — either is a lost engine reply."""
+    rows = []
+    unfinished = max((r.get("actions_unfinished") or 0) for r in reports)
+    stuck = max((get(r, "teardown/stuck_threads") or 0) for r in reports)
+    if unfinished:
+        rows.append(Row(name, "rpc without reply", 0, unfinished, "FAIL",
+                        "a queued RPC never got its reply (worst run) — see the log", unit="n"))
+    if stuck:
+        rows.append(Row(name, "stuck bench threads", 0, stuck, "FAIL",
+                        "a bench thread was still blocked at teardown (worst run)", unit="n"))
+    return rows
+
 
 class Row:
     def __init__(self, scenario, metric, base, now, verdict, note="", unit="ms", shown=True):
@@ -338,7 +378,11 @@ def capacity(sc_path: Path, sc: dict, runs_tag: str) -> tuple[int, str]:
         scen["scene"] = f"clips-{n}.scene.json"
         path = cap_dir / f"capacity-{n}.json"
         path.write_text(json.dumps(scen, indent=1))
-        r = run_bench(path, f"{runs_tag}-capacity-{n}")
+        try:
+            r = run_bench(path, f"{runs_tag}-capacity-{n}")
+        except BenchFailed as e:  # a load that hangs or crashes the engine is past capacity, not a gate error
+            tried[n] = (False, f"{n} clips: {str(e).splitlines()[0]}")
+            return False
         m = metrics(r)
         busiest = max(m.get("gpu.total") or 0, m.get("cpu.work") or 0)
         good = busiest <= CAPACITY_BUDGET_MS and not m.get("stale")
@@ -456,6 +500,7 @@ def main() -> int:
     key, base_doc = None, None
     rows: list[Row] = []
     info: list[str] = []
+    bench_failed: list[str] = []
     for name, (path, sc) in scen.items():
         gate = sc.get("gate") or {}
         if "capacity" in gate:
@@ -472,20 +517,27 @@ def main() -> int:
         runs = int(gate.get("runs", args.runs))
         for attempt in (1, 2):
             print(f"· {name} ×{runs}" + (" (re-run)" if attempt == 2 else ""), flush=True)
-            reports = [run_bench(path, f"{stamp}-{name}-{attempt}{i}") for i in range(runs)]
+            try:
+                reports = [run_bench(path, f"{stamp}-{name}-{attempt}{i}") for i in range(runs)]
+            except BenchFailed as e:
+                print(f"  ! {e}", flush=True)
+                srows = [Row(name, "bench run", None, "failed", "FAIL", str(e).splitlines()[0], unit="n")]
+                bench_failed.append(name)
+                break
             if not first_report:
                 first_report = reports[0]
                 key = machine_key(first_report)
                 base_doc = load_baseline(key)
             base = (base_doc or {}).get("scenarios", {}).get(name)
             med, spread = median_metrics(reports)
-            srows = judge(name, sc, med, spread, base)
+            srows = judge(name, sc, med, spread, base) + teardown_rows(name, reports)
             if attempt == 1 and any(r.verdict == "FAIL" for r in srows) and not args.update_baseline:
                 failed = ", ".join(f"{r.metric} {fmt(r.base, r.unit)}→{fmt(r.now, r.unit)}" for r in srows if r.verdict == "FAIL")
                 print(f"  ! {failed} — re-running once (noise rule)", flush=True)
                 continue
             break
-        results[name] = (med, spread, sc)
+        if name not in bench_failed:
+            results[name] = (med, spread, sc)
         rows.extend(srows)
 
     wall = time.monotonic() - t0
@@ -501,6 +553,9 @@ def main() -> int:
     print_table(rows, header, "\n".join(footer_lines))
     if args.json:
         args.json.write_text(json.dumps([r.__dict__ for r in rows], indent=1, default=str))
+    if args.update_baseline and bench_failed:
+        print(f"baseline NOT written: bench run(s) failed for {', '.join(bench_failed)}")
+        return 1
     if args.update_baseline and key:
         path = write_baseline(key, results, first_report, args.reason.strip(), base_doc)
         print(f"baseline written: {path.relative_to(REPO)} (+ history.jsonl)")

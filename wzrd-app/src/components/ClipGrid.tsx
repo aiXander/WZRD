@@ -17,6 +17,7 @@ import {
   fileClip,
   rowOf,
   useClips,
+  useClipsLivePoll,
   useThumb,
 } from '../state/clips';
 import { getMask, useMaskVersion } from '../state/masks';
@@ -34,6 +35,7 @@ export function ClipGrid({ compact = false }: { compact?: boolean }) {
   const clips = useClips((s) => s.clips);
   const rows = useClips((s) => s.rows);
   const seen = useClips((s) => s.seen);
+  useClipsLivePoll();
   useMaskVersion();
 
   const design = useMemo(() => clipsByRegion(designJson), [designJson]);
