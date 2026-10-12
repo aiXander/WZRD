@@ -255,8 +255,8 @@ fixture projects by `fixture_projects.py`. Gates 1–2 passed for all 15
 (naga + probe green via `effect.upsert`, 2.5–3.1 ms predicted; min/max on
 every dial). **Still open:** gates 3–5 — seven clips at 60 fps from `perf`,
 `check_frames` flash rate on a 60 fps recording, a real `preview.jpg` —
-need the engine window in front for ~12 min (`scripts/fx_gate.py run` /
-`preview`; the `preview` channel's 15 fps is too slow for the flash check).
+need the engine window in front, so they run as block B1 of
+[afk-test-session.md](afk-test-session.md) (the one-sitting screen-test run).
 Conventions, catalog and gate method:
 [effects-library.md](../reference/effects-library.md).
 
