@@ -1,15 +1,16 @@
 # MIDI controller — setup routine, mapping profiles, robust resolution
 
-> **Status: agreed spec, nothing built yet** (Xander, 2026-10-10). Canonical
+> **Status: ON HOLD (Xander, 2026-10-12)** — agreed spec, nothing built,
+> still to be built later; don't start it until the hold is lifted. Canonical
 > plan for hardware-controller support; [vj-toolbox.md](vj-toolbox.md) phase 6
 > and roadmap §5.12 point here. App-only work (`wzrd-app/`) — no engine or
 > MCP changes. Current UI rules it must obey:
 > [../reference/operator-ui.md](../reference/operator-ui.md).
 >
-> **Schedule:** owned by the gig plan
-> ([gig-2026-11-live-video.md](gig-2026-11-live-video.md)): optional in gig
-> week 4 in the app lane after the clip grid (package A2), first to cut;
-> otherwise post-gig. It uses two gig pieces: the per-machine
+> **Schedule:** on hold; was an optional gig package
+> ([gig-2026-11-live-video.md](gig-2026-11-live-video.md), app lane after
+> the clip grid, package A2), otherwise post-gig
+> ([vj-toolbox.md](vj-toolbox.md) phase 6). It uses two gig pieces: the per-machine
 > `settings.json` from package A1 and the `library/` folder (contract C6).
 
 ## What Xander wants

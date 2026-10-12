@@ -170,7 +170,8 @@ turns into buttons):
 
 ## Phase 6 — booth hardening
 
-- **MIDI controller** — full spec in [midi-controller.md](midi-controller.md).
+- **MIDI controller** — **on hold since 2026-10-12** (Xander); full spec in
+  [midi-controller.md](midi-controller.md).
   If it landed before the gig, this phase only registers the controls
   phases 1–5 added (transition picker, post chain, render-more) in its
   control registry.

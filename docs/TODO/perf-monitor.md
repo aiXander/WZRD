@@ -246,7 +246,7 @@ codebases that agents change daily. That part is ours.
 **Interaction with the gig plan** ([gig-2026-11-live-video.md](gig-2026-11-live-video.md)):
 E1's gates ("seven clips at 60 fps p95") become honest with PM1 + `clips-7`.
 **E2 (post-swap probation: auto-revert a live swap that blows the frame
-budget) should consume PM1/PM2's per-leg GPU time instead of wall-clock
+budget; on hold since 2026-10-12) should consume PM1/PM2's per-leg GPU time instead of wall-clock
 p95** — `Perf::gpu_pass_recent(GpuPass::CompositeLive, n)` (at the default
 1-in-30 sampling, ~2 samples/s: size the probation window for it, or run
 `--gpu-timing` lower during probation) — that also solves its documented trap (a TAKE crossfade raises total

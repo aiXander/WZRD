@@ -1,6 +1,9 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1–P6 done, F1 done, P7 + S1 built 2026-10-12 (their real gates open — need venue photos + paid renders). Left: E2, the open gates. Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1–P6 done, F1 done, P7 + S1 built 2026-10-12 (their real gates open — need venue photos + paid renders). Left: the open gates.
+> **On hold (Xander, 2026-10-12): E2 (post-swap probation window) and the
+> optional MIDI package** — still to be built, not now; don't start either
+> until Xander lifts the hold. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -46,7 +49,7 @@ offline reaches the projector.
 | D12 | The clip bin is a **region × clip-slot grid** (Resolume's layer rows, but rows are named regions). Each row is auto-filled from provenance sidecars (the region a clip was made for); clips without a region sit in an "unassigned" row; any clip can be dragged onto any row. Click a slot = bind that clip on that region in **design**; TAKE as usual. Compact copy of the grid in Perform | "Pick from the rendered assets for this region" is the core operator move |
 | D13 | **In-app project switcher**: recent projects in the TopBar. The engine's scene dir (watcher, `effects/`, pack, `session.json`, `alignment.json`) is fixed at boot and `scene.load` only takes JSON, so switching = **re-root by restarting the in-process engine on the new scene path** (relaunch-with-restore measured ~160–290 ms, reference §1b), not a new RPC. Same mechanism as roadmap §5.11's "restart engine" button | Today a venue switch means relaunching from a terminal with `WZRD_SCENE` |
 | D14 | **Seed ~10 clip effects** as soon as the video input works — kaleido, mirror, RGB split, pixelate, posterize, edge glow, noise displace, strobe gate, hue shift, luma key, each with declared dials. Authored into the **global effects library** (C6) and **copied** into the gig project's `effects/` (projects stay self-contained). Library *browser/tools* are post-gig ([vj-toolbox.md](vj-toolbox.md) phase 1) | A clip alone isn't playable live; these make the clips respond to the guitar |
-| D15 | **Post-swap probation window** (roadmap §5.11) comes **into the gig** as package E2 — it was post-gig | The agent writes shaders live on show night; nothing else catches a shader that compiles but tanks the frame rate on live |
+| D15 | **Post-swap probation window** (roadmap §5.11) comes **into the gig** as package E2 — it was post-gig. **On hold since 2026-10-12** (Xander): still wanted, not being built now | The agent writes shaders live on show night; nothing else catches a shader that compiles but tanks the frame rate on live |
 | D16 | **Global libraries live in this repo**: `library/effects/`, `library/recipes/`, `library/midi/`, git-versioned. `WZRD_EFFECTS_ROOT` / `WZRD_RECIPES_ROOT` / `WZRD_MIDI_ROOT` override each | A Finder-launched app never sees shell env vars, so the default is what actually runs. Keep entries small: large media (preview clips) gitignored, a `preview.jpg` committed |
 
 **Drift measurement (2026-10-10, 48 keyframes + 11 clips from `test_imgs/stories/`
@@ -119,7 +122,7 @@ serial).
 | 1 (from 10-13) | P1 → P3; P4 and P6 alongside | E1 step a | A1 | — |
 | 2 | P2, P5 | E1 step b | A2 against C3/C5 with fixture files | — |
 | 3 | P7 | E1 steps c–d | A2 finished on the real engine | F1 (from the day E1b plays a clip); library rendering starts (photos ≈ 10-24) |
-| 4 | — | E2 | MIDI (optional) | F1 finished; S1 |
+| 4 | — | ~~E2~~ (on hold) | ~~MIDI~~ (on hold) | F1 finished; S1 |
 | 5 | Dress rehearsal: real fabric (venue or hung at home), full one-hour set without touching code | | | |
 | 6 | Buffer, no new features | | | |
 
@@ -208,7 +211,10 @@ sidecar region). What E2 inherits: a TAKE now opens no streams on live
 and a clip's first decoded frame lands one frame after its leg wakes. Done
 — see [render-engine.md](../reference/render-engine.md) §1b / §2.1 / §2.4.
 
-### E2 — Post-swap probation window (D15, roadmap §5.11)
+### E2 — Post-swap probation window (D15, roadmap §5.11) — ON HOLD
+
+**On hold (Xander, 2026-10-12)** — still to be built, not now; don't start
+it until the hold is lifted. Spec kept below as-is.
 
 ENG · needs E1 (same files, serial) · after any pipeline/plan swap on
 **live**, watch ~30 frames; if p95 blows the budget and the swap is the
@@ -287,15 +293,17 @@ clips to the engine and gained "A story on one region". `to_hap` got a
 photos, follows the run sheet to a playable project without being told
 tool names (paid calls; run with the venue photos).
 
-### Optional — MIDI controller
+### Optional — MIDI controller — ON HOLD
 
-APP, after A2 · only if weeks 1–3 landed on time. Spec:
-[midi-controller.md](midi-controller.md). First to go if anything slips.
+**On hold (Xander, 2026-10-12)** — still to be built, not now. Was: APP,
+after A2, only if weeks 1–3 landed on time. Spec:
+[midi-controller.md](midi-controller.md).
 
 ## If something slips, cut in this order
 
-MIDI, seed effects beyond the first four, the probation window.
-(The project switcher and the "new from agent" strip already landed.) The
+MIDI and the probation window are already out (on hold, 2026-10-12); the
+seed effects all landed (F1). (The project switcher and the "new from
+agent" strip already landed.) The
 engine video path, the aspect fix, the starter scene and the clip grid
 can't slip.
 

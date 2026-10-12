@@ -17,7 +17,7 @@
 > **This file holds engine designs; it does not schedule them.** Order and
 > hand-off packages live in two plans: **gig (Nov 2026)** —
 > [gig-2026-11-live-video.md](gig-2026-11-live-video.md): §5.9 video, then
-> §5.11's probation window, plus the §5.11 "restart engine" button with the
+> §5.11's probation window (on hold since 2026-10-12), plus the §5.11 "restart engine" button with the
 > project switcher; **post-gig** — [vj-toolbox.md](vj-toolbox.md): §5.5
 > `#import` → §5.15 chains → §5.16 feedback + `post` → §5.17 TAKE
 > transitions → the §5.6 auto-pilot playlist. §5.7 (layer object), §5.8 and
@@ -223,7 +223,8 @@ single-process relaunch-with-restore meets it. Defense in depth, in order:
   2026-07-11: `signal-hook` flag → sidecar snapshot → graceful exit).
 - **Post-swap probation window — pulled into the gig as package E2**
   ([gig-2026-11-live-video.md](gig-2026-11-live-video.md) D15, which adds the
-  TAKE-crossfade false-positive trap). The MCP multiplies AI shader churn by an order of
+  TAKE-crossfade false-positive trap). **On hold since 2026-10-12**
+  (Xander) — still wanted, not being built now. The MCP multiplies AI shader churn by an order of
   magnitude, and yellow-verdict shaders can still be promoted to live —
   the probe gates *entry to design*, the probation window is the only
   live-side net. `naga` proves a shader *compiles*; a
@@ -255,8 +256,9 @@ against the existing WS surface, not engine work.
 Layer deck panel in Perform — **landed 2026-10-09** with the UI redesign
 (see [../reference/operator-ui.md](../reference/operator-ui.md)), as did a
 looks bank (saved scenes) standing in for "scene save-as + chooser".
-Still open: MIDI controller mapping (WKWebView has no Web MIDI — needs a
-Rust-side bridge; full spec in [midi-controller.md](midi-controller.md));
+Still open: MIDI controller mapping (on hold since 2026-10-12; WKWebView
+has no Web MIDI — needs a Rust-side bridge; full spec in
+[midi-controller.md](midi-controller.md));
 virtualized log list; region renaming + `identity.json` editing (→ §5.13,
 delivered inside the Site room, vj-toolbox phase 5). In-app AI chat is
 parked — §5.10 settled Claude Code as the author; the direction (host the
