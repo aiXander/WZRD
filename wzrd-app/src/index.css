@@ -72,6 +72,36 @@ body,
   background: transparent;
 }
 
+/* Armed TAKE: a pulsing red glow. The shadows are painted once — on the
+   element (resting glow) and on a pseudo-element whose *opacity* pulses —
+   so the animation stays on the compositor. Animating box-shadow itself
+   repainted a 30 px blur 60×/s for as long as design differed from live.
+   The pseudo-element sits outside the box, so the element must not clip
+   (`overflow: visible`; clip children in an inner wrapper instead). */
+.arm-glow {
+  box-shadow: 0 0 0 1px rgb(var(--live) / 0.7), 0 0 18px -4px rgb(var(--live) / 0.6);
+}
+.arm-glow::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgb(var(--live) / 1), 0 0 30px -2px rgb(var(--live) / 0.95);
+  opacity: 0;
+  will-change: opacity;
+  animation: armGlow 1.6s ease-in-out infinite;
+}
+@keyframes armGlow {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* Text fields and code stay selectable. */
 input,
 textarea,

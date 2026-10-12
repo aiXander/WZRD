@@ -35,7 +35,7 @@ export function ProjectMenu() {
         onClick={() => setOpen((o) => !o)}
         title={project ? `${project.scene_path}\nSwitch project · restart engine` : 'Open a project'}
         className={
-          'flex items-center gap-1.5 h-7 max-w-[220px] px-2 rounded-md border text-[12px] ' +
+          'flex items-center gap-1.5 h-7 max-w-[220px] min-w-0 px-2 rounded-md border text-[12px] ' +
           (open ? 'bg-raised border-line2 text-fg' : 'border-line text-fg2 hover:text-fg hover:bg-raised')
         }
       >

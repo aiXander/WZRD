@@ -47,6 +47,10 @@ import websockets
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "library" / "effects"
 ENGINE = REPO / "render-core" / "target" / "release" / "render-core"
+# The engine's own default filter (render-core/src/main.rs). Never plain `info`: wgpu-core logs "Device::maintain:
+# waiting for submission index N" at INFO on every maintain (~180 lines/s), all of it written to stdout and fanned
+# into the `log` telemetry channel — noise that perturbs the very timings a gate measures.
+ENGINE_RUST_LOG = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn"
 PORT = 9177
 MAX_CLIPS = 7  # the F1 gate: seven clips, each with the effect
 
@@ -112,7 +116,7 @@ class Engine:
         self.p = subprocess.Popen(
             [str(ENGINE), "--scene", str(project / "scene.json"), "--windowed", "--no-osc",
              "--ws-addr", f"127.0.0.1:{PORT}"],
-            stdout=self.log, stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": "info"})
+            stdout=self.log, stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": ENGINE_RUST_LOG})
 
     def stop(self):
         self.p.send_signal(signal.SIGINT)

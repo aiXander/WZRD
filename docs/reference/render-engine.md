@@ -431,12 +431,12 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 
 | Channel | Rate | Payload |
 |---|---|---|
-| `preview` | ~15 fps | 320px JPEG of a composite, base64 — the **design** composite in two-leg mode (§2.6 blanket leg rule), live headless. **Demand-gated**: captured only while ≥1 subscriber listens. GPU-downscaled (smooth, not point-sampled), encoded off the render thread. Consumers: MCP `get_preview`, the browser build, remote operators, and in the app only Perform's small CUED·DESIGN monitor (the shell subscribes on demand via `preview_jpeg_demand`, never by default). Every in-app room view uses the native underlay (§1b). |
+| `preview` | ~15 fps | 320px JPEG of a composite, base64 — the **design** composite in two-leg mode (§2.6 blanket leg rule), live headless. **Demand-gated**: captured only while ≥1 subscriber listens. GPU-downscaled (smooth, not point-sampled), encoded off the render thread. Consumers: MCP `get_preview`, the browser build, remote operators, and in the app only Perform's small CUED·DESIGN monitor, which *samples* it (one-shot grabs ≈1 Hz + on design change, full rate only on hover — [operator-ui.md](operator-ui.md)). The shell subscribes only on webview demand (`telemetry_demand`), never by default. Every in-app room view uses the native underlay (§1b). |
 | `fps` | 2 Hz | Honest throughput (frames/wall-second) + p50 frame time. |
 | `frame_stats` | 2 Hz | p50/p95/p99 + mask-slice / pipeline / pass counts (counts follow the **design** plan in two-leg mode — §2.6). |
-| `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). Rows come from the **design** plan in two-leg mode. |
-| `audio` | 30 Hz | L/M/H bands + onset envelopes. |
-| `transport` | 30 Hz | `{live: {bpm, beats}, design: {bpm, beats}}` — musical position for the UI's beat lamps and the auto-pilot's bar boundaries. Not sticky. |
+| `drivers` | 10 Hz | Per binding·param: name, source description, live value, affects-count, `overridden` (§5.5 — value then reports the override). Rows come from the **design** plan in two-leg mode. Built only while ≥1 subscriber listens. |
+| `audio` | 30 Hz | L/M/H bands + onset envelopes. Built only while ≥1 subscriber listens. |
+| `transport` | 30 Hz | `{live: {bpm, beats}, design: {bpm, beats}}` — musical position for the UI's beat lamps and the auto-pilot's bar boundaries. Not sticky; built only while ≥1 subscriber listens. |
 | `audio_freshness` | 1 Hz + edges | fresh/stale/down (sticky). |
 | `connectivity` | 1 Hz | osc / file_watcher / ws status cells (sticky). |
 | `hot_reload` | on event | target, ok, elapsed, message, **`probe`** (§2.6 — `{compiled, predicted_p95_ms, band, thumbnail_b64, verdicts[]}` when a pre-flight probe ran; sticky), plus the §2.7 correlation stamp `{epoch, rev, actor}` (for push consumers — author verdicts arrive in the RPC reply, never via sticky replay). |
@@ -623,12 +623,36 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   immutable except via `promote`.
 - **Both legs tick every frame** (shared transport/audio bus — bar-quantized
   promotes land in sync; §5.2 picks are stateless hashes, so the legs pick
-  identically). Design's **render passes are demand-gated**: they run only
-  when the native preview shows design (deck toggle on DESIGN, or a slot
-  pinning `source: design` like Prepare — never the program view), ≥1
-  `preview` subscriber exists, or a promote is pending/ramping. An idle
-  design leg costs zero GPU — in the app too, since the shell stopped
-  subscribing to `preview` by default (2026-10-12).
+  identically). Design's **render passes are demand-gated** (`Core::
+  design_demand`, evaluated *before* the tick): every frame when the native
+  preview shows design (deck toggle on DESIGN, or a slot pinning
+  `source: design` like Prepare — never the program view) or a promote is
+  pending/ramping; when ≥1 `preview` subscriber is the **only** consumer,
+  only on JPEG capture frames (`PreviewSampler::capture_due`: interval up,
+  nothing in flight — ~15 Hz), unless the design plan draws a clip
+  (`PassPlan::draws_clips`), which then renders every frame (a ~4-frame
+  playhead stride makes the decoders' prefetch miss → stale frames). A
+  stream capture only kicks off on a frame whose source composite was
+  rendered (`capture_preview_jpeg(subscribed, fresh)`). An unrendered leg
+  still ticks (clock, picks, faders, clip readiness) but skips its uniform
+  upload and `after_submit`. An idle design leg costs zero GPU — in the app
+  too, since the shell stopped subscribing to `preview` by default
+  (2026-10-12).
+- **Per-plan uniform buffer.** A `PassPlan` owns one uniform buffer: slot 0
+  = `FrameStateGpu`, slot `1+k` = pass k's `LayerParamsGpu`, slots
+  `min_uniform_buffer_offset_alignment` (256) apart; each pass's bind group
+  points at its slot (built once at plan build). `tick` fills a reused CPU
+  `Vec<u8>` (drawing passes only — picked-out / opacity-0 passes are
+  skipped and rewritten the tick they draw again) and uploads it with
+  **one `write_buffer` per rendered leg**: wgpu-core 22 allocates a staging
+  buffer per `write_buffer` call, so per-pass writes cost O(passes)
+  allocations (40-pass `layers-heavy`: `tick.live` 0.28 → 0.05 ms p95).
+  The final-pass and native-preview uniforms are likewise re-uploaded only
+  when they change (`Core::last_final_uniforms` / `last_preview_uniforms`).
+- **The native preview's LIVE view shows the TAKE.** Its bind group pairs
+  the live composite with design as the mix partner and `preview_uniforms`
+  passes the promote `mix`, so Perform's monitor crossfades with the wall
+  (mix 0 outside a promote → live only; same shader, no extra pass).
 - **Promote = crossfade, then pointer swap.** The final pass
   samples both composites and lerps by a `mix` uniform ramped over
   `fade_ms` (wall time). On completion live **adopts design's already-built
@@ -1096,6 +1120,16 @@ The regression gate every engine change runs (rule in §6). Three parts:
   wgpu resource counts at window start/end, per-method RPC round-trips
   (n, errors, p50/p95/max, skipped), subscriber message counts, and
   machine info (adapter, backend, OS, build profile, git sha + dirty).
+- **Teardown never hangs.** After the measured window the timeline is
+  cancelled and the worker's queue closed; the host keeps rendering
+  (unrecorded, ≤ 10 s) until the worker and every side thread have
+  *exited* (`JoinHandle::is_finished`), because they block in
+  `rpc::dispatch` on a render-thread reply. A thread still blocked then is
+  detached, never joined, and counted in `teardown.stuck_threads`
+  (`actions_unfinished` = RPCs left without a reply); the report is written
+  before `drop(core)`, and a watchdog exits the process (code 3) if engine
+  teardown takes > 20 s. Never key a join on a request counter: an orphaned
+  bench once sat 1h43m in `join` on a worker still waiting for its reply.
 
 **Scenario format** (`render-core/perf/scenarios/*.json`; scenes and
 fixtures in `perf/scenes/`): `{description, scene, size?, warmup_frames?,
@@ -1124,7 +1158,8 @@ pack and `image.clip` paths made absolute; never `session.json` or
 | `take-crossfade` | clip-set swap TAKE every 2 s (scene.load → promote 400 ms) | paced |
 | `warp-64` | 64-handle alignment + `alignment.set` every 4 frames (rebake) | uncapped |
 | `edit-churn` | 300 × `effect.upsert` + 300 × `scene.load`, single leg: resource counts flat, rebuild ms | uncapped |
-| `preview-remote` | a `preview` subscriber (JPEG readback + design leg awake) | uncapped |
+| `preview-remote` | a `preview` subscriber as design's only consumer (JPEG readback; design renders on capture frames only) | uncapped |
+| `preview-clips` | `clips-7` + a `preview` subscriber: a clip-drawing design leg stays per-frame, **stale = 0**, JPEG ≈ 15 Hz | paced |
 | `knob-latency` | `param.set` at 100 Hz → knob→submit p95 | paced |
 | `capacity-clips` | info only: largest N clip bindings with headroom ≥ 0 and no stale | uncapped |
 
@@ -1151,6 +1186,16 @@ Chrome on the machine:
 - **"No frame > 33 ms" judges render-thread work, not the interval**:
   uncapped, the interval's `acquire` is GPU backpressure, and the desktop's
   GPU stalls ~45 ms for other apps' compositing about one run in five.
+- **Each bench run has a wall-clock cap** (`gate.timeout_s`, else 60 s +
+  frames at 20 fps): a hung or crashed run is killed and becomes a
+  `bench run` FAIL row, and the gate carries on with the next scenario
+  (`--update-baseline` refuses to write then). Any run with
+  `actions_unfinished` or `teardown.stuck_threads` > 0 FAILs too (a lost
+  engine reply). The engine runs under its own default `RUST_LOG`
+  (`info,wgpu_core=warn,…` — never plain `info`: wgpu-core logs every
+  `Device::maintain` at INFO, ~180 lines/s, which perturbs the timings;
+  `fx_gate.py` does the same). The `log` telemetry channel drops
+  `wgpu_core`/`wgpu_hal`/`naga` below Warn whatever `RUST_LOG` says.
 - A failing scenario re-runs once before it fails; > 10 % *and* > 0.3 ms
   spread prints NOISY. Paced scenarios never judge GPU ms (the GPU
   downclocks at 60 Hz, §2.9). No baseline for the machine → budgets only.
@@ -1191,7 +1236,11 @@ While occluded it never touches the swapchain — `PassPlan::render_offscreen`
 renders the composite only (preview + telemetry stay live) at a self-paced
 ~30 Hz, driven from `about_to_wait` because macOS stops delivering
 `RedrawRequested` to occluded windows. On un-occlusion, normal
-present resumes. **Any future render-loop refactor must keep the property:
+present resumes. Nothing presents the live composite while occluded, so
+`render_offscreen_frame` renders it only for a consumer
+(`Core::live_demand_occluded`: native preview on LIVE or the program view,
+or a headless JPEG stream); otherwise only ticks. Its clips idle meanwhile
+and wake (1–2 transparent frames) on the first visible frame. **Any future render-loop refactor must keep the property:
 nothing on the render thread may block on the swapchain of a window that
 might be occluded or throttled.**
 
@@ -1374,7 +1423,8 @@ Ranked; none currently show-stopping at 5–20 layers.
    Ticking after `acquire` would cut ~one frame; not done (behaviour change,
    needs the probe/timing re-checked). The §2.10 `knob-latency` scenario
    measures 33.3–34.7 ms p95 with a 100 Hz knob (ceiling 2 × 16.7 ms), so
-   its budget is 36 ms until the tick moves.
+   its budget is 36 ms until the tick moves The real swapchain agrees: 32.7 ms p95 on a
+   standalone window in front (AFK B5, 2026-10-12).
 10. ~~Dev builds drop frames on the preview JPEG~~ — **resolved 2026-10-12**:
    dependencies build optimized in dev (`[profile.dev.package."*"]` in both
    manifests), the shell subscribes to `preview` only on demand, and the

@@ -67,16 +67,18 @@ export default {
         deck: '0 0 0 1px rgb(var(--deck) / 0.55), 0 0 24px -6px rgb(var(--deck) / 0.55)',
         inset: 'inset 0 1px 0 rgb(255 255 255 / 0.04)',
       },
+      // Only opacity/transform animate (compositor-only). An infinite
+      // box-shadow animation repaints its blur every frame — the armed TAKE
+      // button's glow is a pre-shadowed pseudo-element instead (`.arm-glow`
+      // in index.css).
       keyframes: {
-        pulseArm: {
-          '0%,100%': { boxShadow: '0 0 0 1px rgb(var(--live) / .7), 0 0 18px -4px rgb(var(--live) / .6)' },
-          '50%': { boxShadow: '0 0 0 1px rgb(var(--live) / 1), 0 0 30px -2px rgb(var(--live) / .95)' },
-        },
         fadeIn: { from: { opacity: '0', transform: 'translateY(4px)' }, to: { opacity: '1', transform: 'none' } },
+        // Beat lamp: lit on the beat, decays across it (duration = one beat, set inline).
+        beatDecay: { from: { opacity: '1' }, to: { opacity: '0.28' } },
       },
       animation: {
-        arm: 'pulseArm 1.6s ease-in-out infinite',
         in: 'fadeIn 160ms ease-out',
+        beat: 'beatDecay 500ms linear forwards',
       },
     },
   },

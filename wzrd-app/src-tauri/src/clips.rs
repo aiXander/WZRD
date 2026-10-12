@@ -44,9 +44,15 @@ fn read_grid(scene_dir: &Path) -> Value {
 /// sidecar (verbatim, or null), its source mp4's sidecar (`source`, from the
 /// HAP sidecar's `parent`), thumbnail path (or null) and the operator's
 /// row filing (absent = follow the sidecar's `region`). Cheap enough to
-/// poll: one directory scan + small JSON reads.
+/// poll (one directory scan + small JSON reads), but polled — so `async`:
+/// it runs on the async runtime, never on the main (UI) thread.
 #[tauri::command]
-pub fn clips_list(state: State<AppState>) -> Result<Value, String> {
+pub async fn clips_list(state: State<'_, AppState>) -> Result<Value, String> {
+    clips_list_in(&state)
+}
+
+/// `clips_list` body — also the devport's (sync, main-thread) entry.
+pub fn clips_list_in(state: &AppState) -> Result<Value, String> {
     let scene_dir = state.session().scene_dir();
     let gen = scene_dir.join("generated");
     let mut clips: Vec<(u64, Value)> = Vec::new();
@@ -96,7 +102,12 @@ pub fn clips_list(state: State<AppState>) -> Result<Value, String> {
 
 /// A thumbnail as base64 JPEG (the webview has no asset protocol).
 #[tauri::command]
-pub fn clip_thumb(state: State<AppState>, path: String) -> Result<String, String> {
+pub async fn clip_thumb(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    clip_thumb_in(&state, path)
+}
+
+/// `clip_thumb` body — also the devport's entry.
+pub fn clip_thumb_in(state: &AppState, path: String) -> Result<String, String> {
     use base64::Engine;
     let full = inside(&state.session().scene_dir(), &path)?;
     let bytes = std::fs::read(&full).map_err(|e| format!("reading {}: {e}", full.display()))?;

@@ -5,6 +5,7 @@
 // Next to it: what the room hears. Band meters, onset lamps (kick / snare /
 // hats), and the AUDIO master that scales how hard the surface listens.
 
+import { useTelemetryDemand } from '../api/telemetryDemand';
 import { flash, setMaster, toggleBlackout, toggleFreeze } from '../state/actions';
 import { useStore, type Masters } from '../state/store';
 import { Fader } from '../ui/Fader';
@@ -118,6 +119,8 @@ export function AudioPanel() {
   const a = useStore((s) => s.audio);
   const fresh = useStore((s) => s.audioFresh?.state);
   const listen = useStore((s) => s.masters?.live.audioListen ?? 1);
+  // 30 Hz levels only while the strip can show them (not while the feed is down).
+  useTelemetryDemand('audio', fresh !== 'down');
   if (!a || fresh === 'down') {
     return (
       <div className="px-3 py-3 text-[11px] text-fg3 leading-snug">

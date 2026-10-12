@@ -5,14 +5,14 @@
 //! each frame, the shared `FrameState` uniform feeds clock + audio into every
 //! pass, and project-local / inline WGSL effects each get their own pipeline
 //! cached by the gpu layer. The render-thread per-frame work is still tiny —
-//! evaluate drivers, write two uniform buffers per pass, draw three verts.
+//! evaluate drivers, fill each drawing pass's slot of the plan's one
+//! uniform buffer (one `write_buffer` per leg), draw three verts per pass.
 //!
 //! Slow-path FBO routing (`layerRef`) is *not* implemented yet — Phase 3 was
 //! scoped to "a few effects so the surface works"; deferred per §3.6 once a
 //! real scene needs it.
 
 use anyhow::{anyhow, Result};
-use wgpu::util::DeviceExt;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -21,6 +21,7 @@ use crate::drivers::{FrameContext, ParamOverrides, PickRate, ScalarValue};
 use crate::telemetry::DriverRow;
 use crate::effects::{
     EffectBinding, EffectDef, EffectKind, EffectRegistry, ImagePlacement, InlineEffectSpec,
+    MAX_SCALAR_PARAMS,
 };
 use crate::gpu::{
     layer_bind_group, FrameStateGpu, GpuContext, ImageEncoding, LayerIdentity, LayerParamsGpu,
@@ -65,7 +66,9 @@ pub struct LayerPass {
     /// `sample_image` is transparent.
     pub image: Option<(usize, [f32; 4], ImageEncoding)>,
 
-    pub layer_buffer: wgpu::Buffer,
+    /// This pass's `LayerParams` slot in the plan's uniform buffer (slot 0
+    /// is the FrameState); its bind group points at that offset.
+    pub slot: usize,
     pub bind_group: wgpu::BindGroup,
 }
 
@@ -172,12 +175,44 @@ pub struct PassPlan {
     /// tick). Promote waits on this so a TAKE never projects a stale or
     /// unbound clip frame.
     clips_ready: bool,
-    /// Per-plan FrameState uniform (§5.6 full-control-switch): the two legs
-    /// tick with *different* contexts (own transport speed, own audioListen),
-    /// so the buffer can't be shared on the GpuContext — and it must travel
-    /// with the plan through the promote pointer swap (the bind groups
-    /// reference it).
-    frame_state: wgpu::Buffer,
+    /// Per-plan uniform buffer: slot 0 = FrameState, slot `1 + k` = pass
+    /// k's LayerParams, each slot `uniform_stride` bytes (the device's
+    /// uniform offset alignment). Per plan (§5.6 full-control-switch): the
+    /// two legs tick with *different* contexts (own transport speed, own
+    /// audioListen), and the buffer travels with the plan through the
+    /// promote pointer swap (the bind groups reference it). Filled CPU-side
+    /// in `uniform_bytes` and uploaded with **one** `write_buffer` per
+    /// rendered tick — wgpu-core 22 allocates a staging buffer per
+    /// `write_buffer` call, so per-pass writes cost O(passes) allocations.
+    uniforms: wgpu::Buffer,
+    uniform_bytes: Vec<u8>,
+    uniform_stride: usize,
+    /// Per image: does any pass that samples it draw this frame? Computed
+    /// once per tick, read by `encode_uploads`.
+    drawn: Vec<bool>,
+    /// A drawing pass samples a video clip (as of the last tick).
+    draws_clips: bool,
+}
+
+/// Byte stride between uniform slots: the larger of the two structs,
+/// rounded up to the device's `min_uniform_buffer_offset_alignment`.
+fn uniform_stride(gpu: &GpuContext) -> usize {
+    let align = gpu.device.limits().min_uniform_buffer_offset_alignment.max(16) as usize;
+    let size = std::mem::size_of::<LayerParamsGpu>().max(std::mem::size_of::<FrameStateGpu>());
+    size.div_ceil(align) * align
+}
+
+fn write_slot(bytes: &mut [u8], slot: usize, stride: usize, data: &[u8]) {
+    let at = slot * stride;
+    bytes[at..at + data.len()].copy_from_slice(data);
+}
+
+fn slot_binding(buffer: &wgpu::Buffer, slot: usize, stride: usize, size: usize) -> wgpu::BufferBinding<'_> {
+    wgpu::BufferBinding {
+        buffer,
+        offset: (slot * stride) as u64,
+        size: wgpu::BufferSize::new(size as u64),
+    }
 }
 
 impl PassPlan {
@@ -204,13 +239,25 @@ impl PassPlan {
         let mut images: Vec<BindingImage> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
 
-        let frame_state = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("plan frame state uniform"),
-            contents: bytemuck::bytes_of(&FrameStateGpu::zeroed(
-                gpu.composite_width,
-                gpu.composite_height,
-            )),
+        // One uniform buffer for the whole plan (see `uniforms`), sized up
+        // front: slot 0 + one slot per resolved layer.
+        let uniform_stride = uniform_stride(gpu);
+        let mut pass_count = 0usize;
+        for binding in &scene.bindings {
+            pass_count += resolve_selector(&binding.select, pack)?.len();
+        }
+        let mut uniform_bytes = vec![0u8; uniform_stride * (pass_count + 1)];
+        write_slot(
+            &mut uniform_bytes,
+            0,
+            uniform_stride,
+            bytemuck::bytes_of(&FrameStateGpu::zeroed(gpu.composite_width, gpu.composite_height)),
+        );
+        let uniforms = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("plan uniforms"),
+            size: uniform_bytes.len() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         // C5 — every image this plan opens afresh, opened up front and in
@@ -334,20 +381,14 @@ impl PassPlan {
                         initial = initial.with_image(b, enc);
                     }
                 }
-                let layer_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!(
-                        "layer params [{} slice {}]",
-                        binding.id, slice
-                    )),
-                    contents: bytemuck::bytes_of(&initial),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
+                let slot = passes.len() + 1;
+                write_slot(&mut uniform_bytes, slot, uniform_stride, bytemuck::bytes_of(&initial));
                 let source = image.map(|(i, ..)| images[i].source());
                 let bind_group = layer_bind_group(
                     gpu,
                     &format!("layer bg [{} slice {}]", binding.id, slice),
-                    &frame_state,
-                    &layer_buffer,
+                    slot_binding(&uniforms, 0, uniform_stride, std::mem::size_of::<FrameStateGpu>()),
+                    slot_binding(&uniforms, slot, uniform_stride, std::mem::size_of::<LayerParamsGpu>()),
                     source.as_ref().map(|s| s.view()),
                 );
                 drop(source);
@@ -368,7 +409,7 @@ impl PassPlan {
                     active: pick_group.is_none(),
                     opacity: 1.0,
                     image: pass_image,
-                    layer_buffer,
+                    slot,
                     bind_group,
                 });
             }
@@ -385,6 +426,10 @@ impl PassPlan {
             }
         }
 
+        // Build-time upload of every slot's initial contents (one staging
+        // buffer); per-frame ticks then rewrite only what draws.
+        gpu.queue.write_buffer(&uniforms, 0, &uniform_bytes);
+        let drawn = vec![false; images.len()];
         Ok(Self {
             layer_passes: passes,
             picks,
@@ -393,16 +438,28 @@ impl PassPlan {
             warnings,
             clock_sec,
             clips_ready: true,
-            frame_state,
+            draws_clips: false,
+            drawn,
+            uniforms,
+            uniform_bytes,
+            uniform_stride,
         })
     }
 
     /// Evaluate every driver-bound scalar against the current transport +
     /// audio state and write the result + per-binding colours into each
-    /// pass's uniform buffer. `&mut` because §5.2 pick state (active flags,
-    /// cycle counters) advances here. The §5.5 override table wins over the
-    /// scene-authored value wherever a (binding, param) entry exists.
-    pub fn tick(&mut self, gpu: &GpuContext, ctx: &FrameContext, overrides: &ParamOverrides) {
+    /// drawing pass's uniform slot. `&mut` because §5.2 pick state (active
+    /// flags, cycle counters) advances here. The §5.5 override table wins
+    /// over the scene-authored value wherever a (binding, param) entry
+    /// exists.
+    ///
+    /// `upload` = this leg renders this frame. Clock, picks, faders and
+    /// clip readiness advance either way; the uniform upload (the only GPU
+    /// work here) happens only when the composite will be drawn. Every
+    /// drawing pass is rewritten on every uploading tick, so a pass that
+    /// was skipped (picked out, faded to 0, leg unrendered) is current the
+    /// first frame it draws again.
+    pub fn tick(&mut self, gpu: &GpuContext, ctx: &FrameContext, overrides: &ParamOverrides, upload: bool) {
         let prev_clock = std::mem::replace(&mut self.clock_sec, ctx.elapsed_sec as f64);
         // §5.2 picks — re-roll when a group's cycle counter changes. The
         // choice is stateless (pure hash of binding id + cycle), so there's
@@ -432,6 +489,48 @@ impl PassPlan {
             }
             self.picks[gi].pass_indices = indices;
         }
+        // Operator layer faders. Solo is plan-wide: any soloed binding
+        // silences every binding that isn't.
+        let any_solo = self
+            .layer_passes
+            .iter()
+            .any(|p| layer_flag(overrides, &p.binding_id, LAYER_SOLO));
+        for pass in &mut self.layer_passes {
+            pass.opacity = layer_opacity(overrides, &pass.binding_id, any_solo);
+        }
+
+        // Per image: does any drawing pass sample it this frame (once per
+        // tick; `encode_uploads` reuses it).
+        self.drawn.clear();
+        self.drawn.resize(self.images.len(), false);
+        for p in &self.layer_passes {
+            if let Some((i, _, _)) = p.image {
+                self.drawn[i] |= p.active && p.opacity > 0.0;
+            }
+        }
+
+        // Which clips show their playhead frame. A stream that sat idle
+        // (muted, picked out, design leg unrendered) holds an old frame; it
+        // stays unbound (transparent) for the frame or two the decoder
+        // needs, instead of flashing stale content.
+        let mut ready = true;
+        let mut draws_clips = false;
+        for (img, &drawn) in self.images.iter_mut().zip(&self.drawn) {
+            img.step_sec = (self.clock_sec - prev_clock) * img.rate as f64;
+            let playhead = img.playhead(self.clock_sec);
+            let source = img.source.lock().unwrap_or_else(|e| e.into_inner());
+            img.current = source.is_current(playhead, img.step_sec);
+            draws_clips |= drawn && source.is_clip();
+            drop(source);
+            ready &= !drawn || img.current;
+        }
+        self.clips_ready = ready;
+        self.draws_clips = draws_clips;
+
+        if !upload {
+            return;
+        }
+
         // Audio reads go through `ctx` so the §5.4 audio-listen master scales
         // the FrameState uniform (what user WGSL sees) and the drivers alike.
         let frame = FrameStateGpu {
@@ -454,58 +553,31 @@ impl PassPlan {
                 0.0,
             ],
         };
-        gpu.queue
-            .write_buffer(&self.frame_state, 0, bytemuck::bytes_of(&frame));
-
-        // Operator layer faders. Solo is plan-wide: any soloed binding
-        // silences every binding that isn't.
-        let any_solo = self
-            .layer_passes
-            .iter()
-            .any(|p| layer_flag(overrides, &p.binding_id, LAYER_SOLO));
-        for pass in &mut self.layer_passes {
-            pass.opacity = layer_opacity(overrides, &pass.binding_id, any_solo);
-        }
-
-        // Which clips show their playhead frame. A stream that sat idle
-        // (muted, picked out, design leg unrendered) holds an old frame; it
-        // stays unbound (transparent) for the frame or two the decoder
-        // needs, instead of flashing stale content.
-        let drawn = self.drawn_images();
-        let mut ready = true;
-        for (img, drawn) in self.images.iter_mut().zip(drawn) {
-            img.step_sec = (self.clock_sec - prev_clock) * img.rate as f64;
-            let playhead = img.playhead(self.clock_sec);
-            let current = img.source().is_current(playhead, img.step_sec);
-            img.current = current;
-            ready &= !drawn || img.current;
-        }
-        self.clips_ready = ready;
+        let stride = self.uniform_stride;
+        write_slot(&mut self.uniform_bytes, 0, stride, bytemuck::bytes_of(&frame));
 
         // Per-pass params. Driver evaluation is cheap (a few muls + a few
-        // atomic loads); we don't bother with dirty tracking. Inactive
-        // (picked-out) passes skip the write — they don't draw this frame,
-        // and their uniforms refresh on the tick that reactivates them.
+        // atomic loads); we don't bother with dirty tracking. Passes that
+        // don't draw this frame (picked out, faded to 0) skip the fill —
+        // their slot is refreshed on the tick that brings them back.
         for pass in &self.layer_passes {
-            if !pass.active {
+            if !pass.active || pass.opacity <= 0.0 {
                 continue;
             }
-            let scalars: Vec<f32> = pass
-                .scalars
-                .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    pass.scalar_names
-                        .get(i)
-                        .and_then(|n| overrides.get(&pass.binding_id, n))
-                        .unwrap_or_else(|| s.eval(ctx))
-                })
-                .collect();
+            let mut scalars = [0.0f32; MAX_SCALAR_PARAMS];
+            let n = pass.scalars.len().min(MAX_SCALAR_PARAMS);
+            for (i, (s, out)) in pass.scalars.iter().zip(&mut scalars).enumerate() {
+                *out = pass
+                    .scalar_names
+                    .get(i)
+                    .and_then(|name| overrides.get(&pass.binding_id, name))
+                    .unwrap_or_else(|| s.eval(ctx));
+            }
             let mut params = LayerParamsGpu::build(
                 pass.slice,
                 pass.effect_id,
                 &pass.identity,
-                &scalars,
+                &scalars[..n],
                 &pass.colors,
             );
             params.opacity = pass.opacity;
@@ -516,21 +588,19 @@ impl PassPlan {
                     params = params.with_image(b, enc);
                 }
             }
-            gpu.queue
-                .write_buffer(&pass.layer_buffer, 0, bytemuck::bytes_of(&params));
+            write_slot(&mut self.uniform_bytes, pass.slot, stride, bytemuck::bytes_of(&params));
         }
+        // One staging allocation per leg per rendered frame.
+        gpu.queue.write_buffer(&self.uniforms, 0, &self.uniform_bytes);
     }
 
     /// C5 clip uploads for a frame this plan renders: each clip a drawing
     /// pass samples asks its decoder for the playhead frame and encodes at
     /// most one staging→texture copy. Encode before [`Self::encode_composite`]
     /// into the same encoder; call [`Self::after_submit`] after the submit.
+    /// Reads the per-image draw flags this frame's [`Self::tick`] computed.
     pub fn encode_uploads(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if self.images.is_empty() {
-            return;
-        }
-        let drawn = self.drawn_images();
-        for (img, drawn) in self.images.iter().zip(drawn) {
+        for (img, &drawn) in self.images.iter().zip(&self.drawn) {
             // Muted / picked-out clips don't decode: no want, no upload.
             if drawn {
                 let playhead = img.playhead(self.clock_sec);
@@ -539,36 +609,33 @@ impl PassPlan {
         }
     }
 
-    /// Per image: does any pass that samples it draw this frame?
-    fn drawn_images(&self) -> Vec<bool> {
-        let mut drawn = vec![false; self.images.len()];
-        for p in &self.layer_passes {
-            if let Some((i, _, _)) = p.image {
-                drawn[i] |= p.active && p.opacity > 0.0;
-            }
-        }
-        drawn
-    }
-
     /// Every clip a drawing pass samples shows its playhead frame (as of the
     /// last tick). The promote gate: a TAKE starts once this holds.
     pub fn clips_ready(&self) -> bool {
         self.clips_ready
     }
 
+    /// A drawing pass samples a video clip (as of the last tick). Such a
+    /// leg can't render sparsely: its decoders prefetch along the per-render
+    /// playhead stride, and a ~4-frame stride quantizes into missed
+    /// (stale) frames — so `Core` renders it every frame while demanded.
+    pub fn draws_clips(&self) -> bool {
+        self.draws_clips
+    }
+
     /// Return consumed clip staging slots to their decoders (re-map). Must
     /// follow the submit that carried [`Self::encode_uploads`]' copies.
-    pub fn after_submit(&mut self, gpu: &GpuContext) {
+    /// Returns whether the plan plays any clip — the caller then drives one
+    /// `Maintain::Poll` per frame (not one per leg) so the re-map callbacks
+    /// fire.
+    pub fn after_submit(&mut self) -> bool {
         let mut clips = false;
         for img in &self.images {
             let mut source = img.source();
             source.after_submit();
             clips |= source.is_clip();
         }
-        if clips {
-            // Fire completed map callbacks (non-blocking).
-            gpu.device.poll(wgpu::Maintain::Poll);
-        }
+        clips
     }
 
     /// Encode the per-layer composite pass into `encoder`, targeting
@@ -927,7 +994,7 @@ pub(crate) mod tests {
         let dir = Path::new("/");
 
         let mut a = PassPlan::build(&mut gpu, &pack, &clip_scene("hap.mov", 1.0), &registry, dir, Carry::Fresh).unwrap();
-        a.tick(&gpu, &ctx(1.0), &overrides);
+        a.tick(&gpu, &ctx(1.0), &overrides, true);
         assert!(a.images[0].current && a.clips_ready());
 
         // Same leg, rate 1 → 2 at t = 1 s: same stream, playhead still 1 s.

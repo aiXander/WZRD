@@ -81,14 +81,16 @@ const sticky = new Map<string, unknown>();
 let opening: Promise<void> | null = null;
 /** Every channel the engine offers (from `telemetry.channels`). */
 let allChannels: string[] = [];
-/** Mounted consumers of the JPEG `preview` channel (`preview_jpeg_demand`). */
-let jpegDemand = 0;
+/** Streaming channels the page demands (`telemetry_demand`, the union). */
+let demanded = new Set<string>();
 
-/** All channels except `preview`, which joins only while a consumer wants
- *  it — the engine gates its JPEG readback (and the design leg) on there
- *  being a `preview` subscriber. `telemetry.subscribe` replaces the set. */
+/** Streaming channels join only while demanded (api/telemetryDemand.ts) —
+ *  the engine gates the work behind them on there being a subscriber.
+ *  Everything else (sticky state + `log`) always flows, as in the shell.
+ *  `telemetry.subscribe` replaces the set. */
+const STREAMING = new Set(['preview', 'audio', 'transport', 'drivers', 'frame_stats', 'perf']);
 function resubscribe() {
-  const channels = allChannels.filter((c) => c !== 'preview' || jpegDemand > 0);
+  const channels = allChannels.filter((c) => !STREAMING.has(c) || demanded.has(c));
   return send('telemetry.subscribe', { channels });
 }
 
@@ -132,7 +134,7 @@ function ensureOpen(): Promise<void> {
       if (msg.method === 'telemetry.event') {
         const { channel, payload } = msg.params;
         sticky.set(channel, payload);
-        emit('engine:telemetry', { channel, payload });
+        emit('engine:telemetry', [{ channel, payload }]);
         return;
       }
       const p = pending.get(msg.id);
@@ -164,12 +166,9 @@ export function bridgeCall<T>(cmd: string, args: Record<string, any>): Promise<T
     return ensureOpen().then(() => (sticky.get(args.channel) ?? null) as T);
   }
   if (cmd === 'preview_set_slot') return Promise.resolve(undefined as T);
-  if (cmd === 'preview_jpeg_demand') {
-    const was = jpegDemand > 0;
-    jpegDemand = Math.max(0, jpegDemand + (args.on ? 1 : -1));
-    if (was === jpegDemand > 0 || !connected || !allChannels.length) {
-      return Promise.resolve(undefined as T);
-    }
+  if (cmd === 'telemetry_demand') {
+    demanded = new Set(args.channels ?? []);
+    if (!connected || !allChannels.length) return Promise.resolve(undefined as T);
     return resubscribe().then(() => undefined as T);
   }
   if (SHELL_COMMANDS.has(cmd)) {

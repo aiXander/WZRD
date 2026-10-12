@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1–P6 done, F1 built (fps/flash/preview gates open), P7 + S1 built 2026-10-12 (their real gates open — need venue photos + paid renders). Left: E2, the open gates. Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1–P6 done, F1 done, P7 + S1 built 2026-10-12 (their real gates open — need venue photos + paid renders). Left: E2, the open gates. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -250,18 +250,12 @@ thumbnails written by the MCP — landed 2026-10-10) land: one `texture_flow(reg
 from an external Claude session, then click + T. Fixtures:
 `uv run python wzrd-app/scripts/fixture_projects.py`.
 
-### F1 — Seed clip effects (D14) — built 2026-10-12, screen gates open
+### F1 — Seed clip effects (D14) — done 2026-10-12
 
-15 effects in `library/effects/` (the ten from D14 plus heat, waveWarp,
-dither, vignette, transform from Xander's Resolume set), copied into the
-fixture projects by `fixture_projects.py`. Gates 1–2 passed for all 15
-(naga + probe green via `effect.upsert`, 2.5–3.1 ms predicted; min/max on
-every dial). **Still open:** gates 3–5 — seven clips at 60 fps from `perf`,
-`check_frames` flash rate on a 60 fps recording, a real `preview.jpg` —
-need the engine window in front, so they run as block B1 of
-[afk-test-session.md](afk-test-session.md) (the one-sitting screen-test run).
-Conventions, catalog and gate method:
-[effects-library.md](../reference/effects-library.md).
+15 effects in `library/effects/` (with `preview.jpg`), copied into the
+fixture projects. All five gates passed: naga + probe, dial ranges, seven
+clips at 60 fps (live p95 16.95–17.26 ms on the fx-bench layout), ≤ 3
+flashes/s, real previews. Done — see [effects-library.md](../reference/effects-library.md).
 
 ### P7 — Style recipes — built 2026-10-12, real gate open
 
