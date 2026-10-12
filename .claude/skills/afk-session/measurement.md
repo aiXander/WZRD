@@ -33,9 +33,10 @@ uncapped ones and are the closer stand-in for a show.
 - **fps gates** need the engine window uncovered: a covered window reads
   27–33 ms. In the Tauri app the engine output window sits *under* the main
   window by default — move or shrink one so they don't overlap.
-- **Windowed GPU timing over-reads** (until isolated like the bench): app
-  `gpu.total` p95 29.8 ms at a solid 60 fps. Trust bench GPU numbers,
-  not in-app ones, for costs.
+- **Windowed GPU timing** over-read on 2026-10-12 (app `gpu.total` p95
+  29.8 ms at a solid 60 fps); timed window frames are now isolated like the
+  bench's, unverified on screen until AFK block B7 passes. Until then trust
+  bench GPU numbers over in-app ones for costs.
 - **App idle cost:** `scripts/appcpu.sh <label> perform live` — per-process
   CPU of `wzrd-app`, its WebKit processes and WindowServer. WebContent is the
   number UI changes move (8.7 % → 3.8 % for batched, demand-gated telemetry).

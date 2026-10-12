@@ -77,5 +77,6 @@ only its conclusions. Scratchpad = `$S` below (your session scratchpad).
   scissor per layer pass, per-plan uniform buffer, design leg sampled for a
   JPEG-only consumer, parallel clip opens + one decode per clip frame,
   batched demand-gated app telemetry, sampled cue monitor, opacity-only UI
-  animations, bench teardown that never hangs. Current state lives in
+  animations, bench teardown that never hangs, legs ticking after `acquire`
+  (knob→submit ≈ 1 frame), isolated GPU timing on timed window frames. Current state lives in
   `docs/reference/render-engine.md` and `operator-ui.md`.
