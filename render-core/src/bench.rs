@@ -79,6 +79,12 @@ pub struct BenchArgs {
 /// `--gpu-timing` default for the bench (see [`BenchArgs::gpu_timing`]).
 pub const DEFAULT_BENCH_GPU_TIMING: u32 = 4;
 
+/// How long teardown keeps rendering so in-flight RPCs get their reply.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `drop(core)` may take once the report is written before the
+/// process exits anyway (exit code 3).
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(20);
+
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 struct Scenario {
@@ -253,7 +259,7 @@ pub fn run(args: BenchArgs) -> Result<()> {
             }
         })?);
     }
-    let worker = RpcWorker::spawn(ctx.clone(), cmd_tx.clone(), actor)?;
+    let mut worker = RpcWorker::spawn(ctx.clone(), cmd_tx.clone(), actor)?;
 
     // Resolve every action's params up front (file reads off the frame path).
     let mut schedule: Vec<(usize, usize, JsonRpcRequest)> = Vec::new(); // (frame, rep, req)
@@ -333,30 +339,51 @@ pub fn run(args: BenchArgs) -> Result<()> {
     let perf = core.perf_mut().bench_report();
     let resources_end = core.gpu_resources().unwrap_or(Value::Null);
 
-    // Background senders stop and the unsent rest of the timeline is
-    // skipped; keep rendering (unrecorded) until the request in flight has
-    // its reply — the worker blocks on the render thread, so stopping the
-    // loop first would deadlock it.
+    // Teardown. Background senders stop, the unsent rest of the timeline is
+    // skipped and the worker's queue closes; keep rendering (unrecorded)
+    // until every side thread has *exited* — the worker and an `hz` sender
+    // block inside `rpc::dispatch` on a render-thread reply, so stopping the
+    // loop first would deadlock them. Exit is judged by the threads
+    // themselves (`is_finished`), never by a request counter, and a thread
+    // still blocked at the deadline is detached, never joined (an orphaned
+    // bench once sat for 1h43m at 0% CPU in `join` on a worker waiting for
+    // a reply nobody would send).
     stop.store(true, Ordering::Relaxed);
     worker.cancel();
+    worker.close();
+    for id in sub_ids {
+        ctx.bus.unsubscribe(id);
+    }
     let never_sent = schedule.len() - next;
-    let drain_deadline = Instant::now() + Duration::from_secs(10);
-    while worker.pending() > 0 && Instant::now() < drain_deadline {
+    let drain_started = Instant::now();
+    let drain_deadline = drain_started + DRAIN_TIMEOUT;
+    while !(worker.is_finished() && side.iter().all(JoinHandle::is_finished))
+        && Instant::now() < drain_deadline
+    {
         core.poll_inbound();
         core.pace_frame();
         let _ = core.redraw();
     }
+    let drain_ms = drain_started.elapsed().as_secs_f64() * 1000.0;
     let unfinished = worker.pending();
-    let actions = worker.finish();
-    for id in sub_ids {
-        ctx.bus.unsubscribe(id);
-    }
+    let (actions, worker_stuck) = worker.finish();
+    let mut stuck_threads = usize::from(worker_stuck);
     for h in side {
-        let _ = h.join();
+        if h.is_finished() {
+            let _ = h.join();
+        } else {
+            stuck_threads += 1; // detached: dies with the process
+        }
+    }
+    if stuck_threads > 0 {
+        log::error!(
+            "bench {name}: {stuck_threads} thread(s) still blocked after the {} s drain \
+             ({unfinished} timeline RPC(s) without a reply); detached, not joined",
+            DRAIN_TIMEOUT.as_secs()
+        );
     }
     let subscribers = sub_counts.lock().map(|c| c.clone()).unwrap_or_default();
     let wall_s = started.elapsed().as_secs_f64();
-    drop(core);
 
     let report = json!({
         "schema": 1,
@@ -377,6 +404,10 @@ pub fn run(args: BenchArgs) -> Result<()> {
         "actions": actions,
         "actions_unfinished": unfinished,
         "actions_never_sent": never_sent,
+        "teardown": {
+            "drain_ms": (drain_ms * 1000.0).round() / 1000.0,
+            "stuck_threads": stuck_threads,
+        },
         "subscribers": subscribers,
         "wall_s": (wall_s * 1000.0).round() / 1000.0,
     });
@@ -386,6 +417,12 @@ pub fn run(args: BenchArgs) -> Result<()> {
     std::fs::write(&args.bench_out, serde_json::to_string_pretty(&report)?)
         .with_context(|| format!("writing {}", args.bench_out.display()))?;
     log::info!("bench {name}: report → {}", args.bench_out.display());
+
+    // The report is on disk; engine teardown (device, decoder threads) must
+    // not be able to hang the process past it. A detached thread still in
+    // `dispatch` wakes with "reply channel closed" once `core` drops.
+    spawn_teardown_watchdog(&name);
+    drop(core);
     if cleanup {
         let _ = std::fs::remove_dir_all(&work_dir);
     }
@@ -579,14 +616,29 @@ impl RpcWorker {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    /// Close the queue, join (unless a request is still stuck on the
-    /// render thread — then the thread is left to die with the process),
-    /// and summarise per method.
-    fn finish(mut self) -> Value {
+    /// Close the queue: the worker skips what is still queued (cancelled)
+    /// and exits once the request in flight has its reply.
+    fn close(&mut self) {
         self.tx = None;
+    }
+
+    /// The worker thread has exited (or was never spawned).
+    fn is_finished(&self) -> bool {
+        self.join.as_ref().map_or(true, JoinHandle::is_finished)
+    }
+
+    /// Join the worker if it has exited (a thread still blocked in
+    /// `rpc::dispatch` is detached instead: it dies with the process, and
+    /// joining it would wait for a render-thread reply that never comes),
+    /// then summarise per method. Returns `(summary, worker_stuck)`.
+    fn finish(mut self) -> (Value, bool) {
+        self.tx = None;
+        let mut stuck = false;
         if let Some(j) = self.join.take() {
-            if self.pending() == 0 {
+            if j.is_finished() {
                 let _ = j.join();
+            } else {
+                stuck = true;
             }
         }
         let r = self.results.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default();
@@ -610,8 +662,21 @@ impl RpcWorker {
                 }),
             );
         }
-        Value::Object(out)
+        (Value::Object(out), stuck)
     }
+}
+
+/// Exit the process if engine teardown hangs once the report is written.
+fn spawn_teardown_watchdog(name: &str) {
+    let name = name.to_string();
+    let _ = std::thread::Builder::new().name("bench-watchdog".into()).spawn(move || {
+        std::thread::sleep(TEARDOWN_TIMEOUT);
+        log::error!(
+            "bench {name}: engine teardown still running after {} s; exiting (report already written)",
+            TEARDOWN_TIMEOUT.as_secs()
+        );
+        std::process::exit(3);
+    });
 }
 
 /// A timeline entry with `hz`: fire it at a fixed rate on its own thread
@@ -657,10 +722,16 @@ fn spawn_rate_action(
             i += 1;
             next += period;
             let now = Instant::now();
-            if next > now {
-                std::thread::sleep(next - now);
-            } else {
+            if next <= now {
                 next = now;
+            }
+            // Sleep in slices so teardown never waits out a slow period.
+            while !stop.load(Ordering::Relaxed) {
+                let left = next.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                std::thread::sleep(left.min(Duration::from_millis(20)));
             }
         }
     })?)

@@ -29,7 +29,7 @@ impl log::Log for TeeLogger {
 
     fn log(&self, record: &log::Record) {
         self.inner.log(record);
-        if record.level() <= log::Level::Info && self.inner.matches(record) {
+        if forward_to_bus(record) && self.inner.matches(record) {
             if let Some(bus) = render_core::telemetry::global_bus() {
                 bus.emit_log(
                     record.level().as_str().to_ascii_lowercase().as_str(),
@@ -43,6 +43,18 @@ impl log::Log for TeeLogger {
     fn flush(&self) {
         self.inner.flush();
     }
+}
+
+/// Info and louder, except the GPU stack's chatter below Warn: wgpu-core logs
+/// "Device::maintain: waiting for submission index N" at INFO on every
+/// maintain (~180/s), so a plain `RUST_LOG=info` would flood the `log`
+/// channel (and the Debug room) and cost frame time. stderr still gets
+/// whatever `RUST_LOG` asks for.
+fn forward_to_bus(record: &log::Record) -> bool {
+    let gpu_stack = ["wgpu_core", "wgpu_hal", "naga"]
+        .iter()
+        .any(|p| record.target().starts_with(p));
+    record.level() <= if gpu_stack { log::Level::Warn } else { log::Level::Info }
 }
 
 fn main() -> Result<()> {

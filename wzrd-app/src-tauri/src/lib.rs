@@ -38,11 +38,22 @@ pub(crate) fn set_log_bus(bus: &render_core::telemetry::Bus) {
     *LOG_BUS.lock().expect("log bus lock") = Some(bus.clone());
 }
 
+/// Info and louder, except the GPU stack's chatter below Warn: wgpu-core logs
+/// "Device::maintain: waiting for submission index N" at INFO on every
+/// maintain (~180/s), so `RUST_LOG=info` would flood the Debug log. stderr
+/// still gets whatever `RUST_LOG` asks for. (Twin of render-core's main.rs.)
+fn forward_to_bus(record: &log::Record) -> bool {
+    let gpu_stack = ["wgpu_core", "wgpu_hal", "naga"]
+        .iter()
+        .any(|p| record.target().starts_with(p));
+    record.level() <= if gpu_stack { log::Level::Warn } else { log::Level::Info }
+}
+
 /// Tee logger: stderr via env_logger + the engine's `log` telemetry channel
 /// once the bus exists (Core::new sets the global). Same shape as the
 /// standalone binary's logger — the webview's Debug log stream depends on
-/// it. Only Info and louder are forwarded; the bus internals log at trace,
-/// which also breaks any recursion.
+/// it. Only Info and louder are forwarded (GPU stack: Warn and louder); the
+/// bus internals log at trace, which also breaks any recursion.
 struct TeeLogger {
     inner: env_logger::Logger,
 }
@@ -54,7 +65,7 @@ impl log::Log for TeeLogger {
 
     fn log(&self, record: &log::Record) {
         self.inner.log(record);
-        if record.level() <= log::Level::Info && self.inner.matches(record) {
+        if forward_to_bus(record) && self.inner.matches(record) {
             // Clone out of the lock: emit_log logs at trace internally.
             let bus = LOG_BUS.lock().ok().and_then(|b| b.clone());
             if let Some(bus) = bus {
