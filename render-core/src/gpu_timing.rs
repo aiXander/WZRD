@@ -16,6 +16,11 @@
 //!   that submit, and read once the callback fired. `queue.submit` already
 //!   runs a non-blocking maintain, so no extra `poll` is needed. When every
 //!   slot is in flight the frame simply isn't timed.
+//!   The one deliberate wait: a *sampled* frame (1 in `every`) runs alone
+//!   on the GPU — offscreen `wait_turn` drains before acquire, a window
+//!   drains right before the main submit
+//!   (`GpuContext::drain_before_timed_submit`) — or its first pass's span
+//!   counts the previous frame's tail. Untimed frames never wait.
 //! - Allocation-free per frame: the query set and buffers are created once
 //!   (`GpuTimer::new`); raw tick deltas go into a fixed [`GpuFrame`].
 //!   Conversion to ms and percentiles happen in the 2 Hz `perf` aggregate.
@@ -33,7 +38,10 @@
 //! fragments still run — measured on the M2, raw `final` read 7.5 ms on a
 //! scene whose final pass costs 0.2 ms, because it absorbed the composite.
 //! Charged this way the passes tile the span (Σ ≈ total). Preview and probe
-//! passes are their own submits and report raw begin → end. A pass with no
+//! passes are their own submits: probe reports raw begin → end, the preview
+//! blit is charged from the main span's end (it queues right behind it and
+//! samples its composite; raw, its early begin stamp read ~8 ms for a
+//! ~0.3 ms blit in the app). A pass with no
 //! draws (an empty composite) gets no end-of-fragment sample on Metal and
 //! is dropped from that frame. Live clip uploads precede the first timed
 //! pass, so they sit outside `total`; design uploads fall between two timed
@@ -365,9 +373,18 @@ fn collect_frame(
         let Some((b, e)) = pair_ticks(pair) else { continue };
         f.ran |= 1 << pass as u8;
         if pass == GpuPass::Preview {
-            // Its own submit — its own span.
-            f.ticks[pass as usize] = clamp(e - b);
-            f.total = f.total.saturating_add(clamp(e - b));
+            // Its own submit, queued right behind the main one (every main
+            // pass precedes it in `ALL`, so `span` is complete here). The
+            // blit samples a composite the main submit draws, so its real
+            // work can't start before the main span ends — but on a TBDR GPU
+            // its begin stamp fires while the main fragments still run
+            // (measured in the app: a ~0.3 ms blit read 8 ms raw). Charged
+            // from the main span's end, like the main passes tile; `total`
+            // gets only the part outside the main span.
+            let from = span.map_or(b, |(_, main_end)| b.max(main_end));
+            let own = clamp(e.saturating_sub(from));
+            f.ticks[pass as usize] = own;
+            f.total = f.total.saturating_add(own);
         } else {
             let from = span.map_or(b, |(_, prev_end)| b.max(prev_end));
             f.ticks[pass as usize] = clamp(e.saturating_sub(from));
@@ -610,6 +627,25 @@ mod tests {
         assert_eq!(f.ticks[GpuPass::CompositeLive as usize], 300);
         assert_eq!(f.ticks[GpuPass::Final as usize], 50);
         assert_eq!(f.total, 350, "passes tile the span");
+    }
+
+    #[test]
+    fn preview_overlapping_the_main_submit_is_charged_from_its_end() {
+        // The app's over-read: the preview blit's begin stamp fires at 150,
+        // during the live composite (100..400); its own work is 400..420.
+        let ticks = |pair: u32| match pair {
+            p if p == GpuPass::CompositeLive as u32 => Some((100, 400)),
+            p if p == GpuPass::Preview as u32 => Some((150, 420)),
+            _ => None,
+        };
+        let written = (1 << GpuPass::CompositeLive as u32) | (1 << GpuPass::Preview as u32);
+        let f = collect_frame(written, 0, 0, ticks);
+        assert_eq!(f.ticks[GpuPass::Preview as usize], 20);
+        assert_eq!(f.total, 320, "total is the union, not span + raw preview");
+        // A preview with no main passes in the frame (occluded, nothing
+        // rendered) keeps its raw span.
+        let f = collect_frame(1 << GpuPass::Preview as u32, 0, 0, ticks);
+        assert_eq!((f.ticks[GpuPass::Preview as usize], f.total), (270, 270));
     }
 
     #[test]

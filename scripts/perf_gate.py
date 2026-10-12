@@ -63,12 +63,13 @@ BUDGET_FRAME_MAX_MS = 33.0       # no frame's render-thread work > 2 vsyncs in a
                                  # this shared desktop the GPU stalls ~45 ms now and then for other apps'
                                  # compositing (seen in ~1 run in 5) — GPU cost is judged by gpu.total.
 BUDGET_STALE_FRAMES = 0          # clip frames wanted but not decoded in time ("stale": "zero" scenarios).
-BUDGET_KNOB_SUBMIT_P95_MS = 36.0 # knob→submit. Not 17: legs tick *before* the vsync wait in acquire, so a
-                                 # knob write waits for the next tick (≤ 1 frame) and then a whole vsync
-                                 # (1 frame): ceiling 2 × 16.7 = 33.4 ms + sub-ms jitter. The bench measures
-                                 # 33.3–34.7 ms p95 (6 runs, 2026-10-12), so 34 flapped; 36 = the ceiling +
-                                 # jitter margin. Fixing the tick order is its own change (reference §4 #9);
-                                 # the +2 ms regression rule catches growth below the budget.
+BUDGET_KNOB_SUBMIT_P95_MS = 22.0 # knob→submit. Legs tick *after* the vsync wait in acquire (reference §4 #9),
+                                 # so a knob write waits for the next tick (≤ 1 frame; the stamp is the
+                                 # *oldest* pending write) and then only tick → submit (~1 ms): ceiling
+                                 # 16.7 + ~1.5 ms. The bench measures 17.8–18.5 ms p95 (4 runs, 2026-10-12;
+                                 # 33.3 before the tick moved). 22 = ceiling + jitter margin; 36 would hide a
+                                 # tick drifting back before acquire. The +2 ms regression rule catches
+                                 # growth below the budget.
 BUDGET_RESOURCE_GROWTH = 0       # wgpu live objects (excl. command buffers) gained over edit-churn's window.
 BUDGET_MONITOR_P95_MS = 0.1      # the frame profiler's own cost per frame.
 

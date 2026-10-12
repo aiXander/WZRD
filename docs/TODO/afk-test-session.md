@@ -66,6 +66,7 @@ point is one sitting.
 |---|---|---|---|
 | B2 | native preview underlay | ≈ 5 min | the PROGRAM monitor shows a TAKE crossfade in step with the projector (step 8; the rest passed 2026-10-12) |
 | B6 | perf pass 2026-10-12 | ≈ 20 min | fx + continuity gates, app GPU timing and idle CPU, and the UI animation changes on the engine after the perf pass |
+| B7 | perf P6 frame ordering | ≈ 5 min | windowed GPU timing no longer over-reads (preview blit, `gpu.total`); the timed-frame drain costs no vsync; knob→submit ≈ 1 frame on a real swapchain |
 
 ---
 
@@ -171,8 +172,8 @@ It landed after the screen locked, so nothing of it has been watched on a
 real window: region scissor on every layer pass, a per-plan uniform buffer,
 the design leg sampled for the JPEG stream, parallel clip opens + one decode
 per clip frame, batched demand-gated app telemetry, a sampled cue monitor,
-opacity-only glow/lamp animations, and (if P6 landed) the tick moved after
-`acquire` + isolated GPU timing on the window path. **Duration:** ≈ 20 min.
+opacity-only glow/lamp animations, and the tick moved after `acquire` +
+isolated GPU timing on the window path (B7). **Duration:** ≈ 20 min.
 
 **Preconditions:** release build of current main; `projects/fx-bench`;
 `projects/fixture-a/perf-clips.scene.json`; nothing on 1420/9123/9124/9177.
@@ -188,9 +189,8 @@ opacity-only glow/lamp animations, and (if P6 landed) the tick moved after
 2. `uv run python scripts/continuity_gate.py --bench projects/fx-bench` —
    status pass (clip opens moved to worker threads, first frame now arrives
    via the staging ring).
-3. Re-run the former B3 snapshot (git history of this file, commit
-   4c85335^): in the app, `passes.preview` should now read ≲ 0.3 ms and
-   `gpu.total` p95 below the 16.7 ms budget at 60 fps (fails today: 29.8).
+3. App GPU timing + knob latency on a real window: run block B7 (it
+   replaces the former B3 snapshot).
 4. App idle cost in the show posture (Perform, LIVE, engine window in
    front): per-process CPU via `top -l 7 -s 5 -pid <wzrd-app> -pid
    <WebContent…> -pid <WindowServer>`. 2026-10-12 on a loaded machine:
@@ -205,6 +205,75 @@ opacity-only glow/lamp animations, and (if P6 landed) the tick moved after
 
 **After the run:** all pass → delete B6 and its runbook row. A fail →
 describe it in render-engine.md §4 and leave the failing check here.
+
+---
+
+### B7 — perf P6: windowed GPU timing + knob latency on a real swapchain
+
+**Owner:** perf package P6 — frame ordering in `Core::redraw`
+([perf-monitor.md](perf-monitor.md) "Verify on screen"; current state in
+[render-engine.md](../reference/render-engine.md) §2.9 and §4 #9).
+**Duration:** ≈ 5 min.
+
+Three changes only a visible window proves: (1) a GPU-timed window frame
+now drains the queue before its main submit (1 frame in 30) — it must not
+drop frames; (2) the preview blit is charged from the main span's end —
+`preview` should read the blit, not 8 ms; (3) legs tick after `acquire`, so
+`knob_submit_p95` should read ≈ 17–19 ms, not ≈ 33.
+
+**Preconditions:** `projects/fixture-a/perf-clips.scene.json` (four
+generative bindings + five HAP clips; recreate by appending five
+`videoClip` bindings over `generated/tf_a0{1..5}.mov` to fixture-a's
+scene); nothing on ports 1420 / 9123 / 9124.
+
+**Commands** (repo root, inside `caffeinate -dims`):
+
+```bash
+B=test_results/p6 && mkdir -p $B
+cp projects/fixture-a/alignment.json projects/fixture-a/session.json $B/ 2>/dev/null
+snap() { uv run -q --with websockets python -c 'import asyncio,json,websockets
+async def m():
+  async with websockets.connect("ws://127.0.0.1:9123",max_size=None) as w:
+    await w.send(json.dumps({"jsonrpc":"2.0","id":1,"method":"perf.snapshot","params":{}}))
+    while True:
+      r=json.loads(await w.recv())
+      if r.get("id")==1:
+        s=r["result"]; g=s["gpu"] or {}
+        print(json.dumps({"presenting":s["presenting"],"work_p95":s["frame"]["work"]["p95"],"interval_p95":s["frame"]["interval"]["p95"],"dropped":s.get("dropped"),"latency":s.get("latency"),"passes":g.get("passes"),"total":g.get("total")})); return
+asyncio.run(m())'; }
+# 100 Hz live brightness wiggle (0.95 <-> 1.0) for 10 s: stamps knob_submit
+knobs() { uv run -q --with websockets python -c 'import asyncio,json,websockets
+async def m():
+  async with websockets.connect("ws://127.0.0.1:9123",max_size=None) as w:
+    for i in range(1000):
+      await w.send(json.dumps({"jsonrpc":"2.0","id":i,"method":"master.set","params":{"name":"brightness","value":0.95+0.05*(i%2),"leg":"live"}}))
+      await asyncio.sleep(0.01)
+asyncio.run(m())'; }
+for MODE in 30 0; do   # default sampling, then GPU timing off
+  (cd wzrd-app && WZRD_GPU_TIMING=$MODE WZRD_SCENE=../projects/fixture-a/perf-clips.scene.json pnpm tauri dev > ../$B/app_$MODE.log 2>&1 &)
+  until grep -q "preview underlay installed" $B/app_$MODE.log; do sleep 1; done; sleep 25
+  osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "wzrd-app") to true'; sleep 5
+  knobs; snap | tee $B/snap_$MODE.json
+  pkill -f target/debug/wzrd-app; sleep 2; pkill -f vite; sleep 2
+done
+cp $B/session.json projects/fixture-a/; [ -f $B/alignment.json ] && cp $B/alignment.json projects/fixture-a/ || rm -f projects/fixture-a/alignment.json
+```
+
+**Pass criteria:** in `snap_30.json`: `passes.preview.p50` ≲ 0.5 ms;
+`total.p95` < 16.7 ms (headroom positive); `latency.knob_submit_p95`
+≤ 22 ms (both snaps). Between `snap_30` and `snap_0`: `interval_p95` within
+~0.5 ms and `dropped.window` not higher with timing on (the drain costs no
+vsync). Fail = any of these; record the numbers and move on.
+
+**Results:** _(filled by the runner)_
+
+**After the run:** all pass → delete the "Verify on screen" item in
+perf-monitor.md and this block. `preview` still high → the over-read isn't
+the TBDR begin stamp; record the numbers under that item. Drops with timing
+on → the window drain (`GpuContext::drain_before_timed_submit`) costs a
+vsync; record it there and in reference §2.9.
+
+---
 
 ## Block template (copy, fill, append above this section, add a runbook row)
 
