@@ -132,8 +132,8 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "write_scene_file" => ok(rpc::write_scene_file(st(), s("contents")?)),
         "list_effects" => ok(rpc::list_effects(st())),
         "read_effect" => ok(rpc::read_effect(st(), s("name")?)),
-        "read_mask_png" => ok(rpc::read_mask_png(st(), s("maskPath")?)),
-        "looks_list" => ok(rpc::looks_list(st())),
+        "read_mask_png" => ok(rpc::read_mask_png_in(&st(), s("maskPath")?)),
+        "looks_list" => ok(rpc::looks_list_in(&st())),
         "look_read" => ok(rpc::look_read(st(), s("name")?)),
         "look_write" => ok(rpc::look_write(st(), s("name")?, s("scene")?, opt("thumbB64"))),
         "look_delete" => ok(rpc::look_delete(st(), s("name")?)),
@@ -141,8 +141,8 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "project_current" => Ok(projects::project_current(st())),
         "project_open" => projects::project_open(app.clone(), st(), s("scenePath")?),
         "engine_restart" => projects::engine_restart(app.clone(), st()),
-        "clips_list" => clips::clips_list(st()),
-        "clip_thumb" => ok(clips::clip_thumb(st(), s("path")?)),
+        "clips_list" => clips::clips_list_in(&st()),
+        "clip_thumb" => ok(clips::clip_thumb_in(&st(), s("path")?)),
         "clip_file" => ok(clips::clip_file(st(), s("path")?, opt("region"))),
         "debug_log" => {
             log::info!("[webview] {}", s("msg")?);
