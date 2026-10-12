@@ -1361,7 +1361,8 @@ Ranked; none currently show-stopping at 5–20 layers.
    Ticking after `acquire` would cut ~one frame; not done (behaviour change,
    needs the probe/timing re-checked). The §2.10 `knob-latency` scenario
    measures 33.3–34.7 ms p95 with a 100 Hz knob (ceiling 2 × 16.7 ms), so
-   its budget is 36 ms until the tick moves.
+   its budget is 36 ms until the tick moves The real swapchain agrees: 32.7 ms p95 on a
+   standalone window in front (AFK B5, 2026-10-12).
 10. ~~Dev builds drop frames on the preview JPEG~~ — **resolved 2026-10-12**:
    dependencies build optimized in dev (`[profile.dev.package."*"]` in both
    manifests), the shell subscribes to `preview` only on demand, and the

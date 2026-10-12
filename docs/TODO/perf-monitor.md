@@ -200,20 +200,18 @@ heavy scenes — the probe path is covered by `take-crossfade`). Done — see
 [reference/render-engine.md](../reference/render-engine.md) §2.10.
 
 Open from PM3:
-- **Not committed yet (2026-10-12).** PM3's edits to `core.rs`, `gpu.rs`,
-  `perf.rs`, `lib.rs`, `main.rs` sit on top of PM2's uncommitted diff in the
-  same files (and `gpu_timing.rs` is still untracked), so PM3 can't be
-  committed alone without sweeping PM2 in or leaving a commit that doesn't
-  build. Land PM2 + PM3 together (or after PM2's commit) — ask Xander
-  first. PM3's own new files: `render-core/src/bench.rs`, `render-core/perf/`
-  (scenarios, scenes, `baselines/`, `.gitignore`), `scripts/perf_gate.py`;
-  plus its doc edits (reference §2.10/§4/§6, this file, `CLAUDE.md`,
-  afk-test-session B5).
-- **Window path not watched on screen** since `redraw` moved to
-  `acquire_output`/`present`, and the bench's virtual-vsync knob latency
-  isn't cross-checked against a real swapchain yet — both are
-  [afk-test-session.md](afk-test-session.md) block B5 (B3 covers the Tauri
-  side).
+- **Windowed GPU timing over-reads (found by AFK B3, 2026-10-12).** In the
+  Tauri app at a steady 60 fps (`perf-clips` scene, Perform room, window in
+  front) the sampled passes read `composite.live` p50 6.7 / p95 14.4 ms,
+  `preview` p50 8.0 / p95 14.6 ms (a blit; expected ≲ 0.3) and `gpu.total`
+  p95 29.8 ms — more than the frame budget while no frame drops (interval
+  p95 17.3). The bench isolates its timed frame (`wait_turn`, queue drained
+  first); the swapchain path doesn't, so a timed frame's spans include the
+  previous frame's tail and the preview submit's wait behind it. Headroom
+  derived from `gpu.total` therefore reads negative in the app. Fix: on a
+  timed frame in the window path, drain the queue before the first pass
+  (as the bench does), or time each pass's own begin→end only. On vs off
+  costs nothing (work p95 1.78 vs 2.22 ms, interval 17.32 vs 17.56).
 - **`take-crossfade` stale frames are gated regression-only** (~28 stale
   clip frames over 4 TAKEs today — reference §4 #12). When E1b/E2 fix the
   TAKE trap, set its `gate.stale` to `"zero"` and re-baseline.
