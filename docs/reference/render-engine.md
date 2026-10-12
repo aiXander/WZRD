@@ -1083,6 +1083,16 @@ The regression gate every engine change runs (rule in §6). Three parts:
   wgpu resource counts at window start/end, per-method RPC round-trips
   (n, errors, p50/p95/max, skipped), subscriber message counts, and
   machine info (adapter, backend, OS, build profile, git sha + dirty).
+- **Teardown never hangs.** After the measured window the timeline is
+  cancelled and the worker's queue closed; the host keeps rendering
+  (unrecorded, ≤ 10 s) until the worker and every side thread have
+  *exited* (`JoinHandle::is_finished`), because they block in
+  `rpc::dispatch` on a render-thread reply. A thread still blocked then is
+  detached, never joined, and counted in `teardown.stuck_threads`
+  (`actions_unfinished` = RPCs left without a reply); the report is written
+  before `drop(core)`, and a watchdog exits the process (code 3) if engine
+  teardown takes > 20 s. Never key a join on a request counter: an orphaned
+  bench once sat 1h43m in `join` on a worker still waiting for its reply.
 
 **Scenario format** (`render-core/perf/scenarios/*.json`; scenes and
 fixtures in `perf/scenes/`): `{description, scene, size?, warmup_frames?,
@@ -1138,6 +1148,16 @@ Chrome on the machine:
 - **"No frame > 33 ms" judges render-thread work, not the interval**:
   uncapped, the interval's `acquire` is GPU backpressure, and the desktop's
   GPU stalls ~45 ms for other apps' compositing about one run in five.
+- **Each bench run has a wall-clock cap** (`gate.timeout_s`, else 60 s +
+  frames at 20 fps): a hung or crashed run is killed and becomes a
+  `bench run` FAIL row, and the gate carries on with the next scenario
+  (`--update-baseline` refuses to write then). Any run with
+  `actions_unfinished` or `teardown.stuck_threads` > 0 FAILs too (a lost
+  engine reply). The engine runs under its own default `RUST_LOG`
+  (`info,wgpu_core=warn,…` — never plain `info`: wgpu-core logs every
+  `Device::maintain` at INFO, ~180 lines/s, which perturbs the timings;
+  `fx_gate.py` does the same). The `log` telemetry channel drops
+  `wgpu_core`/`wgpu_hal`/`naga` below Warn whatever `RUST_LOG` says.
 - A failing scenario re-runs once before it fails; > 10 % *and* > 0.3 ms
   spread prints NOISY. Paced scenarios never judge GPU ms (the GPU
   downclocks at 60 Hz, §2.9). No baseline for the machine → budgets only.
