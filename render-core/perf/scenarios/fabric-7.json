@@ -1,0 +1,11 @@
+{
+  "description": "The gig layout (fx-bench): seven small regions (a ceiling band + six narrow strips, ~0.7 M of the 7.4 M pixels seven full-canvas passes would shade) each running a library clip effect (waveWarp / edgeGlow) on a 1080p HAP clip — the region-scissor case (render-engine.md §2.4 output bounds).",
+  "scene": "../scenes/fabric7/fabric7.scene.json",
+  "warmup_frames": 180,
+  "frames": 900,
+  "gate": {
+    "steady": true,
+    "stale": "zero",
+    "media": "clips"
+  }
+}

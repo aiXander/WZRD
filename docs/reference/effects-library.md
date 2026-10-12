@@ -64,7 +64,12 @@ feedback looks. Those wait for feedback + `post` (roadmap §5.16, toolbox).
   noise) are duplicated per file until `#import` lands (roadmap §5.5).
 - **Additive-safe output.** Return premultiplied colour × `mask` (sampled
   at the *output* uv, never the displaced one) × `gain`, the same as the
-  built-in `videoClip`. Colour ops un-premultiply (`rgb / max(a, 1e-4)`),
+  built-in `videoClip`. This is also what lets the engine **clip each pass
+  to its region's mask box** (render-engine.md §2.4 output bounds): light
+  outside it is cut. Don't call `sample_mask` (that makes the effect shade
+  the whole canvas — slower), and if an effect must glow past its region,
+  declare `"bounds": "canvas"` in its descriptor. Colour ops
+  un-premultiply (`rgb / max(a, 1e-4)`),
   work, and re-multiply. Every effect maps black to zero light: posterize,
   dither and heat keep band 0 at black, lumaKey's keyed area is black.
 - **Work in clip-box space.** `layer.image_box` is the contain-fitted rect

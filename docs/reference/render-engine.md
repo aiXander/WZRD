@@ -409,7 +409,7 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `probe.getThresholds` | inline | Current `{a_ms, b_ms}`. |
 | `effect.upsert {name, wgsl, descriptor?}` | queued | §2.7 verdict-in-reply: naga-validates **before** touching disk (bad WGSL → line-mapped diagnostics in the reply, nothing written), then writes `effects/<name>/`, rescans the registry (so the watcher echo of the self-write dedupes to nothing), and re-applies the design scene — the reply defers through the §2.6 probe and carries verdict + thumbnail + `{epoch, rev}` when the scene binds the effect. |
 | `effect.remove {name}` | queued | |
-| `effect.describe {name?}` | queued | §5.5 — input descriptors (type, default, `min`/`max`/`step`/`unit`/`widget`) for one effect, or the whole catalog (built-ins included) when `name` is omitted. |
+| `effect.describe {name?}` | queued | §5.5 — input descriptors (type, default, `min`/`max`/`step`/`unit`/`widget`) + `bounds` (§2.4) for one effect, or the whole catalog (built-ins included) when `name` is omitted. |
 | `wgsl.validate {source}` | inline | naga diagnostics remapped to user-source lines (drives Monaco squiggles). |
 | `telemetry.channels` | inline | The list of live channel names (`telemetry::ALL_CHANNELS`). |
 | `perf.snapshot` | inline | §2.9 — the latest `perf` aggregate (same object as the channel). Errors when started with `--perf off` or before the first aggregate (~0.5 s). |
@@ -460,6 +460,39 @@ code never has to honour it. The engine composes
 naga-validates before pipeline creation; a bad save never blanks the
 projector.
 
+**Output bounds — light outside the region is clipped (perf P1,
+2026-10-12).** The contract was always "scale your output by `mask`"; the
+compositor now cashes it in: every pass of a **region-bounded** effect is
+`set_scissor_rect`-ed to its layer's **mask support** — the box of every
+*non-zero* mask texel (`LayerGeom::support_uv`, measured from the mask bytes
+at pack load, never the manifest's `bbox`, which is thresholded at 128 and
+misses soft edges), padded by one mask texel + one composite pixel for the
+linear mask filter (`compositor::region_scissor`). Outside that box `mask`
+is exactly 0, so a mask-scaled effect is **bit-identical** to the full-canvas
+draw — pinned on all built-ins, the 15 library effects (stills + HAP Q) and
+the 8 example effects by `region_scissor_is_bit_identical_for_every_shipped_effect`.
+An all-zero mask draws nothing. The win is fragments: the gig layout (seven
+small regions) shades ~0.7 M instead of 7.4 M pixels per leg. Which effects
+are bounded (`EffectDef::bounds`, reported by `effect.describe` as
+`"bounds"`):
+- **Declared** wins: descriptor.json / inline spec `"bounds": "canvas"`
+  (opt out — e.g. an effect that deliberately glows past its region) or
+  `"region"` (opt in despite the inference below).
+- **Inferred** otherwise (`Bounds::infer`, conservative): `canvas` when the
+  body calls `sample_mask(…)` or touches `mask_atlas` (a displaced mask read
+  lights pixels whose own mask is 0 — built-in `wobble` is canvas for this
+  reason), or never uses its `mask` argument (naga ref count — a
+  deliberate full-canvas effect); `region` otherwise. Comments don't count.
+- An effect that *uses* `mask` but still emits light where it is 0 (e.g.
+  `max(mask, 0.2)`) breaks the contract and is clipped — declare `canvas`.
+- The §5.6 probe still shades the full canvas (a pessimistic cost
+  estimate); TAKE fades never re-run layer passes, so they inherit the clip.
+
+`sample_mask` samples with an explicit LOD (the atlas has one mip — same
+result), so it is legal in non-uniform control flow and an effect may
+early-out on `mask == 0` as long as it uses no derivatives
+(`textureSample`, `dpdx`/`fwidth`) after the branch.
+
 **Per-layer identity (§5.2, landed 2026-07-11).** When one binding resolves
 to N layers, each pass carries its own identity, exposed as prelude
 accessors: `layer_seed()` (stable [0,1) hash of the layer *id* — survives
@@ -491,7 +524,8 @@ touching it:
   one layer layout every pass and probe item uses (`gpu::layer_bind_group`
   is the only constructor); unbound passes get a 1×1 transparent dummy.
   `LayerParams` grew `image_box` (uv rect, already contain-fitted) and
-  `image_meta` (bound flag, encoding) → 176 bytes, pinned by
+  `image_meta` (bound flag, encoding, 1/box width, 1/box height — the
+  reciprocals spare each `sample_image` tap a divide) → 176 bytes, pinned by
   `layer_params_layout_matches_wgsl`.
 - **Colour:** stills and plain HAP/HAP Alpha use sRGB texture formats
   (decode to linear on sample); HAP Q's scaled YCoCg sits in a non-sRGB
@@ -1108,6 +1142,7 @@ pack and `image.clip` paths made absolute; never `session.json` or
 | `smoke` | today's typical scene (`examples/phase3_smoke`) | uncapped |
 | `layers-heavy` | 40 built-in bindings, audio pinned to 1.0 over OSC | uncapped |
 | `clips-7` | seven 1080p HAP clips: decode, **stale = 0** | uncapped |
+| `fabric-7` | the gig layout: seven small regions (synthetic `perf/packs/fabric7`) × library waveWarp/edgeGlow on HAP clips — the §2.4 region scissor | uncapped |
 | `take-crossfade` | clip-set swap TAKE every 2 s (scene.load → promote 400 ms) | paced |
 | `warp-64` | 64-handle alignment + `alignment.set` every 4 frames (rebake) | uncapped |
 | `edit-churn` | 300 × `effect.upsert` + 300 × `scene.load`, single leg: resource counts flat, rebuild ms | uncapped |

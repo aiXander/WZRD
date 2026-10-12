@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "projector_resolution": [
+    1376,
+    768
+  ],
+  "layers": [
+    {
+      "id": "ceiling",
+      "mask": "masks/ceiling.png",
+      "tags": [
+        "fabric7"
+      ]
+    },
+    {
+      "id": "fabric_1",
+      "mask": "masks/fabric_1.png",
+      "tags": [
+        "fabric7"
+      ]
+    },
+    {
+      "id": "fabric_2",
+      "mask": "masks/fabric_2.png",
+      "tags": [
+        "fabric7"
+      ]
+    },
+    {
+      "id": "fabric_3",
+      "mask": "masks/fabric_3.png",
+      "tags": [
+        "fabric7"
+      ]
+    },
+    {
+      "id": "fabric_4",
+      "mask": "masks/fabric_4.png",
+      "tags": [
+        "fabric7"
+      ]
+    },
+    {
+      "id": "fabric_5",
+      "mask": "masks/fabric_5.png",
+      "tags": [
+        "fabric7"
+      ]
+    },
+    {
+      "id": "fabric_6",
+      "mask": "masks/fabric_6.png",
+      "tags": [
+        "fabric7"
+      ]
+    }
+  ]
+}

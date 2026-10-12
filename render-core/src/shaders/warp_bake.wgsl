@@ -58,10 +58,14 @@ fn fs_main(in: VsOut) -> @location(0) vec2<f32> {
     let n = bake.counts.x;
     for (var i: u32 = 0u; i < n; i = i + 1u) {
         let pt = bake.points[i];
-        let t = length(d - pt.xy) * pt.z;
-        let f = wendland(t);
-        if (f > 0.0) {
-            src = src + bake.weights[i].xy * f;
+        let v = d - pt.xy;
+        // Outside the support (t >= 1) without the sqrt: most handles miss
+        // most pixels.
+        if (dot(v, v) * pt.z * pt.z < 1.0) {
+            let f = wendland(length(v) * pt.z);
+            if (f > 0.0) {
+                src = src + bake.weights[i].xy * f;
+            }
         }
     }
 

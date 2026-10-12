@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "pack": "../../packs/fabric7",
+  "transport": {
+    "bpm": 120
+  },
+  "bindings": [
+    {
+      "id": "fx_ceiling",
+      "select": { "id": "ceiling" },
+      "effect": "waveWarp",
+      "params": { "image": { "clip": "../../.media/clip_0.mov" } }
+    },
+    {
+      "id": "fx_fabric_1",
+      "select": { "id": "fabric_1" },
+      "effect": "edgeGlow",
+      "params": { "image": { "clip": "../../.media/clip_1.mov" } }
+    },
+    {
+      "id": "fx_fabric_2",
+      "select": { "id": "fabric_2" },
+      "effect": "waveWarp",
+      "params": { "image": { "clip": "../../.media/clip_2.mov" } }
+    },
+    {
+      "id": "fx_fabric_3",
+      "select": { "id": "fabric_3" },
+      "effect": "edgeGlow",
+      "params": { "image": { "clip": "../../.media/clip_3.mov" } }
+    },
+    {
+      "id": "fx_fabric_4",
+      "select": { "id": "fabric_4" },
+      "effect": "waveWarp",
+      "params": { "image": { "clip": "../../.media/clip_0.mov" } }
+    },
+    {
+      "id": "fx_fabric_5",
+      "select": { "id": "fabric_5" },
+      "effect": "edgeGlow",
+      "params": { "image": { "clip": "../../.media/clip_1.mov" } }
+    },
+    {
+      "id": "fx_fabric_6",
+      "select": { "id": "fabric_6" },
+      "effect": "waveWarp",
+      "params": { "image": { "clip": "../../.media/clip_2.mov" } }
+    }
+  ],
+  "post": []
+}

@@ -116,6 +116,13 @@ pub struct LayerGeom {
     pub bbox_uv: [f32; 4],
     /// C4 `source_box` in uv, when the manifest carries a valid one.
     pub source_box_uv: Option<[f32; 4]>,
+    /// Box of every **non-zero** mask texel (uv, max-exclusive) — always
+    /// measured from the mask bytes, never from the manifest, because
+    /// `bbox` is thresholded at 128 and a soft edge reaches past it. The
+    /// compositor scissors the layer's pass to this box (padded for the
+    /// linear mask filter): outside it the mask samples exactly 0. An
+    /// all-zero mask has a zero-area box (the pass draws nothing).
+    pub support_uv: [f32; 4],
 }
 
 impl LayerGeom {
@@ -250,9 +257,11 @@ impl LoadedPack {
                     centroid_uv: [c[0] / pw as f32, c[1] / ph as f32],
                     bbox_uv: box_uv(b, pw, ph),
                     source_box_uv: None,
+                    support_uv: FULL_UV,
                 },
                 _ => geom_from_mask(&atlas[offset..offset + slice_pixels], pw, ph),
             };
+            geom.support_uv = support_uv(&atlas[offset..offset + slice_pixels], pw, ph);
             geom.source_box_uv = match layer.source_box {
                 Some(b) if b[2] > b[0] && b[3] > b[1] => Some(box_uv(b, pw, ph)),
                 // Lenient: a malformed box is an authoring bug, but not one
@@ -522,6 +531,7 @@ fn geom_from_mask(mask: &[u8], width: u32, height: u32) -> LayerGeom {
             centroid_uv: [0.5, 0.5],
             bbox_uv: [0.0, 0.0, 1.0, 1.0],
             source_box_uv: None,
+            support_uv: FULL_UV,
         };
     }
     LayerGeom {
@@ -536,7 +546,38 @@ fn geom_from_mask(mask: &[u8], width: u32, height: u32) -> LayerGeom {
             y1 as f32 / height as f32,
         ],
         source_box_uv: None,
+        support_uv: FULL_UV,
     }
+}
+
+/// The whole canvas in uv — the "no bound known" support.
+pub const FULL_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// Box of every non-zero texel in one mask slice, uv, max-exclusive; a
+/// zero-area box for an all-zero mask. See [`LayerGeom::support_uv`].
+fn support_uv(mask: &[u8], width: u32, height: u32) -> [f32; 4] {
+    let w = width as usize;
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+    for (y, row) in mask.chunks_exact(w).enumerate() {
+        // Rows are mostly zero: find the first/last lit texel, skip the rest.
+        let Some(first) = row.iter().position(|&v| v > 0) else {
+            continue;
+        };
+        let last = row.iter().rposition(|&v| v > 0).unwrap_or(first);
+        x0 = x0.min(first);
+        x1 = x1.max(last + 1);
+        y0 = y0.min(y);
+        y1 = y + 1;
+    }
+    if x0 == usize::MAX {
+        return [0.0; 4];
+    }
+    [
+        x0 as f32 / width as f32,
+        y0 as f32 / height as f32,
+        x1 as f32 / width as f32,
+        y1 as f32 / height as f32,
+    ]
 }
 
 #[cfg(test)]
@@ -583,6 +624,18 @@ mod tests {
         assert_eq!(g.bbox_uv, [0.5, 0.25, 0.75, 0.5]);
         assert!((g.centroid_uv[0] - 0.5).abs() < 1e-6);
         assert!((g.centroid_uv[1] - 0.25).abs() < 1e-6);
+    }
+
+    /// The scissor box counts every non-zero texel, not the >=128 bbox: a
+    /// soft edge past the thresholded bbox must stay inside it.
+    #[test]
+    fn support_covers_soft_edges_and_empty_masks_have_none() {
+        let mut mask = vec![0u8; 8 * 4];
+        mask[1 * 8 + 2] = 255;
+        mask[2 * 8 + 6] = 1; // faint tail outside the >=128 bbox
+        assert_eq!(geom_from_mask(&mask, 8, 4).bbox_uv, [0.25, 0.25, 0.375, 0.5]);
+        assert_eq!(support_uv(&mask, 8, 4), [0.25, 0.25, 0.875, 0.75]);
+        assert_eq!(support_uv(&[0u8; 32], 8, 4), [0.0; 4]);
     }
 
     #[test]

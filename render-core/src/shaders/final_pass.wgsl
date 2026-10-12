@@ -94,13 +94,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 fn shade(uv: vec2<f32>) -> vec4<f32> {
     let inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
 
-    // Sampled unconditionally (the sampler clamps) so the two textureSample
+    // Sampled unconditionally (the sampler clamps) so the textureSample
     // calls stay in uniform control flow — the out-of-bounds decision is
     // applied at the very end instead.
-    let c_live = textureSample(composite_tex, composite_sampler, uv);
-    let c_design = textureSample(design_tex, composite_sampler, uv);
+    var c = textureSample(composite_tex, composite_sampler, uv);
     // §5.6 promote crossfade — 0 outside a fade, ramped 0→1 while promoting.
-    var c = mix(c_live, c_design, uniforms.adjust.z);
+    // The design composite is read only during a fade: a branch on a
+    // uniform keeps the sample in uniform control flow and saves one full
+    // read per output pixel the rest of the time.
+    if (uniforms.adjust.z > 0.0) {
+        let c_design = textureSample(design_tex, composite_sampler, uv);
+        c = mix(c, c_design, uniforms.adjust.z);
+    }
     if (uniforms.pattern.x > 0.5) {
         c = vec4<f32>(
             test_pattern(uv, uniforms.pattern.x, uniforms.pattern.y, uniforms.pattern.z),

@@ -1196,6 +1196,7 @@ impl Core {
                     centroid_uv: [0.5, 0.5],
                     bbox_uv: [0.0, 0.0, 1.0, 1.0],
                     source_box_uv: None,
+                    support_uv: crate::pack::FULL_UV,
                 });
             let identity = LayerIdentity {
                 layer_seed: 0.5,

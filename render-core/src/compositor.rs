@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::drivers::{FrameContext, ParamOverrides, PickRate, ScalarValue};
 use crate::telemetry::DriverRow;
 use crate::effects::{
-    EffectBinding, EffectDef, EffectKind, EffectRegistry, ImagePlacement, InlineEffectSpec,
+    Bounds, EffectBinding, EffectDef, EffectKind, EffectRegistry, ImagePlacement,
+    InlineEffectSpec,
 };
 use crate::gpu::{
     layer_bind_group, FrameStateGpu, GpuContext, ImageEncoding, LayerIdentity, LayerParamsGpu,
@@ -64,6 +65,11 @@ pub struct LayerPass {
     /// rect (uv) and texel encoding — when its binding opened one; `None` =
     /// `sample_image` is transparent.
     pub image: Option<(usize, [f32; 4], ImageEncoding)>,
+    /// Pixel scissor `[x, y, w, h]` on the composite — the layer's mask
+    /// support, padded for the linear mask filter ([`region_scissor`]) —
+    /// or `None` for a full-canvas pass (a [`Bounds::Canvas`] effect). A
+    /// zero-area rect (all-zero mask) draws nothing.
+    pub scissor: Option<[u32; 4]>,
 
     pub layer_buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
@@ -216,6 +222,7 @@ impl PassPlan {
         for binding in &scene.bindings {
             let def = resolve_effect_def(binding, registry)?;
             let (pipeline_key, effect_id) = ensure_pipeline(gpu, &def)?;
+            let bounds = def.bounds;
             let resolved = EffectBinding::from_params(def, &binding.params)
                 .map_err(|e| anyhow!("binding {:?}: {e:#}", binding.id))?;
 
@@ -317,6 +324,14 @@ impl PassPlan {
                     bbox_uv: geom.bbox_uv,
                 };
                 let canvas = (gpu.composite_width, gpu.composite_height);
+                let scissor = match bounds {
+                    Bounds::Region => Some(region_scissor(
+                        geom.support_uv,
+                        (pack.atlas_width, pack.atlas_height),
+                        canvas,
+                    )),
+                    Bounds::Canvas => None,
+                };
                 let pass_image = image.map(|(i, placement, encoding, size)| {
                     (i, image_box(placement, &geom, size, canvas), encoding)
                 });
@@ -366,6 +381,7 @@ impl PassPlan {
                     active: pick_group.is_none(),
                     opacity: 1.0,
                     image: pass_image,
+                    scissor,
                     layer_buffer,
                     bind_group,
                 });
@@ -596,11 +612,24 @@ impl PassPlan {
         });
         // Avoid redundant pipeline switches when consecutive layers share one.
         let mut bound: Option<&str> = None;
+        // Region passes shade only their mask's box (§2.4 output bounds);
+        // the render pass starts with the full-target scissor.
+        let (cw, ch) = (gpu.composite_width, gpu.composite_height);
+        let full = [0, 0, cw, ch];
+        let mut scissor = full;
         for layer in &self.layer_passes {
             if !layer.active || layer.opacity <= 0.0 {
                 // Picked out this cycle (§5.2) — the pass stays in the plan
                 // so re-picking is a flag flip, but it draws nothing. A
                 // faded-out/muted layer likewise costs no GPU work.
+                continue;
+            }
+            let rect = layer.scissor.map_or(full, |[x, y, w, h]| {
+                let (x, y) = (x.min(cw), y.min(ch));
+                [x, y, w.min(cw - x), h.min(ch - y)]
+            });
+            if rect[2] == 0 || rect[3] == 0 {
+                // All-zero mask: nothing to light.
                 continue;
             }
             let pipeline = match gpu.pipeline_cache.get(&layer.pipeline_key) {
@@ -615,6 +644,10 @@ impl PassPlan {
             if bound != Some(layer.pipeline_key.as_str()) {
                 pass.set_pipeline(pipeline);
                 bound = Some(layer.pipeline_key.as_str());
+            }
+            if rect != scissor {
+                pass.set_scissor_rect(rect[0], rect[1], rect[2], rect[3]);
+                scissor = rect;
             }
             pass.set_bind_group(0, &layer.bind_group, &[]);
             pass.draw(0..3, 0..1);
@@ -685,6 +718,31 @@ pub(crate) fn layer_opacity(overrides: &ParamOverrides, binding: &str, any_solo:
         .get(binding, LAYER_OPACITY)
         .map(|v| v.clamp(0.0, 1.0))
         .unwrap_or(1.0)
+}
+
+/// Pixel scissor `[x, y, w, h]` on a `canvas_px` composite for a layer whose
+/// mask is non-zero only inside `support_uv` (on a `mask_px` atlas).
+///
+/// Provably lossless for an effect scaled by its `mask` argument: the
+/// linear mask filter reaches half a texel past the support, so outside
+/// `support ± 1 texel` (+1 composite pixel of rounding slack) every
+/// fragment's mask is exactly 0. Zero-area support → zero-area rect.
+pub(crate) fn region_scissor(support_uv: [f32; 4], mask_px: (u32, u32), canvas_px: (u32, u32)) -> [u32; 4] {
+    let [u0, v0, u1, v1] = support_uv;
+    if u1 <= u0 || v1 <= v0 {
+        return [0, 0, 0, 0];
+    }
+    let axis = |lo: f32, hi: f32, texels: u32, px: u32| -> (u32, u32) {
+        let pad = 1.0 / texels.max(1) as f32;
+        let a = ((lo - pad) * px as f32).floor() - 1.0;
+        let b = ((hi + pad) * px as f32).ceil() + 1.0;
+        let a = a.clamp(0.0, px as f32) as u32;
+        let b = b.clamp(0.0, px as f32) as u32;
+        (a, b.saturating_sub(a))
+    };
+    let (x, w) = axis(u0, u1, mask_px.0, canvas_px.0);
+    let (y, h) = axis(v0, v1, mask_px.1, canvas_px.1);
+    [x, y, w, h]
 }
 
 /// C5 placement rect (uv) for one pass. The target box is the whole canvas,
@@ -921,6 +979,164 @@ pub(crate) mod tests {
         // Wide clip into a tall box → letterboxed vertically.
         let b = contain_uv([0.0, 0.0, 0.5, 1.0], (16, 9), (400, 400));
         assert!(close(b, [0.0, 0.5 - 56.25 / 400.0, 0.5, 0.5 + 56.25 / 400.0]), "{b:?}");
+    }
+
+    /// Read the live composite back (Rgba16Float bytes) after encoding
+    /// `plan`'s composite pass on its own.
+    fn render_composite(gpu: &GpuContext, plan: &PassPlan) -> Vec<u8> {
+        let (w, h) = (gpu.composite_width, gpu.composite_height);
+        let row = w * 8;
+        assert_eq!(row % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT, 0, "pick an aligned test width");
+        let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scissor test readback"),
+            size: (row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        plan.encode_composite(gpu, &mut enc, &gpu.composite_view, None);
+        enc.copy_texture_to_buffer(
+            gpu.composite_texture.as_image_copy(),
+            wgpu::ImageCopyBuffer {
+                buffer: &buf,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        gpu.queue.submit(Some(enc.finish()));
+        buf.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        gpu.device.poll(wgpu::Maintain::Wait);
+        let bytes = buf.slice(..).get_mapped_range().to_vec();
+        bytes
+    }
+
+    /// §2.4 output bounds, proven on every shipped effect: with each
+    /// region pass scissored to its padded mask support the composite is
+    /// **bit-identical** to the same plan drawn full-canvas. Masks cover a
+    /// soft edge with a faint tail past the >=128 bbox, a region touching
+    /// the canvas border, a thin diagonal (low bbox fill) and an all-zero
+    /// mask (its pass is skipped).
+    #[test]
+    fn region_scissor_is_bit_identical_for_every_shipped_effect() {
+        let (w, h) = (128u32, 64u32);
+        let dir = std::env::temp_dir().join(format!("wzrd-scissor-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mask = |name: &str, f: &dyn Fn(f32, f32) -> u8| {
+            image::GrayImage::from_fn(w, h, |x, y| image::Luma([f(x as f32, y as f32)]))
+                .save(dir.join(format!("{name}.png")))
+                .unwrap();
+        };
+        mask("soft", &|x, y| {
+            let d = ((x - 40.0).powi(2) + (y - 24.0).powi(2)).sqrt();
+            if d < 14.0 { (255.0 * (1.0 - d / 14.0)) as u8 + 1 } else if d < 18.0 { 1 } else { 0 }
+        });
+        mask("edge", &|x, y| if x >= 112.0 && y < 20.0 { 255 } else { 0 });
+        mask("diag", &|x, y| if y >= 30.0 && (x - 2.0 * y + 10.0).abs() < 2.0 { 200 } else { 0 });
+        mask("empty", &|_, _| 0);
+        std::fs::write(
+            dir.join("pack.json"),
+            r#"{"version":1,"projector_resolution":[128,64],"layers":[
+                {"id":"soft","mask":"soft.png","tags":["t"]},
+                {"id":"edge","mask":"edge.png","tags":["t"]},
+                {"id":"diag","mask":"diag.png","tags":["t"]},
+                {"id":"empty","mask":"empty.png","tags":["t"]}]}"#,
+        )
+        .unwrap();
+        image::RgbaImage::from_fn(32, 24, |x, y| image::Rgba([(x * 8) as u8, (y * 10) as u8, 180, 200 + y as u8]))
+            .save(dir.join("still.png"))
+            .unwrap();
+        let pack = LoadedPack::load(&dir).unwrap();
+        let Ok(mut gpu) = pollster::block_on(GpuContext::new_offscreen(w, h, None, &pack, false, false)) else {
+            eprintln!("no adapter — skipping");
+            return;
+        };
+        let (audio, sliders, overrides) = (AudioFeatures::new(), SliderBank::new(), ParamOverrides::new());
+        let ctx = FrameContext {
+            elapsed_sec: 1.37,
+            bpm: 120.0,
+            beat_offset: 0.0,
+            audio: &audio,
+            sliders: &sliders,
+            audio_listen: 1.0,
+        };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let hap_q = root.join("tests/fixtures/hap_q.mov");
+        let mut cases: Vec<(EffectRegistry, String, String)> = Vec::new();
+        for fx_dir in [None, Some(root.join("../library/effects")), Some(root.join("examples/effects"))] {
+            let reg = EffectRegistry::new(fx_dir.clone());
+            let mut names: Vec<String> = reg
+                .effects
+                .iter()
+                .filter(|(_, d)| fx_dir.is_none() == matches!(d.kind, EffectKind::BuiltIn { .. }))
+                .map(|(n, _)| n.clone())
+                .collect();
+            names.sort();
+            for n in names {
+                cases.push((EffectRegistry::new(fx_dir.clone()), n.clone(), "still.png".into()));
+                // HAP Q (scaled YCoCg) through the image path, where BC exists.
+                if gpu.bc_supported && matches!(n.as_str(), "edgeGlow" | "waveWarp") {
+                    cases.push((EffectRegistry::new(fx_dir.clone()), n, hap_q.display().to_string()));
+                }
+            }
+        }
+        assert!(cases.len() >= 5 + 15 + 8, "expected every shipped effect, got {}", cases.len());
+
+        let (mut lit, mut bounded) = (0, 0);
+        for (registry, name, clip) in &cases {
+            let def = registry.resolve_named(name).unwrap();
+            let has_image = def.inputs.iter().any(|i| matches!(i, crate::effects::InputSlot::Image { .. }));
+            let params = if has_image {
+                serde_json::json!({ "image": { "clip": clip } })
+            } else {
+                serde_json::json!({})
+            };
+            let scene = SceneFile::parse(
+                &serde_json::json!({
+                    "version": 1, "pack": "pack",
+                    "bindings": [{ "id": "b", "select": { "tag": "t" }, "effect": name, "params": params }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut plan = PassPlan::build(&mut gpu, &pack, &scene, registry, &dir, Carry::Fresh)
+                .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(plan.warnings.is_empty(), "{name}: {:?}", plan.warnings);
+            plan.tick(&gpu, &ctx, &overrides);
+            let scissored = render_composite(&gpu, &plan);
+            let n = plan.layer_passes.iter().filter(|p| p.scissor.is_some()).count();
+            assert!(n == 0 || n == plan.layer_passes.len(), "{name}: bounds are per effect");
+            assert_eq!(n == 0, def.bounds == Bounds::Canvas, "{name}: scissor follows bounds");
+            bounded += (n > 0) as usize;
+            for p in &mut plan.layer_passes {
+                p.scissor = None;
+            }
+            let full = render_composite(&gpu, &plan);
+            let diff = scissored.chunks(2).zip(full.chunks(2)).filter(|(a, b)| a != b).count();
+            assert_eq!(diff, 0, "{name} ({clip}): {diff} channels differ between scissored and full-canvas");
+            lit += full.iter().any(|&b| b != 0) as usize;
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        // Not vacuous: nearly everything drew light, nearly everything is bounded.
+        assert!(lit * 4 >= cases.len() * 3, "only {lit}/{} effects lit any pixel", cases.len());
+        assert!(bounded + 1 >= cases.len(), "only {bounded}/{} effects region-bounded", cases.len());
+    }
+
+    #[test]
+    fn region_scissor_pads_for_the_filter_and_clamps() {
+        // Same-size atlas: support texels [10, 20) x [4, 8) → ±2 px.
+        let s = region_scissor([10.0 / 64.0, 4.0 / 32.0, 20.0 / 64.0, 8.0 / 32.0], (64, 32), (64, 32));
+        assert_eq!(s, [8, 2, 14, 8]);
+        // Touching the canvas edge clamps instead of going negative / past.
+        assert_eq!(region_scissor([0.0, 0.0, 1.0, 1.0], (64, 32), (64, 32)), [0, 0, 64, 32]);
+        // Empty support → zero-area rect (the pass is skipped).
+        assert_eq!(region_scissor([0.0; 4], (64, 32), (64, 32)), [0, 0, 0, 0]);
+        // A 2x-upscaled composite pads by one *mask* texel = 2 px, plus 1.
+        let s = region_scissor([0.5, 0.5, 0.75, 0.75], (64, 32), (128, 64));
+        assert_eq!(s, [61, 29, 38, 22]);
     }
 
     #[test]

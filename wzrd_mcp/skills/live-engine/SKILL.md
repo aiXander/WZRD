@@ -108,7 +108,10 @@ phase to desync copies across layers. Descriptor:
 add `{"name": "image", "type": "image"}` for a clip effect, and follow the
 library's conventions: read the clip through one `fx_in(uv)` helper, return
 colour × the `mask` argument × a `gain` dial, and black stays black (no light). Copy the nearest
-library effect as a starting point.
+library effect as a starting point. The engine clips each pass to its region's
+mask box, so light outside the region is cut; an effect that must glow past it
+declares `"bounds": "canvas"` in the descriptor (calling `sample_mask` also
+makes it full-canvas, and slower).
 
 Iterate syntax with `validate_wgsl` (cheap, line-mapped). The probe only runs
 when the design scene binds the effect, so bind it first to see a verdict and

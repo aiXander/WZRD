@@ -140,7 +140,8 @@ pub struct LayerParamsGpu {
     pub params_c: [[f32; 4]; MAX_COLOR_PARAMS],
     /// C5 image placement rect, uv (min_x, min_y, max_x, max_y).
     pub image_box: [f32; 4],
-    /// (bound, encoding, _, _) — see `ImageEncoding`.
+    /// (bound, encoding, 1 / box width, 1 / box height) — see
+    /// `ImageEncoding`; the reciprocals spare `sample_image` a divide per tap.
     pub image_meta: [f32; 4],
 }
 
@@ -179,7 +180,13 @@ impl LayerParamsGpu {
     /// Bind this pass's image: placement rect (uv) + texel encoding.
     pub fn with_image(mut self, image_box: [f32; 4], encoding: ImageEncoding) -> Self {
         self.image_box = image_box;
-        self.image_meta = [1.0, encoding.as_f32(), 0.0, 0.0];
+        let [x0, y0, x1, y1] = image_box;
+        self.image_meta = [
+            1.0,
+            encoding.as_f32(),
+            1.0 / (x1 - x0).max(1e-6),
+            1.0 / (y1 - y0).max(1e-6),
+        ];
         self
     }
 }

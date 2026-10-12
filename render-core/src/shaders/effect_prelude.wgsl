@@ -53,7 +53,7 @@ struct LayerParams {
     // "region", the whole canvas under "canvas".
     image_box: vec4<f32>,
     // (bound 0|1, encoding 0 = sRGB-decoded RGBA (straight alpha) | 1 =
-    // scaled YCoCg (HAP Q), _, _).
+    // scaled YCoCg (HAP Q), 1 / image_box width, 1 / image_box height).
     image_meta: vec4<f32>,
 };
 
@@ -97,9 +97,13 @@ fn layer_bbox() -> vec4<f32> { return layer.bbox_uv; }
 
 // Re-sample this layer's mask at an arbitrary UV. Useful for spatial
 // effects (wobble, displacement) that need to test whether a *displaced*
-// pixel falls inside the semantic region.
+// pixel falls inside the semantic region. Calling it makes the effect
+// full-canvas (§2.4 output bounds) unless its descriptor declares
+// `"bounds": "region"`. Explicit LOD (the atlas has one mip — identical
+// result), so it is legal in non-uniform control flow and an effect may
+// early-out on `mask == 0`.
 fn sample_mask(uv: vec2<f32>) -> f32 {
-    return textureSample(mask_atlas, mask_sampler, uv, i32(layer.slice)).r;
+    return textureSampleLevel(mask_atlas, mask_sampler, uv, i32(layer.slice), 0.0).r;
 }
 
 // Sample the binding's `image` input at canvas uv. Returns premultiplied
@@ -108,7 +112,7 @@ fn sample_mask(uv: vec2<f32>) -> f32 {
 // control flow — call it from any branch, at any displaced uv.
 fn sample_image(uv: vec2<f32>) -> vec4<f32> {
     let b = layer.image_box;
-    let local = (uv - b.xy) / max(b.zw - b.xy, vec2<f32>(1e-6));
+    let local = (uv - b.xy) * layer.image_meta.zw;
     let inside = all(local >= vec2<f32>(0.0)) && all(local <= vec2<f32>(1.0));
     if (layer.image_meta.x < 0.5 || !inside) {
         return vec4<f32>(0.0);

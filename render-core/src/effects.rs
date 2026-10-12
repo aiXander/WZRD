@@ -197,6 +197,106 @@ pub struct EffectDef {
     pub name: String,
     pub kind: EffectKind,
     pub inputs: Vec<InputSlot>,
+    /// Where the effect may emit light — decides whether the compositor
+    /// scissors its passes to the layer's mask support (§2.4).
+    pub bounds: Bounds,
+}
+
+/// An effect's spatial reach (§2.4 "output bounds"). The compositor clips a
+/// [`Bounds::Region`] pass to its layer's non-zero mask box (padded for the
+/// linear filter) — invisible for any effect whose output is scaled by the
+/// `mask` argument, since outside that box `mask` is exactly 0, and a large
+/// fragment saving for small regions. [`Bounds::Canvas`] passes shade the
+/// whole canvas, as every pass did before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bounds {
+    Region,
+    Canvas,
+}
+
+impl Bounds {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Bounds::Region => "region",
+            Bounds::Canvas => "canvas",
+        }
+    }
+
+    /// Descriptor / inline `"bounds"` override, else inferred from the
+    /// source by [`Bounds::infer`].
+    fn resolve(declared: Option<&str>, wgsl: &str) -> Result<Self> {
+        match declared {
+            None => Ok(Self::infer(wgsl)),
+            Some("region") => Ok(Bounds::Region),
+            Some("canvas") => Ok(Bounds::Canvas),
+            Some(other) => bail!("\"bounds\" must be \"region\" or \"canvas\", got {other:?}"),
+        }
+    }
+
+    /// The conservative inference rule for an undeclared user effect:
+    /// `Canvas` when the body reads the mask anywhere but through its
+    /// `mask` argument (`sample_mask(…)` / `mask_atlas` — e.g. a
+    /// displaced-edge wobble lights pixels whose own mask is 0), or never
+    /// uses the `mask` argument at all (a deliberate full-canvas effect);
+    /// `Region` otherwise. A body that fails to parse is `Canvas` (its
+    /// compile fails on its own).
+    pub fn infer(wgsl: &str) -> Self {
+        let code = strip_wgsl_comments(wgsl);
+        if code.contains("sample_mask") || code.contains("mask_atlas") || !mask_arg_used(wgsl) {
+            Bounds::Canvas
+        } else {
+            Bounds::Region
+        }
+    }
+}
+
+/// Does `fn effect`'s second argument feed anything? naga's analyzer
+/// counts every expression/statement use of the argument expression.
+fn mask_arg_used(body: &str) -> bool {
+    let composed = crate::gpu::compose_shader(body);
+    let Ok(module) = naga::front::wgsl::parse_str(&composed) else {
+        return false;
+    };
+    let Ok(info) = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module) else {
+        return false;
+    };
+    let Some((handle, func)) = module
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_deref() == Some("effect"))
+    else {
+        return false;
+    };
+    let fi = &info[handle];
+    let used = func
+        .expressions
+        .iter()
+        .any(|(h, e)| matches!(e, naga::Expression::FunctionArgument(1)) && fi[h].ref_count > 0);
+    used
+}
+
+/// `//` and `/* */` comments blanked, so a comment that merely mentions
+/// `sample_mask` doesn't count as a call.
+fn strip_wgsl_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("//") {
+            rest = r.find('\n').map_or("", |i| &r[i..]);
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            rest = r.find("*/").map_or("", |i| &r[i + 2..]);
+            out.push(' ');
+        } else {
+            let c = rest.chars().next().unwrap_or(' ');
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +434,9 @@ struct DescriptorFile {
     name: Option<String>,
     #[serde(default)]
     inputs: Vec<DescriptorInput>,
+    /// `"region"` | `"canvas"` — see [`Bounds`]; absent = inferred.
+    #[serde(default)]
+    bounds: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -540,6 +643,7 @@ impl EffectRegistry {
     pub fn resolve_inline(&self, spec: &InlineEffectSpec) -> Result<EffectDef> {
         let pipeline_key = format!("inline:{}", short_hash(&spec.wgsl));
         let inputs = parse_inputs(spec.inputs.clone())?;
+        let bounds = Bounds::resolve(spec.bounds.as_deref(), &spec.wgsl)?;
         Ok(EffectDef {
             name: spec.name.clone().unwrap_or_else(|| pipeline_key.clone()),
             kind: EffectKind::User {
@@ -548,6 +652,7 @@ impl EffectRegistry {
                 source_path: None,
             },
             inputs,
+            bounds,
         })
     }
 }
@@ -565,6 +670,9 @@ pub struct InlineEffectSpec {
     pub name: Option<String>,
     #[serde(default)]
     inputs: Vec<DescriptorInput>,
+    /// `"region"` | `"canvas"` — see [`Bounds`]; absent = inferred.
+    #[serde(default)]
+    pub bounds: Option<String>,
 }
 
 fn describe_def(def: &EffectDef) -> Value {
@@ -574,6 +682,7 @@ fn describe_def(def: &EffectDef) -> Value {
             EffectKind::BuiltIn { .. } => "builtin",
             EffectKind::User { .. } => "user",
         },
+        "bounds": def.bounds.as_str(),
         "inputs": def.inputs.iter().map(InputSlot::describe).collect::<Vec<_>>(),
     })
 }
@@ -607,15 +716,17 @@ fn combined_mtime(shader: &Path, descriptor: &Path) -> Option<SystemTime> {
 fn load_user_effect(name: &str, shader_path: &Path, descriptor_path: &Path) -> Result<EffectDef> {
     let wgsl = fs::read_to_string(shader_path)
         .with_context(|| format!("reading {}", shader_path.display()))?;
-    let inputs = if descriptor_path.exists() {
+    let (inputs, declared_bounds) = if descriptor_path.exists() {
         let raw = fs::read_to_string(descriptor_path)
             .with_context(|| format!("reading {}", descriptor_path.display()))?;
         let parsed: DescriptorFile = serde_json::from_str(&raw)
             .with_context(|| format!("parsing {}", descriptor_path.display()))?;
-        parse_inputs(parsed.inputs)?
+        (parse_inputs(parsed.inputs)?, parsed.bounds)
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
+    let bounds = Bounds::resolve(declared_bounds.as_deref(), &wgsl)
+        .with_context(|| format!("{}", descriptor_path.display()))?;
     Ok(EffectDef {
         name: name.to_string(),
         kind: EffectKind::User {
@@ -626,6 +737,7 @@ fn load_user_effect(name: &str, shader_path: &Path, descriptor_path: &Path) -> R
             source_path: Some(shader_path.to_path_buf()),
         },
         inputs,
+        bounds,
     })
 }
 
@@ -642,11 +754,13 @@ fn built_in_defs() -> Vec<EffectDef> {
         EffectDef {
             name: "tint".into(),
             kind: EffectKind::BuiltIn { effect_id: TINT },
+            bounds: Bounds::Region,
             inputs: vec![color("color", [1.0, 1.0, 1.0, 1.0])],
         },
         EffectDef {
             name: "hueCycle".into(),
             kind: EffectKind::BuiltIn { effect_id: HUE_CYCLE },
+            bounds: Bounds::Region,
             // params_f[0] = phase (driver-supplied, typically clock.bars / clock.phase),
             // params_c[0..3] = palette stops (4-stop palette).
             inputs: vec![
@@ -664,6 +778,7 @@ fn built_in_defs() -> Vec<EffectDef> {
         EffectDef {
             name: "flash".into(),
             kind: EffectKind::BuiltIn { effect_id: FLASH },
+            bounds: Bounds::Region,
             // params_f[0] = envelope (typically audio.onset),
             // params_f[1] = base intensity (low-level always-on tint),
             // params_c[0] = flash color.
@@ -684,6 +799,8 @@ fn built_in_defs() -> Vec<EffectDef> {
         EffectDef {
             name: "wobble".into(),
             kind: EffectKind::BuiltIn { effect_id: WOBBLE },
+            // Reads the mask at a displaced uv: its edge leaves the region.
+            bounds: Bounds::Canvas,
             // params_f[0] = amplitude (uv displacement, in normalized units),
             // params_f[1] = frequency,
             // params_f[2] = time (driver),
@@ -713,6 +830,7 @@ fn built_in_defs() -> Vec<EffectDef> {
         EffectDef {
             name: "videoClip".into(),
             kind: EffectKind::BuiltIn { effect_id: VIDEO_CLIP },
+            bounds: Bounds::Region,
             // C5 reference clip player: the `image` input (HAP clip or still)
             // cut by the mask, params_f[0] = gain.
             inputs: vec![
@@ -834,6 +952,33 @@ mod tests {
         ]))
         .unwrap();
         assert!(parse_inputs(two).is_err());
+    }
+
+    /// §2.4 output bounds inference: only a body that scales by its own
+    /// `mask` argument (and reads the mask nowhere else) is clipped.
+    #[test]
+    fn bounds_inference_is_conservative() {
+        let fx = |body: &str| format!("fn effect(uv: vec2<f32>, m: f32) -> vec4<f32> {{ {body} }}");
+        assert_eq!(Bounds::infer(&fx("return vec4<f32>(uv, 0.0, 1.0) * m;")), Bounds::Region);
+        // Mentioning sample_mask in a comment doesn't count.
+        assert_eq!(Bounds::infer(&fx("// sample_mask(uv)\nreturn vec4<f32>(m);")), Bounds::Region);
+        // Displaced mask read, direct atlas read, mask ignored, unparseable.
+        assert_eq!(Bounds::infer(&fx("return vec4<f32>(sample_mask(uv + 0.1) * m);")), Bounds::Canvas);
+        assert_eq!(
+            Bounds::infer(&fx("return textureSampleLevel(mask_atlas, mask_sampler, uv, 0, 0.0) * m;")),
+            Bounds::Canvas
+        );
+        assert_eq!(Bounds::infer(&fx("return vec4<f32>(uv, 0.0, 1.0);")), Bounds::Canvas);
+        assert_eq!(Bounds::infer("fn effect("), Bounds::Canvas);
+        // Declared wins either way; junk is an error.
+        assert_eq!(Bounds::resolve(Some("canvas"), &fx("return vec4<f32>(m);")).unwrap(), Bounds::Canvas);
+        assert_eq!(Bounds::resolve(Some("region"), &fx("return vec4<f32>(1.0);")).unwrap(), Bounds::Region);
+        assert!(Bounds::resolve(Some("bbox"), "").is_err());
+        // Built-ins: only wobble (displaced mask) shades the canvas.
+        let r = EffectRegistry::new(None);
+        for (name, b) in [("tint", Bounds::Region), ("videoClip", Bounds::Region), ("wobble", Bounds::Canvas)] {
+            assert_eq!(r.resolve_named(name).unwrap().bounds, b, "{name}");
+        }
     }
 
     #[test]
