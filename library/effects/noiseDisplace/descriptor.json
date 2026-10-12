@@ -1,0 +1,12 @@
+{
+  "name": "noiseDisplace",
+  "description": "Displaces the clip by two drifting smooth-noise fields (liquid wobble).",
+  "audio": "amount (audio.band low, range ~[0.01, 0.06])",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "amount", "type": "float", "default": 0.02, "min": 0, "max": 0.15, "step": 0.001 },
+    { "name": "scale", "type": "float", "default": 4.0, "min": 0.5, "max": 24, "step": 0.1 },
+    { "name": "speed", "type": "float", "default": 0.35, "min": 0, "max": 3, "step": 0.01, "unit": "cells/s" },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 }
+  ]
+}

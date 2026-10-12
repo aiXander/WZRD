@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1 + P4 + P3 done. Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1 + P4 + P3 done, F1 built (fps/flash/preview gates open). Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -99,7 +99,8 @@ open is a per-binding warning, not a load error. Contract now in
 **C6 — global library layout** (D16): `library/effects/<name>/{shader.wgsl,
 descriptor.json, preview.jpg}`, `library/recipes/<name>/{recipe.json,
 style images, preview.jpg}`, `library/midi/<name>.midi.json`. Projects get
-copies, never links.
+copies, never links. The effects half landed with F1 — conventions and
+catalog in [effects-library.md](../reference/effects-library.md).
 
 ## Work packages
 
@@ -246,18 +247,18 @@ thumbnails written by the MCP — landed 2026-10-10) land: one `texture_flow(reg
 from an external Claude session, then click + T. Fixtures:
 `uv run python wzrd-app/scripts/fixture_projects.py`.
 
-### F1 — Seed clip effects (D14)
+### F1 — Seed clip effects (D14) — built 2026-10-12, screen gates open
 
-FX (a WGSL-authoring agent with the engine running) · needs E1 step b ·
-`library/effects/` (C6), copied into the gig project's `effects/`. The ten
-effects in D14, each a clip effect: declares the `image` input and reads it
-through `sample_image` with its own uv/colour work. Self-contained WGSL — the
-`#import` helpers are post-gig, and toolbox phase 2 re-cuts these as chain
-filters (a mechanical `sample_image` → `sample_prev` swap). **Gate per
-effect:** probe green, declared min/max on every dial, seven clips + the
-effect on each at 60 fps on the M2, and `check_frames`'s flash-rate check
-passes at default dials (strobe gate included — its default must be safe
-for a lying-down audience).
+15 effects in `library/effects/` (the ten from D14 plus heat, waveWarp,
+dither, vignette, transform from Xander's Resolume set), copied into the
+fixture projects by `fixture_projects.py`. Gates 1–2 passed for all 15
+(naga + probe green via `effect.upsert`, 2.5–3.1 ms predicted; min/max on
+every dial). **Still open:** gates 3–5 — seven clips at 60 fps from `perf`,
+`check_frames` flash rate on a 60 fps recording, a real `preview.jpg` —
+need the engine window in front for ~12 min (`scripts/fx_gate.py run` /
+`preview`; the `preview` channel's 15 fps is too slow for the flash check).
+Conventions, catalog and gate method:
+[effects-library.md](../reference/effects-library.md).
 
 ### P7 — Style recipes
 

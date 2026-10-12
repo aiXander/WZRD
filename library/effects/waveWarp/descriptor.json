@@ -1,0 +1,13 @@
+{
+  "name": "waveWarp",
+  "description": "Travelling sine waves ripple the clip; angle turns the wave fronts.",
+  "audio": "amp (audio.band low, range ~[0.005, 0.04])",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "amp", "type": "float", "default": 0.012, "min": 0, "max": 0.1, "step": 0.001 },
+    { "name": "freq", "type": "float", "default": 5.0, "min": 0.5, "max": 40, "step": 0.1 },
+    { "name": "speed", "type": "float", "default": 1.0, "min": -8, "max": 8, "step": 0.05, "unit": "waves/bar" },
+    { "name": "angle", "type": "float", "default": 0.0, "min": 0, "max": 1, "step": 0.01, "unit": "turns" },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 }
+  ]
+}

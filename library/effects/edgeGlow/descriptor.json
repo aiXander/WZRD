@@ -1,0 +1,14 @@
+{
+  "name": "edgeGlow",
+  "description": "Sobel outlines of the clip, lit in the clip's own colour (or a tint); flat areas go dark, fill lets some clip through.",
+  "audio": "boost (audio.band high, range ~[2, 8])",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "width", "type": "float", "default": 1.5, "min": 0.5, "max": 6, "step": 0.1, "unit": "px" },
+    { "name": "boost", "type": "float", "default": 3.0, "min": 0, "max": 12, "step": 0.1 },
+    { "name": "fill", "type": "float", "default": 0.12, "min": 0, "max": 1, "step": 0.01 },
+    { "name": "colorize", "type": "float", "default": 0.0, "min": 0, "max": 1, "step": 0.01 },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 },
+    { "name": "tint", "type": "color", "default": "#7fd8ff" }
+  ]
+}

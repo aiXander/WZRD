@@ -1,0 +1,12 @@
+{
+  "name": "posterize",
+  "description": "Quantizes colour into a few flat bands (perceptually even); gamma biases the bands toward dark or light.",
+  "audio": "levels (audio.onset low, range ~[8, 3])",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "levels", "type": "float", "default": 4, "min": 2, "max": 16, "step": 1 },
+    { "name": "gamma", "type": "float", "default": 1.0, "min": 0.4, "max": 2.5, "step": 0.01 },
+    { "name": "amount", "type": "float", "default": 1.0, "min": 0, "max": 1, "step": 0.01 },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 }
+  ]
+}

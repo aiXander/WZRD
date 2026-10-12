@@ -1,0 +1,12 @@
+{
+  "name": "lumaKey",
+  "description": "Keeps only the clip's bright parts (soft threshold on luma); kills a lifted dark floor. invert=1 keeps the dark parts.",
+  "audio": "threshold (audio.band low, range ~[0.5, 0.15] — a hit opens more of the clip)",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "threshold", "type": "float", "default": 0.3, "min": 0, "max": 1, "step": 0.01 },
+    { "name": "soft", "type": "float", "default": 0.12, "min": 0.001, "max": 0.5, "step": 0.005 },
+    { "name": "invert", "type": "float", "default": 0, "min": 0, "max": 1, "step": 1 },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 }
+  ]
+}

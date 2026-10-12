@@ -1,0 +1,12 @@
+{
+  "name": "dither",
+  "description": "Ordered Bayer dither into a few levels per channel (or mono), chunky cells; dark areas go fully black.",
+  "audio": "size (audio.band low, range ~[2, 6])",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "size", "type": "float", "default": 3, "min": 1, "max": 16, "step": 1, "unit": "px" },
+    { "name": "levels", "type": "float", "default": 2, "min": 2, "max": 8, "step": 1 },
+    { "name": "mono", "type": "float", "default": 0, "min": 0, "max": 1, "step": 1 },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 }
+  ]
+}

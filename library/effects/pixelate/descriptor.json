@@ -1,0 +1,11 @@
+{
+  "name": "pixelate",
+  "description": "Big square pixels anchored on the clip box; dot rounds them into LED dots with dark gaps.",
+  "audio": "size (audio.band low, range ~[8, 40])",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "size", "type": "float", "default": 14, "min": 2, "max": 128, "step": 1, "unit": "px" },
+    { "name": "dot", "type": "float", "default": 0.0, "min": 0, "max": 1, "step": 0.01 },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 }
+  ]
+}

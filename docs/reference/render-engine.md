@@ -447,7 +447,8 @@ binding's C5 param (§2.1) supplies the texture. WGSL reads it with
 **`sample_image(uv) -> vec4<f32>`**: canvas uv in, premultiplied RGBA out,
 transparent outside the placement rect and when nothing is bound. It
 samples with an explicit LOD, so it is legal in non-uniform control flow and
-at displaced uvs (the seed clip effects lean on that). Plumbing, for anyone
+at displaced uvs (the library clip effects lean on that — their catalog and
+authoring conventions: [effects-library.md](effects-library.md)). Plumbing, for anyone
 touching it:
 
 - **Slot:** group 0, binding 4 (`texture_2d<f32>`) + 5 (sampler), in the
@@ -1127,6 +1128,13 @@ Ranked; none currently show-stopping at 5–20 layers.
    capture frames (~15 fps) whenever a `preview` subscriber exists (the
    webview's Prepare underlay). Fix candidates: `[profile.dev.package."*"]
    opt-level` in `src-tauri`, or encode off-thread.
+11. **The §2.6 probe renders clip effects without their clip** (found by
+   gig F1, 2026-10-12). `probe.rs` builds each item's bind group with no
+   image (`layer_bind_group(…, None)`), so an effect with an `image` input
+   samples the 1×1 transparent dummy: its thumbnail is always black and
+   `predicted_p95_ms` leaves out the real texture reads. Compile + timing
+   of the ALU work are still real. Fix: bind the binding's image (or a
+   representative still) in probe items.
 
 **Latent safety/scaling risks (from v1 §9 — not yet bitten at 5–20 layers):**
 - **Pathological user-WGSL.** `naga` catches syntax/type errors, but an

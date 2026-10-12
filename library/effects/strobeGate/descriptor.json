@@ -1,0 +1,14 @@
+{
+  "name": "strobeGate",
+  "description": "Beat-synced on/off gate with soft edges. Rate is hard-capped at `limit` cycles/s (max 2.5) for a lying-down audience; defaults gate once per two beats to 15 % light.",
+  "audio": "depth (audio.band low, range ~[0.3, 0.9]) — never bind rate to audio",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "rate", "type": "float", "default": 0.5, "min": 0.125, "max": 4, "step": 0.125, "unit": "cycles/beat" },
+    { "name": "duty", "type": "float", "default": 0.5, "min": 0.05, "max": 0.95, "step": 0.01 },
+    { "name": "depth", "type": "float", "default": 0.85, "min": 0, "max": 1, "step": 0.01 },
+    { "name": "soft", "type": "float", "default": 0.25, "min": 0, "max": 0.5, "step": 0.01 },
+    { "name": "limit", "type": "float", "default": 2.0, "min": 0.25, "max": 2.5, "step": 0.05, "unit": "cycles/s" },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 }
+  ]
+}

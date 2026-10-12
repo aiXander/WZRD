@@ -1,0 +1,12 @@
+{
+  "name": "hueShift",
+  "description": "Rotates the clip's hues (offset + slow cycle per bar) and sets saturation; black stays black.",
+  "audio": "shift (audio.band mid, range ~[0, 0.3])",
+  "inputs": [
+    { "name": "image", "type": "image" },
+    { "name": "shift", "type": "float", "default": 0.0, "min": 0, "max": 1, "step": 0.005, "unit": "turns" },
+    { "name": "speed", "type": "float", "default": 0.0625, "min": -1, "max": 1, "step": 0.005, "unit": "turns/bar" },
+    { "name": "saturation", "type": "float", "default": 1.2, "min": 0, "max": 2.5, "step": 0.01 },
+    { "name": "gain", "type": "float", "default": 1.0, "min": 0, "max": 2, "step": 0.01 }
+  ]
+}

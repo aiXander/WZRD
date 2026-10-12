@@ -6,7 +6,9 @@ example pack from `python test.py layerpack`) with a few clips in
 `generated/` following the gig plan's contracts: C3 clip files
 (`<stem>.mp4`, HAP `<stem>.mov`, `<stem>.thumb.jpg`) and C2 provenance
 sidecars (`<stem>.mp4.meta.json`, `<stem>.mov.meta.json`). One clip has no
-region (the "unassigned" row), one has no thumbnail (placeholder).
+region (the "unassigned" row), one has no thumbnail (placeholder). Every
+library clip effect (`library/effects/`, gig plan C6) is copied into the
+project's `effects/` — a copy, never a link, as a real project gets them.
 
     uv run python wzrd-app/scripts/fixture_projects.py              # (re)build both
     uv run python wzrd-app/scripts/fixture_projects.py --add-clip fixture-a --region left_tower
@@ -30,6 +32,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 PACK_SRC = REPO / "test_results" / "layerpack" / "pack"
+LIBRARY_FX = REPO / "library" / "effects"
 H264 = "h264_videotoolbox" if sys.platform == "darwin" else "libx264"
 
 SCENES = {
@@ -112,6 +115,7 @@ def build(name: str, spec: dict) -> None:
     if project.exists():
         shutil.rmtree(project)
     shutil.copytree(PACK_SRC, project / "packs" / "main")
+    shutil.copytree(LIBRARY_FX, project / "effects")
     scene = {"version": 1, "pack": "packs/main", "transport": {"bpm": spec["bpm"]},
              "bindings": spec["bindings"], "post": []}
     (project / "scene.json").write_text(json.dumps(scene, indent=2))
