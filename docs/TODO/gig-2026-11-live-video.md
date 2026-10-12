@@ -1,6 +1,6 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
-> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1 + P4 + P3 done, F1 built (fps/flash/preview gates open). Settled with Xander in a
+> **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1–P6 done, F1 built (fps/flash/preview gates open), P7 + S1 built 2026-10-12 (their real gates open — need venue photos + paid renders). Left: E2, the open gates. Settled with Xander in a
 > grilling session on 2026-10-10 (replacing the earlier "VJ agent — missing
 > tools" proposal; git history has it), extended the same day (D12–D14), then
 > cut into hand-off **work packages** with the cross-lane **contracts** pinned
@@ -100,7 +100,10 @@ open is a per-binding warning, not a load error. Contract now in
 descriptor.json, preview.jpg}`, `library/recipes/<name>/{recipe.json,
 style images, preview.jpg}`, `library/midi/<name>.midi.json`. Projects get
 copies, never links. The effects half landed with F1 — conventions and
-catalog in [effects-library.md](../reference/effects-library.md).
+catalog in [effects-library.md](../reference/effects-library.md); the
+recipes half with P7 — `recipe.json` shape and merge rules in
+[mcp-server.md](../reference/mcp-server.md) "Style recipes". `midi/` is
+still only this line.
 
 ## Work packages
 
@@ -260,30 +263,35 @@ need the engine window in front, so they run as block B1 of
 Conventions, catalog and gate method:
 [effects-library.md](../reference/effects-library.md).
 
-### P7 — Style recipes
+### P7 — Style recipes — built 2026-10-12, real gate open
 
-PY · needs P3 · `library/recipes/` (C6): one folder per recipe —
-`recipe.json` (TextureFlow args, prompt, notes, when to use), style images,
-`preview.jpg`. Hand-curated and agent-saved recipes share the folder. Tools:
-`list_recipes` (compact table), `save_recipe(from_clip=…)` (from the clip's
-sidecar), a `recipe` arg on `texture_flow`. **Gate:** the agent builds a
-20-clip library from one recipe set.
+`list_recipes`, `save_recipe(from_clip=…)` (walks the clip's sidecar chain
+to the `texture_flow` call; style images downscaled to 768 px so they're
+committed) and `texture_flow(recipe=…)` (recipe args as defaults, caller
+wins; refuses a shaped recipe without `control_input`). Verified in-process
+with Modal stubbed: save from a `to_hap` `.mov`, list, merge, sidecar
+round-trip, refusals. Seeded with one demo recipe, `tree-of-life` (the
+TextureFlow smoke render) — `projects/` had no real TextureFlow renders to
+seed from, so **seed real recipes from the first venue drafts** (≈ 10-24).
+See [mcp-server.md](../reference/mcp-server.md) "Style recipes".
 
-### S1 — Skills
+**Still open — the gate:** the agent builds a 20-clip library from one
+recipe set (paid renders; run it with the venue photos).
 
-SKILL · needs everything above that it names · `wzrd_mcp/skills/`. A new
-**on-site run sheet** workflow skill (photos → canvas → regions → pack →
-library from recipes → show checklist: warm GPU, flash/haze checks); the
-`textureflow` skill points at recipes, `region=` and `check_frames`; the
-`live-engine` skill teaches C5 clip bindings and the `image` input.
-Also teach the **region story** flow (Xander, 2026-10-10): a story on one
-oddly shaped region (a tall pillar) = keyframes from that region's
-`region_surface_image` with `aspect_ratio="auto"`, interpolated with the
-video model at its nearest aspect, `region=` on every call, then placed in
-the region's `source_box` (engine, C5 contain-fit) or `reproject_video`.
-The plumbing lands with P1/P3; only the skill text is missing.
-**Gate:** a cold Claude session, given only the venue photos, follows the
-run sheet to a playable project without being told tool names.
+### S1 — Skills — built 2026-10-12, real gate open
+
+New workflow skill `run-sheet` (venue photos → canvas → regions → pack →
+effects copied in → clip library from recipes with drafts + `check_frames`
+→ show checklist); `textureflow` teaches recipes, `region=`,
+`check_frames`, the HAP clip; `live-engine` teaches C5 clip bindings,
+`sample_image` and the 15-effect library; `region-animation` routes region
+clips to the engine and gained "A story on one region". `to_hap` got a
+`region=` arg on the way (a stitched story loses its region). See
+[mcp-server.md](../reference/mcp-server.md) "Skills".
+
+**Still open — the gate:** a cold Claude session, given only the venue
+photos, follows the run sheet to a playable project without being told
+tool names (paid calls; run with the venue photos).
 
 ### Optional — MIDI controller
 
@@ -292,8 +300,7 @@ APP, after A2 · only if weeks 1–3 landed on time. Spec:
 
 ## If something slips, cut in this order
 
-MIDI, the recipe tools (the agent can read a recipe folder without
-dedicated tools), seed effects beyond the first four, the probation window.
+MIDI, seed effects beyond the first four, the probation window.
 (The project switcher and the "new from agent" strip already landed.) The
 engine video path, the aspect fix, the starter scene and the clip grid
 can't slip.

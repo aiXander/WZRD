@@ -1,0 +1,7 @@
+# Recipes stay small (D16): recipe.json, downscaled style images, preview.jpg.
+# Preview clips and full-size renders live in projects, never here.
+*.mp4
+*.mov
+*.webm
+*.gif
+.*.tmp/

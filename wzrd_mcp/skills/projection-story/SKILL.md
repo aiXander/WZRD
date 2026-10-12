@@ -39,6 +39,9 @@ You need ONE good dark surface image, aligned to the projector, at the locked
 aspect ratio. If the user only has raw photos, run skill `surface-prep` first.
 This image is reference `image_1` in every keyframe call and the background for
 subtraction later.
+A story confined to one region of a segmented surface (a pillar, one fabric)
+uses that region's crop instead: skill `region-animation`, "A story on one
+region".
 
 ## 3. Keyframes
 

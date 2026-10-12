@@ -239,7 +239,8 @@ def _source_region(video: str) -> dict:
 
 
 @tool(title="Video to HAP clip", tags={"content", "engine"}, idempotent=True)
-async def to_hap(video: str, codec: str = "hap", ctx: Optional[Context] = None) -> dict:
+async def to_hap(video: str, codec: str = "hap", region: Optional[str] = None,
+                 ctx: Optional[Context] = None) -> dict:
     """Make a video playable by the engine: a HAP .mov + 320 px thumbnail in the project's generated/ (the clip grid picks it up).
 
     texture_flow and kling_* already do this for their own renders
@@ -250,10 +251,14 @@ async def to_hap(video: str, codec: str = "hap", ctx: Optional[Context] = None) 
     Args:
         video: Path or URL of the source video.
         codec: "hap" (default, smallest), "hap_q" (better colour, ~2x size) or "hap_alpha".
+        region: Pack layer id the clip is for, when the source doesn't record one (a stitched or subtracted video) — files it in that region's clip-grid row.
     """
+    from .provenance import region_meta
+
+    info = region_meta(region) if region else None  # refuse an unknown id before transcoding
     path = await resolve_input_async(video, suffix=".mp4")
     result = await asyncio.to_thread(make_clip, path, codec)
-    result["_provenance"] = _source_region(path)
+    result["_provenance"] = info or _source_region(path)
     return {"video": path, **result}
 
 

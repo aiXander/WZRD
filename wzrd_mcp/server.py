@@ -120,6 +120,7 @@ def tool(
 from . import project_tools as _project_tools  # noqa: E402, F401
 from . import skill_tools as _skill_tools  # noqa: E402, F401
 from . import tools as _tools  # noqa: E402, F401
+from . import recipe_tools as _recipe_tools  # noqa: E402, F401
 from . import media_tools as _media_tools  # noqa: E402, F401
 from . import fal_tools as _fal_tools  # noqa: E402, F401
 from . import google_tools as _google_tools  # noqa: E402, F401

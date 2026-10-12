@@ -23,9 +23,9 @@ library/effects/<name>/
   ([../TODO/vj-toolbox.md](../TODO/vj-toolbox.md) phase 1).
 - `wzrd-app/scripts/fixture_projects.py` copies the whole library into
   fixture-a/-b on every rebuild.
-- The other C6 folders (`library/recipes/`, `library/midi/`) belong to other
-  packages; the layout is pinned in
-  [../TODO/gig-2026-11-live-video.md](../TODO/gig-2026-11-live-video.md) C6.
+- The other C6 folders: `library/recipes/` (TextureFlow style recipes) is
+  in [mcp-server.md](mcp-server.md) "Style recipes"; `library/midi/` is
+  pinned in [../TODO/gig-2026-11-live-video.md](../TODO/gig-2026-11-live-video.md) C6.
 
 ## Catalog (15)
 

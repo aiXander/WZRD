@@ -457,7 +457,7 @@ async def reproject_video(
 # all validation. Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
-_TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap", "hap")  # never sent to the server
+_TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap", "hap", "recipe")  # never sent to the server
 _TF_USD_PER_S = 1.95 / 3600  # Modal L40S list price
 _TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~6 min warm)
 _TF_EST_QUICK_USD = 0.03  # pre-call guess, no upscale passes
@@ -500,7 +500,7 @@ def _tf_target() -> tuple[str, str]:
 
 @tool(title="TextureFlow animation", tags={"generate", "textureflow"}, open_world=True)
 async def texture_flow(
-    images: list[str],
+    images: Optional[list[str]] = None,
     n_seconds: Optional[float] = None,
     width: Optional[int] = None,
     height: Optional[int] = None,
@@ -524,13 +524,15 @@ async def texture_flow(
     region: Optional[str] = None,
     allow_over_cap: bool = False,
     hap: bool = True,
+    recipe: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Render an abstract, morphing, seamlessly flowing animation from 1-6 style images (TextureFlow: SD1.5 + AnimateDiff + IP-Adapter + ControlNet, on WZRD's own Modal GPU).
 
     For textures, VJ loops, animated logos and per-region fills. It cannot tell
     a story and takes no keyframes: style images drive textures and colors but
-    never appear verbatim. Load skill `textureflow` for recipes and settings.
+    never appear verbatim. Load skill `textureflow` for settings. A saved
+    look from the library (list_recipes) renders with recipe="<name>".
 
     Omit an argument to get the server default. Defaults render full-HD
     upscaled (~6 min warm); for tests set use_upscale=false AND
@@ -538,7 +540,7 @@ async def texture_flow(
     (textureflow_warm before a show). Media args take a local path or URL.
 
     Args:
-        images: 1-6 style images driving content, textures and colors.
+        images: 1-6 style images driving content, textures and colors. Required unless a recipe supplies them.
         n_seconds: Length in seconds (2-24, default 6). ~3 s per style image.
         width: Pixels (320-1280, step 32, default 640). High values are slow and can duplicate content.
         height: Pixels (320-1280, step 32, default 640).
@@ -562,13 +564,21 @@ async def texture_flow(
         region: Optional pack layer id this render is for (e.g. "fabric_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
         hap: Also write the engine-playable HAP clip + thumbnail (`clip`, `thumb` in the result) — default true.
+        recipe: A style recipe name (list_recipes): its style images and settings become the defaults; every argument you pass wins. Add width/height (the region's aspect), and control_input or diffusion_mask for the target.
     """
     # First statement on purpose: locals() is exactly the tool's parameters here.
     args = {k: v for k, v in locals().items() if k not in _TF_LOCAL_ARGS and v is not None}
     import modal
 
+    if recipe:
+        from .recipe_tools import apply_recipe
+
+        args = apply_recipe(recipe, args)
+    elif not images:
+        raise ToolError("texture_flow needs images= (1-6 style images) or recipe=")
+    sent = dict(args)  # local paths, before packing — what the sidecar records
     region_info = provenance.region_meta(region) if region else {}
-    quick = use_upscale is False and upscale_esrgan is False
+    quick = args.get("use_upscale") is False and args.get("upscale_esrgan") is False
     provenance.check_spend(_TF_EST_QUICK_USD if quick else _TF_EST_FULL_USD, allow_over_cap)
 
     files = await asyncio.to_thread(_tf_pack_media, args)
@@ -593,7 +603,8 @@ async def texture_flow(
     response["_provenance"] = {
         "paid": True,
         "est_usd": {str(Path(main).resolve()): seconds * _TF_USD_PER_S} if main else {},
-        "args": {"seed": res["params"].get("seed"), "model": f"{app_name} (TextureFlow)"},
+        "args": {**(sent if recipe else {}), "seed": res["params"].get("seed"),
+                 "model": f"{app_name} (TextureFlow)"},
         **region_info,
     }
     return await attach_clip(response, "output_video", hap)

@@ -1,6 +1,6 @@
 ---
 name: live-engine
-description: "Changing what the realtime engine renders now: read the live scene, bind effects to layers, write WGSL, label/group layers. Use when the operator asks to change live visuals."
+description: "Changing what the realtime engine renders now: read the live scene, bind clips and effects to layers, write WGSL, label/group layers. Use when the operator asks to change live visuals."
 metadata:
   kind: workflow
 ---
@@ -48,8 +48,51 @@ Needs the engine running locally (Tauri shell or headless render-core with
   `clock.time`, `audio.band(low|mid|high)`, `audio.onset(band, decay)`,
   `ui.slider(name, default)`; or a constant. Tempo is the scene's static
   `transport.bpm`; musical energy comes through `audio.*`.
-- Built-in effects: `tint`, `hueCycle`, `flash`, `wobble`; plus project-local
-  ones (see the effects list in the context read).
+- Built-in effects: `tint`, `hueCycle`, `flash`, `wobble`, `videoClip`; plus
+  project-local ones (see the effects list in the context read).
+- `"range": [from, to]` on any driver sweeps the param between the two as
+  the driver goes 0 → 1: `{"driver": "audio.onset", "band": "low",
+  "decay": 0.2, "range": [0.3, 1.5]}`.
+
+## Clips on regions
+
+A rendered clip plays through an effect input of type `image`. The
+`bindings` read lists the project's clips as ready-to-paste paths, each
+with the region it was made for — match the operator's words ("the clip
+for the left fabric") to that region.
+
+```json
+{"select": {"id": "fabric_left"}, "effect": "videoClip",
+ "params": {"image": {"clip": "generated/texture_flow_output_video_20261024-2114.mov",
+                      "placement": "region", "rate": 1.0},
+            "gain": 1.0}}
+```
+
+- `clip`: a HAP `.mov` (or a `.png`/`.jpg` still), relative to the project
+  folder. Only `.mov` plays as video — an mp4 needs `to_hap` first.
+- `placement`: `"region"` (default) fits the clip into each selected
+  layer's box — the box the region's clips were rendered for; `"canvas"`
+  fits it to the whole frame and the layer mask cuts it out. Both
+  contain-fit, never stretch.
+- `rate`: playback speed, negative plays backwards; the operator's speed
+  master bends it too.
+- One binding over a group (`{"group": "fabrics"}`) plays the same clip in
+  every member's own box.
+- A clip that can't open is a `WARNING:` line in the reply, not a failure:
+  read it, fix the path, call again.
+- To swap a region's clip, upsert the same binding id with the new path —
+  the operator's clip grid does the same on click.
+
+**Clip effects**: any effect with an `image` input plays a clip *through*
+it, so the clip responds to the music. The global library has 15
+(`library/effects/`: `kaleido`, `mirror`, `rgbSplit`, `pixelate`,
+`posterize`, `edgeGlow`, `noiseDisplace`, `strobeGate`, `hueShift`,
+`lumaKey`, `heat`, `waveWarp`, `dither`, `vignette`, `transform`); each
+descriptor's `description` and `audio` fields say what it does and which
+dial to put an `audio.*` driver on. A project only sees the ones copied
+into its `effects/` folder (`cp -R library/effects/<name>
+<project>/effects/`; the context read lists what's there). Same binding
+shape, `"effect": "kaleido"`, plus its dials.
 
 ## Writing a WGSL effect
 
@@ -58,10 +101,14 @@ Needs the engine running locally (Tauri shell or headless render-core with
 additive RGBA (black = no light). Available: `state.*` (time, bar/beat phase,
 bpm, audio bands/onsets — already scaled by the operator's audio master),
 `f_param(N)` (8 floats) / `c_param(N)` (4 colors) in descriptor input order,
-`sample_mask(uv)`, and per-layer identity `layer_seed()`, `layer_index()`,
+`sample_mask(uv)`, `sample_image(uv)` (the clip of an `image` input, premultiplied, transparent outside its placement box), and per-layer identity `layer_seed()`, `layer_index()`,
 `layer_count()`, `layer_centroid()`, `layer_bbox()` — add `layer_seed()` to a
 phase to desync copies across layers. Descriptor:
-`{"inputs": [{"name": "rate", "type": "float", "default": 1.0, "min": 0, "max": 8}, {"name": "tint", "type": "color", "default": "#ffffff"}]}`.
+`{"inputs": [{"name": "rate", "type": "float", "default": 1.0, "min": 0, "max": 8}, {"name": "tint", "type": "color", "default": "#ffffff"}]}`;
+add `{"name": "image", "type": "image"}` for a clip effect, and follow the
+library's conventions: read the clip through one `fx_in(uv)` helper, return
+colour × the `mask` argument × a `gain` dial, and black stays black (no light). Copy the nearest
+library effect as a starting point.
 
 Iterate syntax with `validate_wgsl` (cheap, line-mapped). The probe only runs
 when the design scene binds the effect, so bind it first to see a verdict and

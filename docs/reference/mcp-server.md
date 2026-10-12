@@ -40,14 +40,21 @@ one source (`skill_catalog.py` scans, `skill_tools.py` serves):
 - **Resources** `skill://<name>/SKILL.md`, `skill://<name>/_manifest`,
   `skill://<name>/{path*}` — FastMCP's `SkillsDirectoryProvider`, the standard
   skills-over-MCP shape.
-- **Prompts** — one per `kind: workflow` skill (`projection_story`,
-  `surface_prep`, `region_animation`, `live_engine`); Claude Code lists them as
-  `/mcp__wzrd__<name>`. They only tell the agent to load the skill and start.
+- **Prompts** — one per `kind: workflow` skill (`run_sheet`,
+  `projection_story`, `surface_prep`, `region_animation`, `live_engine`);
+  Claude Code lists them as `/mcp__wzrd__<name>`. They only tell the agent
+  to load the skill and start.
 
-Current skills: workflows `projection-story` (the old Mastra agent's
-keyframe → video → loop flow), `surface-prep`, `region-animation`,
-`live-engine`; guides `image-prompting` (+ `references/anti-slop.md`),
-`video-prompting`, `textureflow`. Skills name tools directly, so **renaming or
+Current skills: workflows `run-sheet` (gig S1: venue photos → canvas →
+regions → pack → clip library from recipes → show checklist; the entry
+point for a venue day, delegating to the others), `projection-story` (the
+old Mastra agent's keyframe → video → loop flow), `surface-prep`,
+`region-animation` (+ "A story on one region": keyframes from a region's
+`region_surface_image` with `aspect_ratio="auto"`, `region=` on every call,
+`to_hap(region=)` after stitching), `live-engine` (+ C5 clip bindings and
+the effects library); guides `image-prompting` (+ `references/anti-slop.md`),
+`video-prompting`, `textureflow` (+ style recipes, `region=`,
+`check_frames`). Skills name tools directly, so **renaming or
 swapping a tool means grepping `skills/` too** (e.g. the pending Kling →
 MiniMax video swap touches `video-prompting` and `projection-story`).
 
@@ -212,13 +219,48 @@ name — `wzrd-app/src-tauri/src/clips.rs`):
 `texture_flow` and `kling_*` run it on their main output after download
 (`hap=True`; `attach_clip` adds `clip`/`thumb` to the result and the parent
 link); `to_hap` does it for any other video (a source outside `generated/`
-gets a fresh stem there). The ffmpeg side is `wzrd/clips.py`: sides padded
+gets a fresh stem there; `region=` files a clip whose source carries no
+region, e.g. a stitched story). The ffmpeg side is `wzrd/clips.py`: sides padded
 (centred, black) to multiples of 4 — BC works in 4×4 blocks and the encoder
 refuses otherwise — fps and frame count kept, audio dropped; codec is a
 parameter (no platform encoder). `extract_frames` pulls stills (`"first"`,
 `"last"` — exact, from the final second — or seconds, or `count` evenly
 spaced) into `generated/`. HAP is 5–10× an H.264's size: move mp4s, make
 HAP where it plays.
+
+## Style recipes (gig P7, contract C6)
+
+The global TextureFlow look library: `library/recipes/<name>/{recipe.json,
+style_N.jpg, preview.jpg}` in this repo (`WZRD_RECIPES_ROOT` overrides —
+D16: the default is what a Finder-launched app sees). Code:
+`recipe_tools.py`. Hand-curated and agent-saved recipes share the folder.
+
+- **`recipe.json`**: `{schema: 1, name, when_to_use, notes, prompt, images:
+  [file names beside it, or URLs], args: {…}, source: {clip, project, seed,
+  size, region, rendered, saved} | null}`. `args` is the *look* only:
+  `_TARGET_ARGS` strips media (`images` sits beside it; `control_input` /
+  `diffusion_mask` belong to the region), `width`/`height`, `seed` (kept in
+  `source`), and WZRD-local args. `prompt` = the image prompt the style
+  images were made with, lifted from their own sidecars when known.
+- **`save_recipe(name, from_clip, when_to_use, …)`** walks the C2 sidecar
+  chain from the clip (`.mov` / `.mp4` / `.thumb.jpg`; a `to_hap` clip
+  follows `parent` to its mp4) to the `texture_flow` call, copies the style
+  images downscaled to 768 px JPEG (IP-Adapter sees 224 px; ~100 kB each,
+  so they're committed) plus a 640 px preview frame. Folder names are
+  slugified lowercase; written via a temp dir + rename; an existing name
+  needs `overwrite=true`.
+- **`texture_flow(recipe=…)`**: `apply_recipe` merges recipe args as
+  defaults under the caller's non-null args (`images` too) and refuses a
+  shaped recipe (`use_controlnet1` / `denoise < 1`) without a
+  `control_input` — that would render near-black. `images` is optional
+  only with a recipe. The *merged* args go into the sidecar (`_provenance`
+  `args`), so a clip rendered from a recipe can be saved as a recipe again.
+- **`list_recipes(name?)`**: a compact row per recipe (`look` = a one-line
+  summary of the args), or one recipe in full with absolute paths.
+- `library/recipes/.gitignore` keeps video out of git. Seeded with one
+  example, `tree-of-life` (the TextureFlow smoke render's Eden style images
+  and args — a demo look, not venue-tuned); `projects/` held no real
+  `texture_flow` sidecars to seed from on 2026-10-12.
 
 ## File map
 
@@ -233,6 +275,7 @@ HAP where it plays.
 | `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, `set_project`, `import_photos` |
 | `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing + sidecar hook; 15 s progress pings during remote calls |
 | `provenance.py` | C2 sidecars, spend cap, `region=` → pack layer box |
+| `recipe_tools.py` | style recipe library: `list_recipes`, `save_recipe`, `apply_recipe` (the `texture_flow(recipe=)` merge) |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |
 | `file_io.py`, `auth.py`, `modal_app.py`, `upload.py` | input resolution; parked cloud path |
 

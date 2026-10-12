@@ -212,10 +212,13 @@ signal, no error).
   `timings`. No S3, no AWS env. The docstring spells out server defaults and
   the `denoise` / ESRGAN / OpenPose behaviour for calling agents — keep it in sync
   with api.yaml (it lists the `preprocessor1` choices by hand).
+  `recipe=<name>` fills unset args and style images from a saved look in
+  `library/recipes/` (merge rules: [mcp-server.md](mcp-server.md) "Style
+  recipes").
 - **`textureflow_warm(minutes)`** — calls the deployed `set_warm`.
-- `wzrd_mcp/skills/{island_animation,surface_to_projection}` pin
-  `use_upscale`/`upscale_esrgan` false, as the old client defaults did; the server
-  defaults would make each step a ~5-min full-HD render.
+- The `run-sheet` and `textureflow` skills render drafts with
+  `use_upscale`/`upscale_esrgan` false; the server defaults would make each
+  draft a ~5-min full-HD render.
 
 ## Performance (L40S)
 
