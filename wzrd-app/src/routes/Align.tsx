@@ -1,6 +1,7 @@
-// Align route (⌘2) — the geometric stage between the composite and the
-// projector. Sits between Prepare and Perform because that is the order of a
-// load-in: build the look, land it on the wall, then play.
+// Align route (⌘3, in the TopBar's ⚙ menu) — the geometric stage between
+// the composite and the projector. A load-in step, done once per venue, so
+// it's one click down rather than in the tab bar, and the app never reopens
+// on it (store.ts::initialRoute).
 //
 // Everything here is engine state, not scene state: nothing on this tab is
 // written into scene.json, nothing is per leg, and nothing survives into

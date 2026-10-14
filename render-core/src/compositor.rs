@@ -1269,7 +1269,7 @@ pub(crate) mod tests {
         };
         mask("soft", &|x, y| {
             let d = ((x - 40.0).powi(2) + (y - 24.0).powi(2)).sqrt();
-            if d < 14.0 { (255.0 * (1.0 - d / 14.0)) as u8 + 1 } else if d < 18.0 { 1 } else { 0 }
+            if d < 14.0 { ((254.0 * (1.0 - d / 14.0)) as u8).saturating_add(1) } else if d < 18.0 { 1 } else { 0 }
         });
         mask("edge", &|x, y| if x >= 112.0 && y < 20.0 { 255 } else { 0 });
         mask("diag", &|x, y| if y >= 30.0 && (x - 2.0 * y + 10.0).abs() < 2.0 { 200 } else { 0 });

@@ -152,8 +152,8 @@ interface Store {
   effects: string[];
   setEffects: (e: string[]) => void;
 
-  // route. Align sits between Prepare and Perform because that's the order
-  // of a load-in: build the look, land it on the wall, then play.
+  // route. Prepare and Perform are the tab bar; Align (done once at load-in)
+  // and Debug live one click down in the TopBar's ⚙ menu.
   route: Route;
   setRoute: (r: Route) => void;
 
@@ -278,7 +278,9 @@ let toastSeq = 0;
 function initialRoute(): Route {
   try {
     const r = localStorage.getItem('wzrd.route');
-    if (r === 'prepare' || r === 'align' || r === 'perform' || r === 'debug') return r;
+    // Never reopen on Align: it's a load-in step, and its arrow keys nudge
+    // the projector warp — not where a launch mid-gig should land.
+    if (r === 'prepare' || r === 'perform' || r === 'debug') return r;
   } catch {
     /* ignore */
   }

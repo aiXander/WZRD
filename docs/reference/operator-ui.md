@@ -32,16 +32,16 @@ the other half was guessed ranges (e.g. `scale: 50` on a 0.5–8 control).
 Every scalar now uses the effect descriptor's `min`/`max` (`LayerParams.tsx
 ::rangeFor`, extended to include an out-of-range scene value).
 
-## Rooms (`src/routes/`, ⌘1–⌘3, Debug ⌘4 / ⚙)
+## Rooms (`src/routes/`, ⌘1 Prepare · ⌘2 Perform; Align ⌘3 + Debug ⌘4 via ⚙)
 
 | Room | What it's for | Key files |
 |---|---|---|
-| **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both), inspector (target, effect cards, dials), bottom drawer = **clip grid** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
+| **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both, "Show regions" switch), inspector (target, effect cards, dials; Duplicate / Delete / deselect × in its header), bottom drawer = **clip grid** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `LayerList.tsx` (layer + region lists), `LayerInspector.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
 | **Align** | §2.8 warp; side panel with the "projector bumped?" recovery hint, test patterns, background (lit-background warning). | `Align.tsx`, `WarpCanvas.tsx`, `state/alignment.ts` |
-| **Perform** | The booth: monitor (native preview, deck-coloured frame, PREVIEW/PROGRAM label), looks bank + auto-pilot, layer stack (mixer) with the compact clip grid under it, selected layer's dials, deck panel (switch, cue monitor, TAKE/CUT/PULL, FADE, BAR/NOW), masters + BLACK/FLASH/FREEZE + room audio. | `Perform.tsx`, `DeckPanel.tsx`, `LayerStack.tsx`, `ClipGrid.tsx compact`, `LayerParams.tsx`, `LooksBank.tsx`, `MastersPanel.tsx` |
+| **Perform** | The booth: monitor (native preview, deck-coloured frame, PREVIEW/PROGRAM label), a slim looks strip + auto-pilot under it, one mixer panel with a Layers \| Clips tab (`MixerPanel`, tab in localStorage `wzrd.perform.mixerTab`; only the visible tab mounts, so the clip poll runs only on Clips), selected layer's dials, deck panel (switch, cue monitor, TAKE/CUT/PULL, FADE, BAR/NOW), masters + BLACK/FLASH/FREEZE + room audio. | `Perform.tsx`, `DeckPanel.tsx`, `LayerStack.tsx`, `ClipGrid.tsx compact`, `LayerParams.tsx`, `LooksBank.tsx`, `MastersPanel.tsx` |
 | **Debug** | Engine internals (unchanged content, restyled), plus the plain "Performance (frame profiler)" readout of the `perf` / `perf_spike` channels — headroom, stage p95 table, threads, clips, last spike ([render-engine.md](render-engine.md) §2.9). | `Debug.tsx` |
 
-`TopBar.tsx` is shared: project menu (`ProjectMenu.tsx`), rooms, compact DESIGN|LIVE + TAKE outside Perform,
+`TopBar.tsx` is shared: project menu (`ProjectMenu.tsx`), rooms (only Prepare | Perform as tabs — Align is a once-per-gig room, so it and Debug live in the ⚙ **Setup** menu with the panel-layout controls; while you're in one it shows as an extra active pill; a stored `wzrd.route=align` boots into Perform), compact DESIGN|LIVE + TAKE outside Perform,
 tempo (beat lamps from the `transport` channel, BPM double-click/scroll,
 TAP, `1` = bar line here), health (Audio / FPS / reload verdict / Engine —
 a restart button while the engine is down), ADOPT for agent edits, help
@@ -89,6 +89,12 @@ glyph + name) plus "Unassigned". Slots are the project's HAP clips
 (gig plan contract C3: `generated/<stem>.mov` + `<stem>.thumb.jpg`),
 newest first, placed by the C2 provenance sidecar's `region`.
 
+- **Each row is a radio group: one clip per region.** A leading ■ slot is
+  the "none" position (NONE / STOP); clicking the playing clip again or ■
+  calls `state/clips.ts::stopClip` — a `videoClip` binding (exists only to
+  show the clip) is removed, any other effect just loses its `image`
+  param (absent image = transparent in the engine). The next click
+  recreates `clip_<region>`, so leftover mixer pins re-apply.
 - **Click a slot = play that clip on that region in DESIGN**
   (`state/clips.ts::bindClip`, through `commitSceneMutation`): set
   `params.image.clip` (C5) on the first binding whose `select.id` is that
@@ -128,11 +134,52 @@ newest first, placed by the C2 provenance sidecar's `region`.
   releases). In Prepare (`mode="author"`) the same fader writes scene.json.
   `bakeDesignPins` (⌘S, and every Save look) writes design pins into the
   scene and clears them.
-- **Modulation** is a driver with `range: [from, to]` (render-engine.md
-  §2.1). `MOD_SOURCES` in `actions.ts` maps VJ words (Kick/Snare/Hats =
-  `audio.onset` low/mid/high, Bass/Mids/Highs = `audio.band`, Beat/Bar/4
-  Bars/Slow = clocks) to driver specs; `RangeFader` edits rest→peak, with
-  the live value from the `drivers` channel riding inside.
+- **Modulation** is a driver with `range: [from, to]` and, for clocks, a
+  `shape` (render-engine.md §2.1 "Clock shapes"). `MOD_SOURCES` in
+  `actions.ts` maps VJ words (Kick/Snare/Hats = `audio.onset`
+  low/mid/high, Bass/Mids/Highs = `audio.band`, **Tempo** = `clock.bars`/
+  `clock.beats`, **Free** = `clock.phase`) to driver specs; `modSourceOf`
+  matches on driver + band only. New clock routings default to
+  `DEFAULT_MOD_SHAPE = 'pingpong'` at 4 bars / 8 s (the engine default
+  without `shape` stays `saw`, for old scenes). UI: the row's `ModChip`
+  opens `ModEditor.tsx` — a live scope (canvas fed by `useStore.subscribe`
+  + rAF while open, no React render per frame, no new channel demand),
+  source grid, 6 shape glyphs, cycle (`TEMPO_RATES` / `FREE_RATES`), onset
+  decay, ⇄ invert (swaps the range ends), remove. `RangeFader` edits
+  rest→peak (gradient dim→bright) with the live value riding inside.
+  Structure → DESIGN only, like every range/source edit.
+- **Layer delete** (`actions.ts::deleteLayer` / `deleteLayerOnHands`):
+  × on every row (Prepare list, Perform mixer), the inspector header, and
+  Delete/⌫. On LIVE it deletes nothing and moves hands to DESIGN (a
+  structural edit). An in-memory undo stack (20) restores at the old
+  index (⌘Z, the panel's ↶ Undo) — it only undoes layer deletes, it is
+  not a scene undo. Cleared on project switch (`resetActionState`).
+- **Selection** (Prepare): clicking a region selects it + the first layer
+  lighting it; clicking it again steps through its layers, then
+  deselects; clicking the selected layer row again, an empty map spot, the
+  margin round the canvas or Esc (`actions.ts::clearSelection`) clears
+  both. Perform's `LayerStack` always re-selects a layer, so Esc only
+  deselects in Prepare.
+- **Code drawer saves per file** (`MonacoPanel.tsx`): ⌘S in the editor /
+  the Save button saves the *open tab* — a shader through `effectUpsert`
+  (engine validates before writing; red strip with line-mapped errors,
+  amber on a yellow probe), scene.json through `commitSceneNow`. Dirty ●
+  per tab; unsaved shader buffers live in a module store per project, so
+  closing the drawer keeps them. One Monaco model per file (`path`).
+- **Panel layout** (`ui/layoutSplit.tsx`, `ui/layoutStore.ts`,
+  hand-rolled, no dependency): each `Split` has one `fill` pane; others
+  have a CSS default (`'248px'`, `'36%'`) until dragged, then a stored px
+  size. Dragging an edge resizes the pane on the far side from the fill;
+  double-click an edge = default. Unlocked, a ⠿ grip drags a pane onto a
+  sibling to swap (keyed, no remount). **Locked by default** (⚙ Setup →
+  Lock layout; an amber "LAYOUT UNLOCKED · LOCK" chip shows while off;
+  Reset per room / all). Persisted per project in
+  `<project>/ui_layout.json` (`{schema:1, locked, sizes:{"perform.cols/side":340},
+  order:{"perform.cols":["side","main"]}}`, absent key = default) via
+  `ui_layout_read/write {scenePath}` (`src-tauri/src/layout.rs`, atomic,
+  devport twins, debounced 400 ms, flushed before a project switch). Not
+  in `project.json`: the MCP rewrites that from another process, and one
+  writer per file keeps the locked canvas safe.
 - **TAKE arming** compares design vs live scene JSON (`designDiffers`,
   key-sorted, ignoring `transport` because TAP moves both legs live) **and**
   the two legs' override tables in the store (mixer `@mute`/`@opacity`/
@@ -238,14 +285,28 @@ to read store state as evidence.
 invisible to the browser seat and to webview screenshots. Two devport hooks
 cover it without taking the operator's keyboard focus: `POST
 /cmd/webview_eval {js}` runs a script in the app's own webview (e.g.
-`localStorage.setItem('wzrd.route','align'); location.reload()` to switch
-rooms), and `POST /cmd/debug_log {msg}` (callable from that script via
+`import('/src/state/store.ts').then(m => m.useStore.getState().setRoute('align'))`
+to switch rooms — not `localStorage` + reload: a stored `align` route boots
+into Perform; the afk-session `room` helper does this), and `POST /cmd/debug_log {msg}` (callable from that script via
 `/__shell/cmd/debug_log`) writes `[webview] …` into the app log — the way
 to read a value back. The engine's `preview.snapshot` RPC returns exactly
 what the native slot shows; `screencapture -l <windowid>` grabs the real
 window (underlay included) even when it is covered.
 
 ## Traps
+
+- **Anything that can move a `<NativeSlot>` without resizing it must call
+  `layoutStore.notifyLayout()`** (fires `wzrd:layout`, which NativeSlot
+  listens to) — a ResizeObserver misses a pure move. `layoutSplit` already
+  covers drags, swaps and panes mounting/unmounting.
+- **Monaco `onChange` must route by the changed model's URI, never by
+  `activeTab`**: on a tab switch `@monaco-editor/react` can fire a change
+  for the new (transient `loading`) model through the previous render's
+  closure — routing by tab wrote "// loading…" into `sceneJson` and blanked
+  every layer (found 2026-10-14). Same family: `onMount` runs once, so
+  anything registered there (the ⌘S command) calls through a ref.
+- **The full-frame "background" region** means almost every map click hits
+  a region; deselect relies on clicking the selected thing again or Esc.
 
 - **No emitted `vite.config.js`.** Vite resolves `.js` before `.ts`; a
   `tsc -b`-emitted copy silently pinned a stale config (found 2026-10-09).
@@ -272,5 +333,11 @@ window (underlay included) even when it is covered.
 
 D / L hands · T take · ⇧T cut · P pull · B blackout · F (hold) flash · Z
 freeze · Tab tap · `` ` `` bar line · ↑↓ / 1–9 select layer · M / S mute /
-solo · [ ] opacity · ⇧1–9 cue look (⇧⌥ = GO) · ⌘S save design · ? help.
-Faders: press = jump, ⇧-drag = fine, double-click = reset, wheel = nudge.
+solo · [ ] opacity · ⇧1–9 cue look (⇧⌥ = GO) · ⌘S save design (inside the
+code drawer: save the open file) · Delete/⌫ delete selected layer · ⌘Z
+restore last deleted layer · Esc deselect (Prepare) · ⌘1 Prepare · ⌘2
+Perform · ⌘3 Align · ⌘4 Debug · ? help.
+Faders: press = jump, ⇧-drag = fine, double-click = reset. **No mouse
+wheel** — the wheel always scrolls the panel (a future MIDI bridge drives
+faders through the same `actions.ts` calls; gaps listed in
+[midi-controller.md](../TODO/midi-controller.md)).

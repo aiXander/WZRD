@@ -13,7 +13,8 @@ cp projects/fixture-a/session.json $B/session.bak
 (cd wzrd-app && WZRD_SCENE=../$SCENE pnpm tauri dev > ../$LOG 2>&1 &)
 n=0; until grep -q "preview underlay installed" $LOG; do sleep 1; n=$((n+1)); [ $n -gt 400 ] && echo TIMEOUT && exit 1; done; sleep 5
 PID=$(pgrep -f target/debug/wzrd-app | head -1)
-curl -s localhost:9124/cmd/webview_eval -d "{\"js\":\"localStorage.setItem('wzrd.route','$2');location.reload()\"}" >/dev/null; sleep 4
+# setRoute, not localStorage + reload: a stored `align` route boots into Perform.
+curl -s localhost:9124/cmd/webview_eval -d "{\"js\":\"import('/src/state/store.ts').then(m=>m.useStore.getState().setRoute('$2'))\"}" >/dev/null; sleep 4
 curl -s localhost:9124/cmd/webview_eval -d "{\"js\":\"(async()=>{const a=await import('/src/state/actions.ts');a.setDeck('$3')})()\"}" >/dev/null
 osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "wzrd-app") to true'; sleep 8
 WK=$(ps -axo pid,command | grep -E "WebKit\.(WebContent|GPU)" | grep -v grep | awk '{print $1}')

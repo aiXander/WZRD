@@ -27,7 +27,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::{clips, projects, rpc, AppState};
+use crate::{clips, layout, projects, rpc, AppState};
 
 pub fn spawn(app: AppHandle) {
     let port: u16 = std::env::var("WZRD_DEVPORT")
@@ -144,6 +144,11 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "clips_list" => clips::clips_list_in(&st()),
         "clip_thumb" => ok(clips::clip_thumb_in(&st(), s("path")?)),
         "clip_file" => ok(clips::clip_file(st(), s("path")?, opt("region"))),
+        "ui_layout_read" => layout::ui_layout_read(s("scenePath")?),
+        "ui_layout_write" => ok(layout::ui_layout_write(
+            s("scenePath")?,
+            a.get("layout").cloned().unwrap_or(Value::Null),
+        )),
         "debug_log" => {
             log::info!("[webview] {}", s("msg")?);
             Ok(Value::Null)

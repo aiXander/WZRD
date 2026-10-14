@@ -25,6 +25,9 @@ import { NativeSlot } from './NativeSlot';
 
 type Backdrop = 'photo' | 'light' | 'both';
 
+/** localStorage key for the "Show regions" switch (per machine). */
+const REGIONS_KEY = 'wzrd.prepare.regions';
+
 /** The engine-side backdrop (linear-light additive, D2). BOTH's photo weight
  *  is linear: 0.15 ≈ 0.42^2.2, the old canvas's 0.42 sRGB alpha — 0.42 in
  *  linear light read ~68% bright and washed the light out. */
@@ -57,7 +60,21 @@ export function SurfaceMap({
   const [wrap, setWrap] = useState<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<{ id: string; x: number; y: number } | null>(null);
   const [backdrop, setBackdrop] = useState<Backdrop>('both');
-  const [overlays, setOverlays] = useState(true);
+  const [overlays, setOverlaysState] = useState(() => {
+    try {
+      return localStorage.getItem(REGIONS_KEY) !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const setOverlays = (on: boolean) => {
+    setOverlaysState(on);
+    try {
+      localStorage.setItem(REGIONS_KEY, on ? '1' : '0');
+    } catch {
+      /* storage blocked — the toggle still works for this session */
+    }
+  };
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   usePreviewJpegDemand(!native && backdrop !== 'photo');
 
@@ -161,14 +178,29 @@ export function SurfaceMap({
           ]}
         />
         <button
-          onClick={() => setOverlays((o) => !o)}
+          role="switch"
+          aria-checked={overlays}
+          onClick={() => setOverlays(!overlays)}
           className={
-            'h-[26px] px-2 rounded-md border text-[11px] ' +
-            (overlays ? 'border-line2 bg-raised text-fg' : 'border-line text-fg3 hover:text-fg')
+            'h-[26px] pl-1.5 pr-2 rounded-md border flex items-center gap-1.5 text-[11px] ' +
+            (overlays ? 'border-design/60 bg-design/10 text-fg' : 'border-line text-fg3 hover:text-fg hover:border-line2')
           }
-          title="Tint each region in its colour"
+          title={overlays ? 'Regions are tinted in their colours — click to hide' : 'Regions are hidden — click to tint each in its colour'}
         >
-          Regions
+          <span
+            className={
+              'relative w-7 h-4 rounded-full transition-colors ' + (overlays ? 'bg-design' : 'bg-panel2 ring-1 ring-inset ring-line2')
+            }
+          >
+            <span
+              className={
+                'absolute top-0.5 left-0.5 w-3 h-3 rounded-full shadow transition-transform ' +
+                (overlays ? 'translate-x-3 bg-black' : 'translate-x-0 bg-fg3')
+              }
+            />
+          </span>
+          Show regions
+          <span className={'num text-[9px] font-semibold w-5 ' + (overlays ? 'text-design' : 'text-fg4')}>{overlays ? 'ON' : 'OFF'}</span>
         </button>
         <div className="flex-1" />
         <span className="text-[10px] text-fg3">
@@ -178,6 +210,9 @@ export function SurfaceMap({
       <div
         ref={setWrap}
         className={'relative flex-1 min-h-0 flex items-center justify-center p-3 ' + (native ? '' : 'dim-grid')}
+        // A click on the margin around the surface deselects (canvas clicks
+        // bubble here too — only the wrapper itself counts).
+        onClick={(e) => e.target === e.currentTarget && onRegionClick(null)}
       >
         <NativeSlot params={BACKDROP_PARAMS[backdrop]} className="relative" style={{ width: box.w, height: box.h }}>
           <canvas

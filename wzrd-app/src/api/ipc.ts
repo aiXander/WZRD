@@ -446,6 +446,14 @@ export const clipThumb = (path: string) => invoke<string>('clip_thumb', { path }
 export const clipFile = (path: string, region: string | null) =>
   invoke<void>('clip_file', { path, region });
 
+// ---------- operator-UI layout (per project, `<project>/ui_layout.json`) ----------
+
+/** The project's saved panel layout (`ui/layoutStore.ts::LayoutDoc`), or
+ *  null. Named by scene path so a late write can't land in another project. */
+export const uiLayoutRead = (scenePath: string) => invoke<unknown>('ui_layout_read', { scenePath });
+export const uiLayoutWrite = (scenePath: string, layout: unknown) =>
+  invoke<void>('ui_layout_write', { scenePath, layout });
+
 // ---------- events ----------
 
 export type TelemetryFrame = {

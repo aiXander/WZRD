@@ -275,7 +275,26 @@ to]`** (2026-10-09): the param then sweeps `from → to` as the driver moves
 0 → 1 (`ScalarValue::Mapped` in `drivers.rs`) — the modulation depth the
 operator UI's MOD routing writes ("bright 0.3 → 1.5 on the kick"); without
 it the raw driver value goes straight in. The probe treats a mapped param
-pessimistically as `max(from, to)`. No `audio.rms`/`audio.fft` scene drivers in v1
+pessimistically as `max(from, to)`.
+
+**Clock shapes — `"shape"` (2026-10-14).** The three periodic clocks
+(`clock.bars`/`clock.beats`/`clock.phase`) take an optional `"shape"`
+applied to their 0..1 cycle before `range` mapping (`drivers::Shape`):
+`saw` (0→1 then jump; **the default** — no `shape` = pre-2026-10-14
+behaviour, telemetry label unchanged), `ramp_down`, `pingpong` (triangle
+0→1→0), `sine` (`0.5−0.5·cos 2πx`, 0→1→0 eased — the smoothest),
+`square` (1 for the first half-cycle), `random` (a new random target per
+cycle, smoothstep-eased between them; optional integer `"seed"`, default
+0). One cycle = the whole shape (a 4-bar `pingpong` goes up for 2 bars and
+down for 2), and every shape starts at 0 = `range[0]` on the cycle line.
+Shapes are a pure function of transport position (random = hash of cycle
+index + seed), so both legs, a TAKE and a re-run trace the same curve —
+the `PickRate::cycle` rule. All stay in [0,1], so the probe's
+`max(from, to)` holds. `shape` on any other driver is a parse error
+(invert audio by swapping the `range` ends); an unknown name is a parse
+error listing the valid ones. Labels append the shape (`clock.bars(4)
+pingpong`). The operator UI writes `pingpong` for new clock modulations
+(`wzrd-app/src/components/ModEditor.tsx`). No `audio.rms`/`audio.fft` scene drivers in v1
 (the server emits `/audio/fft` but the engine doesn't consume it; rms doesn't
 exist). The server also streams `/audio/bpm` — **deliberately ignored**
 (live BPM tracking dropped 2026-07-11, roadmap §5.1): `transport.bpm` is a
@@ -931,7 +950,7 @@ behind the render thread and none of them rebuild a plan. State lives behind
 a small mutex in an `Arc<AlignmentState>` shared with the render thread;
 writers clone a snapshot out and never hold the lock across work (§1b).
 
-**UI (the Align route, ⌘2).** SVG over dest space padded ~20% on every side,
+**UI (the Align route, ⌘3 — in the ⚙ Setup menu, not a tab).** SVG over dest space padded ~20% on every side,
 because handles are routinely dragged off-screen; canvas units equal
 projector pixels so an arrow-key nudge is exactly one output pixel (⇧ = 10)
 — the last millimetre of physical alignment, and the one thing a mouse

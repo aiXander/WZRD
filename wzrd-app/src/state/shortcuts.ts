@@ -5,7 +5,9 @@
 import { useEffect } from 'react';
 import {
   bakeDesignPins,
+  clearSelection,
   controlLeg,
+  deleteLayerOnHands,
   flash,
   toggleFreeze,
   mixOf,
@@ -19,6 +21,7 @@ import {
   toggleBlackout,
   toggleMute,
   toggleSolo,
+  undoDeleteLayer,
 } from './actions';
 import { flushScene } from './sceneCommit';
 import { parseScene } from './scene';
@@ -38,7 +41,8 @@ function legBindings(): string[] {
   return (parseScene(json)?.bindings ?? []).map((b) => b.id);
 }
 
-const ROUTE_KEYS: Record<string, Route> = { '1': 'prepare', '2': 'align', '3': 'perform', '4': 'debug' };
+// ⌘1/⌘2 = the tab bar (Prepare · Perform); ⌘3/⌘4 = the ⚙ menu's rooms.
+const ROUTE_KEYS: Record<string, Route> = { '1': 'prepare', '2': 'perform', '3': 'align', '4': 'debug' };
 
 export function useShortcuts() {
   useEffect(() => {
@@ -53,12 +57,18 @@ export function useShortcuts() {
           bakeDesignPins();
           flushScene();
           st.toast('Design saved to scene.json', 'ok');
+        } else if ((e.key === 'z' || e.key === 'Z') && !e.shiftKey && !typing(e)) {
+          // ⌘Z = undo the last layer delete (the only undoable act so far).
+          if (undoDeleteLayer()) e.preventDefault();
         }
         return;
       }
       if (typing(e)) return;
       if (e.key === 'Escape') {
-        st.setShowHelp(false);
+        // Help first; otherwise Esc deselects in Prepare (Perform's mixer
+        // always keeps a layer selected, so there it would just jump).
+        if (st.showHelp) st.setShowHelp(false);
+        else if (st.route === 'prepare') clearSelection();
         return;
       }
       if (e.key === '?') {
@@ -117,6 +127,14 @@ export function useShortcuts() {
         case '[':
         case ']':
           if (sel) setOpacity(sel, Math.min(1, Math.max(0, mixOf(sel).opacity + (e.key === ']' ? 0.1 : -0.1))));
+          return;
+        case 'Delete':
+        case 'Backspace':
+          // On LIVE this moves hands to DESIGN instead (actions.ts).
+          if (sel) {
+            e.preventDefault();
+            deleteLayerOnHands(sel);
+          }
           return;
         case 'ArrowUp':
         case 'ArrowDown': {

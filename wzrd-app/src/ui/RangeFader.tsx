@@ -1,6 +1,8 @@
 // Modulation depth: where a param rests (FROM) and where the music throws it
-// (TO). The band is the sweep, the bright marker rides it live. Press near
-// an end to drag that end; press inside the band to slide the whole sweep.
+// (TO). The band is the sweep (brightening toward TO), the white marker
+// rides it live. Press near an end to drag that end; press inside the band
+// to slide the whole sweep. No wheel handling on purpose: the mouse wheel
+// always scrolls the panel.
 
 import { useRef, useState } from 'react';
 import { defaultFormat } from './Fader';
@@ -91,7 +93,16 @@ export function RangeFader({
         (disabled ? 'opacity-60' : 'hover:border-line2')
       }
     >
-      <div className="absolute top-0 bottom-0 bg-mod/20" style={{ left: `${lo * 100}%`, width: `${(hi - lo) * 100}%` }} />
+      {/* The sweep: dim at rest, bright at peak, so an inverted range
+          (peak left of rest) reads at a glance. */}
+      <div
+        className="absolute top-0 bottom-0"
+        style={{
+          left: `${lo * 100}%`,
+          width: `${(hi - lo) * 100}%`,
+          background: `linear-gradient(to ${t >= f ? 'right' : 'left'}, rgb(var(--mod) / 0.08), rgb(var(--mod) / 0.34))`,
+        }}
+      />
       {/* FROM end (rest) — solid; TO end (peak) — glowing */}
       <div className="absolute top-0 bottom-0 w-[2px] bg-mod/60" style={{ left: `calc(${frac(f) * 100}% - 1px)` }} />
       <div className="absolute top-0 bottom-0 w-[2px] bg-mod" style={{ left: `calc(${frac(t) * 100}% - 1px)` }} />

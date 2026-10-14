@@ -77,7 +77,7 @@ _BINDING_SCHEMA = {
         "effect": {"type": "string", "description": "Effect name: built-in (tint, hueCycle, flash, wobble, videoClip) or project-local (author with upsert_effect)."},
         "params": {
             "type": "object",
-            "description": 'Effect inputs: a constant ("#ffffff", 1.2) or a driver, e.g. {"driver": "audio.onset", "band": "low", "decay": 0.15}, {"driver": "clock.phase", "rate": 1}, {"driver": "ui.slider", "name": "x", "default": 0.1}. An `image`-type input takes a clip: {"clip": "generated/x.mov", "placement": "region"|"canvas", "rate": 1.0} (path relative to the scene dir; HAP .mov or a .png/.jpg still).',
+            "description": 'Effect inputs: a constant ("#ffffff", 1.2) or a driver, e.g. {"driver": "audio.onset", "band": "low", "decay": 0.15}, {"driver": "clock.bars", "n": 4, "shape": "pingpong", "range": [0.2, 1.0]} (clock shapes: pingpong/sine = smooth, saw = default ramp+jump, ramp_down, square, random), {"driver": "ui.slider", "name": "x", "default": 0.1}. An `image`-type input takes a clip: {"clip": "generated/x.mov", "placement": "region"|"canvas", "rate": 1.0} (path relative to the scene dir; HAP .mov or a .png/.jpg still).',
         },
     },
     "required": ["select", "effect"],

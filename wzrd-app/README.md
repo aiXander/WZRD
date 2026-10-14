@@ -1,10 +1,11 @@
 # wzrd-app — single-process control shell
 
 The control surface that wraps `render-core` for humans — a Resolume-style
-VJ desk. Three rooms in load-in order — **Prepare** (surface map, layers,
-effect cards, dials, code drawer), **Align** (§2.8 output warp), **Perform**
-(monitor, deck + TAKE, looks bank + auto-pilot, layer mixer, dials,
-masters) — plus **Debug**. How it's organised and why:
+VJ desk. Two rooms as tabs — **Prepare** (⌘1: surface map, layers, effect
+cards, dials, clip/code drawer) and **Perform** (⌘2: monitor, deck + TAKE,
+looks strip + auto-pilot, Layers|Clips mixer, dials, masters) — with
+**Align** (⌘3, §2.8 output warp, a once-per-gig step) and **Debug** (⌘4) in
+the ⚙ Setup menu, next to the per-project panel-layout lock. How it's organised and why:
 [`../docs/reference/operator-ui.md`](../docs/reference/operator-ui.md).
 The headless agent path
 (`render-core --scene foo.json`, standalone binary) is unchanged; this shell

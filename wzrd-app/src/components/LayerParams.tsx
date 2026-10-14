@@ -6,8 +6,9 @@
 //              (zero rebuild, next frame). An amber tick marks the scene value;
 //              double-click releases the pin.
 //   modulated  a range bar: FROM (rest) → TO (peak) with the live value
-//              riding inside, plus the source chip (Kick, Bass, 4 Bars…).
-//              Ranges and sources are structure → DESIGN only.
+//              riding inside, plus the source chip (Kick, Bass, a clock
+//              shape glyph + "4 bars"…) that opens the ModEditor popover.
+//              Ranges, sources, shapes and rates are structure → DESIGN only.
 // Colours are structure too (scene edits) → DESIGN only.
 //
 // `mode="author"` (Prepare) writes straight into scene.json instead of
@@ -16,15 +17,7 @@
 import { useMemo, useState } from 'react';
 import { paramSet, type LegName } from '../api/ipc';
 import { useTelemetryDemand } from '../api/telemetryDemand';
-import {
-  MOD_SOURCES,
-  modSourceOf,
-  modulate,
-  pin,
-  setDeck,
-  setModRange,
-  setSceneParam,
-} from '../state/actions';
+import { pin, setDeck, setModRange, setSceneParam } from '../state/actions';
 import {
   bindingHue,
   effectName,
@@ -41,6 +34,7 @@ import { Fader } from '../ui/Fader';
 import { RangeFader } from '../ui/RangeFader';
 import { Popover } from '../ui/Popover';
 import { RegionGlyph } from './LayerStack';
+import { ModChip, ModEditor } from './ModEditor';
 
 type Mode = 'perform' | 'author';
 
@@ -178,7 +172,6 @@ function ScalarRow({
   const [lo, hi] = rangeFor(input, range ? Math.max(range[0], range[1]) : sceneVal);
   const [lo2] = rangeFor(input, range ? Math.min(range[0], range[1]) : sceneVal);
   const min = Math.min(lo, lo2);
-  const src = modSourceOf(raw);
 
   let control: React.ReactNode;
   if (slider) {
@@ -257,98 +250,20 @@ function ScalarRow({
   return (
     <div className="relative grid grid-cols-[minmax(0,1fr)_66px] gap-1.5 items-center">
       {control}
-      <ModChip
-        source={src?.label ?? (modded ? driver!.driver.replace(/^.*\./, '') : null)}
-        disabled={!structural || !!slider}
-        onClick={(el) => setMenu((m) => (m ? null : el))}
-      />
+      <ModChip raw={raw} disabled={!structural || !!slider} onClick={(el) => setMenu((m) => (m ? null : el))} />
       {menu && (
-        <Popover anchor={menu} onClose={() => setMenu(null)}>
-          <ModMenu
-            current={src?.id ?? null}
-            onPick={(id) => {
-              setMenu(null);
-              modulate(binding.id, input.name, id, typeof raw === 'number' ? raw : sceneVal, min, hi);
-            }}
+        <Popover anchor={menu} width={288} onClose={() => setMenu(null)}>
+          <ModEditor
+            bindingId={binding.id}
+            param={input.name}
+            raw={raw}
+            current={typeof raw === 'number' ? raw : sceneVal}
+            lo={min}
+            hi={hi}
+            onClose={() => setMenu(null)}
           />
         </Popover>
       )}
-      {modded && structural && driver!.driver === 'audio.onset' && pinned == null && (
-        <div className="col-span-2 pl-3 grid grid-cols-[minmax(0,1fr)_66px] gap-1.5">
-          <Fader
-            size="sm"
-            label="decay"
-            value={driver!.decay ?? 0.15}
-            min={0.02}
-            max={1.5}
-            color="rgb(var(--mod))"
-            format={(v) => `${Math.round(v * 1000)}ms`}
-            onChange={(v) => setSceneParam(binding.id, input.name, { ...driver, decay: v })}
-            title="How long each hit glows"
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ModChip({
-  source,
-  disabled,
-  onClick,
-}: {
-  source: string | null;
-  disabled: boolean;
-  onClick: (el: HTMLElement) => void;
-}) {
-  return (
-    <button
-      onClick={disabled ? undefined : (e) => onClick(e.currentTarget)}
-      title={
-        disabled
-          ? source
-            ? `Driven by ${source}. Change the source on DESIGN.`
-            : 'Modulation is wired on DESIGN.'
-          : source
-          ? `Driven by ${source} — click to change or remove`
-          : 'Make this react: route a kick, a band or the beat clock onto it'
-      }
-      className={
-        'h-[26px] rounded-[5px] border text-[10px] font-semibold tracking-wide truncate px-1.5 ' +
-        (source
-          ? 'border-mod/60 bg-mod/15 text-mod'
-          : disabled
-          ? 'border-line text-fg4'
-          : 'border-line2 text-fg3 hover:text-mod hover:border-mod/60') +
-        (disabled ? ' cursor-not-allowed' : '')
-      }
-    >
-      {source ? `∿ ${source}` : '+ MOD'}
-    </button>
-  );
-}
-
-function ModMenu({ current, onPick }: { current: string | null; onPick: (id: string | null) => void }) {
-  const group = (g: 'audio' | 'clock') => MOD_SOURCES.filter((m) => m.group === g);
-  const chip = (id: string | null, label: string) => (
-    <button
-      key={id ?? 'off'}
-      onClick={() => onPick(id)}
-      className={
-        'h-7 rounded-md text-[11px] font-medium border ' +
-        (current === id ? 'bg-mod text-black border-mod' : 'bg-panel2 border-line text-fg2 hover:border-mod/60 hover:text-fg')
-      }
-    >
-      {label}
-    </button>
-  );
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="label">React to the music</div>
-      <div className="grid grid-cols-3 gap-1">{group('audio').map((m) => chip(m.id, m.label))}</div>
-      <div className="label mt-1">Follow the clock</div>
-      <div className="grid grid-cols-4 gap-1">{group('clock').map((m) => chip(m.id, m.label))}</div>
-      {current && <div className="pt-2 border-t border-line grid">{chip(null, 'Remove modulation')}</div>}
     </div>
   );
 }

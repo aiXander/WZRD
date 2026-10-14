@@ -53,6 +53,15 @@ Needs the engine running locally (Tauri shell or headless render-core with
 - `"range": [from, to]` on any driver sweeps the param between the two as
   the driver goes 0 → 1: `{"driver": "audio.onset", "band": "low",
   "decay": 0.2, "range": [0.3, 1.5]}`.
+- `"shape"` on the periodic clocks (`clock.bars` / `clock.beats` /
+  `clock.phase`) sets the waveform over one cycle: `pingpong` (up and back,
+  no jump) or `sine` (same, eased — the smoothest) for smooth textures;
+  `saw` (ramp up then jump — the default when omitted), `ramp_down`,
+  `square`, `random` (glides to a new random value each cycle; optional
+  `"seed"`). Prefer `pingpong`/`sine` unless the operator wants a hard reset
+  each cycle: `{"driver": "clock.bars", "n": 4, "shape": "sine",
+  "range": [0.2, 1.0]}`. Not valid on audio/slider drivers — invert those
+  by swapping the `range` ends.
 
 ## Clips on regions
 

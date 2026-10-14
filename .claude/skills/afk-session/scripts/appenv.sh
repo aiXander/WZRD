@@ -1,7 +1,7 @@
 # Helpers for driving a running `pnpm tauri dev` WZRD app unattended.
 #   source .claude/skills/afk-session/scripts/appenv.sh   (repo root; set B=<results dir> first, app log in $B/app.log)
 # js '<expr>'   evaluate in the app webview, print the result (devport :9124 + app log)
-# room <name>   switch room (prepare|align|perform|debug) via localStorage + reload
+# room <name>   switch room (prepare|align|perform|debug) via the store's setRoute
 # rpc <method> '<json params>'   one engine JSON-RPC call over ws :9123
 # snap          perf.snapshot summary (interval, drops, knob latency, GPU passes)
 # knobs         100 Hz live brightness wiggle for 10 s (stamps knob_submit)
@@ -12,7 +12,8 @@
 B=${B:-test_results/afk}; mkdir -p $B
 PID=$(pgrep -f target/debug/wzrd-app | head -1)
 js() { local t=r$RANDOM; curl -s localhost:9124/cmd/webview_eval -d "$(python3 -c 'import json,sys;print(json.dumps({"js":"(async()=>{let r;try{r=await ("+sys.argv[1]+")}catch(e){r=\"ERR \"+e};await fetch(\"/__shell/cmd/debug_log\",{method:\"POST\",headers:{\"content-type\":\"application/json\"},body:JSON.stringify({msg:\"'$t' \"+(typeof r===\"string\"?r:JSON.stringify(r))})})})()"}))' "$1")" >/dev/null; sleep 1.5; grep -a "\[webview\] $t" $B/app.log | sed "s/.*$t //"; }
-room() { js "(localStorage.setItem('wzrd.route','$1'),location.reload(),'ok')" >/dev/null; sleep 3; }
+# Via the store, not localStorage + reload: a stored route of `align` boots into Perform (2026-10-14).
+room() { js "import('/src/state/store.ts').then(m=>(m.useStore.getState().setRoute('$1'),'ok'))" >/dev/null; sleep 2; }
 rpc() { uv run -q --with websockets python -c 'import asyncio,json,sys,websockets
 async def m():
   async with websockets.connect("ws://127.0.0.1:9123",max_size=None) as w:

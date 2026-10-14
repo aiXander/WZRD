@@ -20,13 +20,22 @@ export function Popover({
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
   useLayoutEffect(() => {
-    if (!anchor || !ref.current) return;
-    const a = anchor.getBoundingClientRect();
-    const h = ref.current.offsetHeight;
-    const below = a.bottom + 6;
-    const top = below + h > window.innerHeight - 8 ? Math.max(8, a.top - h - 6) : below;
-    const left = Math.min(window.innerWidth - width - 8, Math.max(8, a.right - width));
-    setPos({ left, top });
+    const el = ref.current;
+    if (!anchor || !el) return;
+    const place = () => {
+      const a = anchor.getBoundingClientRect();
+      const h = el.offsetHeight;
+      const below = a.bottom + 6;
+      const top = below + h > window.innerHeight - 8 ? Math.max(8, a.top - h - 6) : below;
+      const left = Math.min(window.innerWidth - width - 8, Math.max(8, a.right - width));
+      setPos((p) => (p && p.left === left && p.top === top ? p : { left, top }));
+    };
+    place();
+    // Content that grows while open (e.g. the ModEditor revealing shape +
+    // rate after a source pick) must not run off the bottom of the window.
+    const ro = new ResizeObserver(place);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [anchor, width]);
 
   useEffect(() => {

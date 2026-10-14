@@ -27,7 +27,8 @@ A gap analysis of "arrive at a venue, set up a full gig from scratch"
 - **Transitions are one crossfade.** TAKE only lerps.
 - **Generation and setup need a chat session.** Every MCP tool exists, but
   the app has no buttons for them — "render 4 more for this region" or
-  "segment this photo" can't be done from the UI.
+  "segment this photo" can't be done from the UI. (The content half moved
+  to [studio-content-library.md](studio-content-library.md).)
 - **No hardware controller** (unless it made it into the gig).
 
 The design spec's "not a library of pre-made looks" is about finished
@@ -46,13 +47,13 @@ that is done when its gate passes headlessly, then a UI one built on it.
 | 1 Library | T1a (PY + FX), T1b (APP) | T0 | 4, 6 |
 | 2 Chains / feedback / post | T2a (ENG), T2b (ENG), T2c (APP) | T0; T2c needs T1b | 4, 6 |
 | 3 TAKE transitions | T3a (ENG), T3b (APP) | T2a (`kind` field) | 4, 6 |
-| 4 In-app generation | T4a (APP Rust), T4b (APP UI) | — | 0–3 |
-| 5 Site room | T5 (APP) | T4a | 0–3 |
+| 4 In-app generation | moved to [studio-content-library.md](studio-content-library.md) | — | 0–3 |
+| 5 Site room | T5 (APP) | studio A3 | 0–3 |
 | 6 Booth hardening | MIDI (APP), T6 (ENG) | — | anything |
 | 7 Agent chat (sketch) | T7 (APP) | Foreman's dogfood checkpoint | anything |
 
 The ENG lane (0 → 1 → 2 → 3) is serial; the APP-only work of phases 4–6
-runs alongside it. Watch `src-tauri/src/{lib,rpc}.rs` — T1b, T4a and MIDI
+runs alongside it. Watch `src-tauri/src/{lib,rpc}.rs` — T1b, studio A3 and MIDI
 all add commands there; serialize them.
 
 ## Phase 0 — shared WGSL helpers (`#import`)
@@ -117,37 +118,19 @@ in the looks bank can carry its own transition, and the auto-pilot uses it.
 **Gate:** an auto-pilot run of 6 looks, each landing on the bar with a
 different transition, no black frame.
 
-## Phase 4 — in-app generation (the app becomes an MCP client)
+## Phase 4 — in-app generation — moved
 
-The generation tools already exist and are tested; the app just has no
-buttons for them. Instead of a new backend, **the app calls the local MCP
-server** (`python -m wzrd_mcp`, streamable-HTTP on `:8787`). No LLM in the
-app — buttons call tools (roadmap §5.10: Claude Code stays the author).
-
-- **T4a — plumbing (APP Rust):** the shell spawns the MCP server on demand
-  like the audio server (`WZRD_AUDIO` pattern in `src-tauri/src/lib.rs`) or
-  attaches to a running one; calls go through the **Rust side** (an MCP
-  client crate, e.g. `rmcp`) as Tauri commands — not from the webview, which
-  would hit CORS and break the browser bridge. Decide first: how
-  long-running calls (TextureFlow, Kling: minutes) report progress (MCP
-  progress notifications vs watching the output folder for C3 files).
-  Unpark `list_assets` / `mark_asset` (PY side): favourite / reject a clip,
-  written as the reserved `rating` key of its sidecar (C2).
-- **T4b — UI:** **"Render more" per region row** in the gig's clip grid:
-  recipe picker (`library/recipes/`), prompt, style images, count, estimated
-  cost → `texture_flow` with `region=` (gig package P3); or keyframe → video
-  (`nano_banana` + the image→video tool, Kling today). Results land in that
-  row flagged NEW (design only, TAKE stays human). **Job tray** (TopBar):
-  running/finished jobs, progress, cancel, running spend vs the project's
-  `spend_cap_usd` (C1, summed from sidecars). The grid hides rejects.
-
-**Gate:** from the grid, render 4 clips for one region and play one live
-without opening a chat session or a terminal.
+Folded into [studio-content-library.md](studio-content-library.md)
+(2026-10-12): the app's MCP client (was T4a) is its package A3, the job
+tray and ratings (was T4b, `mark_asset`) are its Studio room + render
+records. "Render more for this region" is its "More like this" / "Render
+with tray" buttons.
 
 ## Phase 5 — the Site room (daylight setup in the app)
 
-**T5 (APP), needs T4a.** A fifth room (before Prepare in the room order)
-that walks the setup chain, each step one MCP call through T4a's client,
+**T5 (APP), needs the MCP client** (package A3 of
+[studio-content-library.md](studio-content-library.md)). A fifth room (before Prepare in the room order)
+that walks the setup chain, each step one MCP call through that client,
 each output a plain file in the project so the agent can run the same steps
 headlessly (the gig's on-site run sheet skill is the script this room
 turns into buttons):
@@ -220,14 +203,21 @@ state + now-line and opens its Foreman card in the browser; (b) a thin chat
 panel in the Prepare room (design only — the design spec's "shape of the instrument" puts AI
 chat in design) whose Rust side calls
 `foremand`'s local API with the CLI bearer token and follows its SSE stream
-(not from the webview: Foreman checks exact Origin, same reason as T4a).
+(not from the webview: Foreman checks exact Origin).
+Its home is now the **Studio** room
+([studio-content-library.md](studio-content-library.md) S11), where
+content is made, rather than Prepare. Checked 2026-10-12: Foreman exposes
+no embeddable API (browser-only, internal daemon API, "no Tauri planned"),
+so the alternative to (b) is reusing its *pattern* directly — the real
+`claude` CLI in a PTY owned by the shell, rendered with xterm.js. Decide
+between the two when this phase is grilled.
 Step (b) needs one Foreman-side addition — today its tell route only
 accepts page clicks (`pin_id`) — planned in Foreman, not here.
 
 **Preconditions:** Foreman past its own one-week dogfood checkpoint (its
 API still moves); unchanged rules — agent works on design only, never
-`promote`, ADOPT stays the operator's. If T4a picks "watch the output
-folder" for job progress, the job tray shows agent-started renders too.
+`promote`, ADOPT stays the operator's. Agent-started renders already show
+in the Studio's job view through its job journal (studio contract L3).
 
 **Gate:** from the app, ask for "4 more clips for the left fabric, colder",
 answer the agent's one clarifying question by click, watch progress, and the

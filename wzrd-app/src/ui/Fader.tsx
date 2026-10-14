@@ -8,8 +8,14 @@
 //   press        jump to the pointer and keep dragging
 //   ⇧ + drag     fine: relative, 1/10 speed (no jump on press)
 //   double-click reset (`onReset`, else back to `defaultValue`)
-//   wheel        nudge by 1% of the range (⇧ = 0.1%)
-//   ← → ↑ ↓      nudge when focused
+//   ← → ↑ ↓      nudge when focused (1% of the range, ⇧ = 0.1%)
+//
+// No mouse wheel, on purpose (operator feedback 2026-10-14): a wheel over a
+// fader must scroll the panel it sits in — a scroll through the layer mixer
+// used to nudge every fader the pointer crossed. The value path is
+// `onChange`/`onCommit` → an action in state/actions.ts, never DOM-only, so a
+// hardware controller (MIDI, docs/TODO/midi-controller.md) drives the same
+// actions without touching this component.
 //
 // "A knob never jumps under my finger": while a drag is in flight the bar
 // shows its own value and ignores the prop, so a stale telemetry frame can't
@@ -17,7 +23,7 @@
 // riding inside it) and `ghost` (where the scene value sits when an override
 // pins the param elsewhere).
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 export type FaderProps = {
   value: number;
@@ -155,20 +161,6 @@ export function Fader({
     onChange(v);
     onCommit?.(v);
   }
-
-  // Wheel must be non-passive to preventDefault page scroll.
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const h = (e: WheelEvent) => {
-      if (disabled) return;
-      e.preventDefault();
-      const d = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? -e.deltaY : e.deltaX;
-      if (d !== 0) nudge(Math.sign(d), e.shiftKey);
-    };
-    el.addEventListener('wheel', h, { passive: false });
-    return () => el.removeEventListener('wheel', h);
-  });
 
   const f = (v: number) => clamp((v - min) / span, 0, 1);
   const origin = bipolar && min < 0 && max > 0 ? f(0) : 0;

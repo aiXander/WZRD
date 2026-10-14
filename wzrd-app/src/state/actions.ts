@@ -30,7 +30,7 @@ import {
   type LegName,
 } from '../api/ipc';
 import { commitSceneMutation, commitSceneNow, commitSceneText, settleCommits } from './sceneCommit';
-import { canonical, isDriver, parseScene, type Binding } from './scene';
+import { canonical, isDriver, layerTitle, parseScene, uniqueId, type Binding } from './scene';
 import { useStore, type Masters, type OverrideTable } from './store';
 
 // ---------- throttle ----------
@@ -65,6 +65,8 @@ export function resetActionState() {
     delete trailing[k];
   }
   preBlackout = preFlash = preFreeze = null;
+  deletedLayers.length = 0;
+  notifyUndo();
 }
 
 // ---------- projects (A1) ----------
@@ -334,35 +336,167 @@ export function setSceneParam(binding: string, param: string, value: any) {
   });
 }
 
-/** Modulation presets — the sources a VJ thinks in. */
+/** Clear both selections (layer + region) — Esc in Prepare, the
+ *  inspector's ×, a click on the empty map. */
+export function clearSelection() {
+  const st = useStore.getState();
+  st.setSelectedBindingId(null);
+  st.setSelectedLayerId(null);
+}
+
+// ---------- layer delete + undo (design scene edits) ----------
+//
+// Deleting a layer is one click/key (Prepare row ×, inspector, Perform
+// mixer on DESIGN, Delete/⌫), so it must be cheap to take back: each delete
+// stacks the removed binding + its index, ⌘Z (or the Layers panel's Undo)
+// puts the newest back. DESIGN-only like every structural edit — the wall
+// keeps the layer until TAKE. The stack is per project (resetActionState).
+
+const deletedLayers: { binding: Binding; index: number }[] = [];
+const undoListeners = new Set<() => void>();
+const notifyUndo = () => undoListeners.forEach((f) => f());
+
+export function subscribeLayerUndo(fn: () => void): () => void {
+  undoListeners.add(fn);
+  return () => undoListeners.delete(fn);
+}
+/** Id of the layer ⌘Z would restore, or null. */
+export const lastDeletedLayer = (): string | null => deletedLayers.at(-1)?.binding.id ?? null;
+
+export function deleteLayer(id: string): boolean {
+  const st = useStore.getState();
+  const list = parseScene(st.sceneJson)?.bindings ?? [];
+  const index = list.findIndex((b) => b.id === id);
+  if (index < 0) {
+    st.toast(`“${id}” isn’t in DESIGN — nothing to delete`, 'warn');
+    return false;
+  }
+  const binding = structuredClone(list[index]);
+  commitSceneMutation((s) => {
+    s.bindings = (s.bindings ?? []).filter((b: Binding) => b.id !== id);
+    return s;
+  });
+  deletedLayers.push({ binding, index });
+  if (deletedLayers.length > 20) deletedLayers.shift();
+  notifyUndo();
+  if (st.selectedBindingId === id) st.setSelectedBindingId(null);
+  if (st.hoveredBindingId === id) st.setHoveredBindingId(null);
+  st.toast(`Deleted “${layerTitle(binding)}” from DESIGN — ⌘Z restores it`, 'info');
+  return true;
+}
+
+/** Delete from wherever the hands are (Perform's mixer, the ⌫ key). On LIVE
+ *  this is the "edit in DESIGN" move: hands go to DESIGN, nothing is
+ *  deleted yet — the row the operator meant is right there to delete. */
+export function deleteLayerOnHands(id: string): boolean {
+  if (controlLeg() === 'live') {
+    void setDeck('design');
+    useStore.getState().toast('Layers are deleted on DESIGN — hands moved there. Delete again, then TAKE.', 'info');
+    return false;
+  }
+  return deleteLayer(id);
+}
+
+export function undoDeleteLayer(): boolean {
+  const d = deletedLayers.pop();
+  if (!d) return false;
+  notifyUndo();
+  const st = useStore.getState();
+  const taken = new Set((parseScene(st.sceneJson)?.bindings ?? []).map((b) => b.id));
+  const id = taken.has(d.binding.id) ? uniqueId(d.binding.id, taken) : d.binding.id;
+  commitSceneMutation((s) => {
+    const list = s.bindings ?? [];
+    list.splice(Math.min(d.index, list.length), 0, { ...d.binding, id });
+    s.bindings = list;
+    return s;
+  });
+  st.setSelectedBindingId(id);
+  st.toast(`Restored “${layerTitle({ ...d.binding, id })}”`, 'ok');
+  return true;
+}
+
+/** Modulation sources — the words a VJ thinks in. Audio sources are fixed
+ *  driver specs; the two clock sources are a *kind* whose rate and shape are
+ *  dialled separately (`setModRate` / `setModShape`): Tempo follows the BPM
+ *  grid (clock.beats below a bar, clock.bars from a bar up), Free runs in
+ *  seconds (clock.phase). */
 export const MOD_SOURCES: {
   id: string;
   label: string;
   group: 'audio' | 'clock';
+  title: string;
   spec: Record<string, any>;
 }[] = [
-  { id: 'kick', label: 'Kick', group: 'audio', spec: { driver: 'audio.onset', band: 'low', decay: 0.18 } },
-  { id: 'snare', label: 'Snare', group: 'audio', spec: { driver: 'audio.onset', band: 'mid', decay: 0.15 } },
-  { id: 'hats', label: 'Hats', group: 'audio', spec: { driver: 'audio.onset', band: 'high', decay: 0.08 } },
-  { id: 'low', label: 'Bass', group: 'audio', spec: { driver: 'audio.band', band: 'low' } },
-  { id: 'mid', label: 'Mids', group: 'audio', spec: { driver: 'audio.band', band: 'mid' } },
-  { id: 'high', label: 'Highs', group: 'audio', spec: { driver: 'audio.band', band: 'high' } },
-  { id: 'beat', label: 'Beat', group: 'clock', spec: { driver: 'clock.beats', n: 1 } },
-  { id: 'bar', label: 'Bar', group: 'clock', spec: { driver: 'clock.bars', n: 1 } },
-  { id: 'bar4', label: '4 Bars', group: 'clock', spec: { driver: 'clock.bars', n: 4 } },
-  { id: 'lfo', label: 'Slow', group: 'clock', spec: { driver: 'clock.phase', rate: 0.125 } },
+  { id: 'kick', label: 'Kick', group: 'audio', title: 'Flash on each low hit, then decay', spec: { driver: 'audio.onset', band: 'low', decay: 0.18 } },
+  { id: 'snare', label: 'Snare', group: 'audio', title: 'Flash on each mid hit, then decay', spec: { driver: 'audio.onset', band: 'mid', decay: 0.15 } },
+  { id: 'hats', label: 'Hats', group: 'audio', title: 'Flash on each high hit, then decay', spec: { driver: 'audio.onset', band: 'high', decay: 0.08 } },
+  { id: 'low', label: 'Bass', group: 'audio', title: 'Follow the low-band level', spec: { driver: 'audio.band', band: 'low' } },
+  { id: 'mid', label: 'Mids', group: 'audio', title: 'Follow the mid-band level', spec: { driver: 'audio.band', band: 'mid' } },
+  { id: 'high', label: 'Highs', group: 'audio', title: 'Follow the high-band level', spec: { driver: 'audio.band', band: 'high' } },
+  { id: 'tempo', label: 'Tempo', group: 'clock', title: 'A shape locked to the beat grid (beats / bars)', spec: { driver: 'clock.bars', n: 4 } },
+  { id: 'free', label: 'Free', group: 'clock', title: 'A shape in seconds, independent of the BPM', spec: { driver: 'clock.phase', rate: 0.125 } },
 ];
+
+/** Engine `shape` names (render-engine.md §2.1). Clock drivers only. */
+export type ModShape = 'saw' | 'ramp_down' | 'pingpong' | 'sine' | 'square' | 'random';
+export const MOD_SHAPES: { id: ModShape; label: string; title: string }[] = [
+  { id: 'pingpong', label: 'Ping-pong', title: 'Up and back down at constant speed — no jump' },
+  { id: 'sine', label: 'Sine', title: 'Up and back down, eased at both ends — the smoothest' },
+  { id: 'saw', label: 'Ramp up', title: 'Rest → peak, then jumps back to rest' },
+  { id: 'ramp_down', label: 'Ramp down', title: 'Peak → rest, then jumps back to peak' },
+  { id: 'square', label: 'Square', title: 'Peak for the first half of each cycle, rest for the second' },
+  { id: 'random', label: 'Random', title: 'Glides to a new random spot every cycle. Click again for a different sequence' },
+];
+/** What new clock modulations get: the operator wants smooth textures. */
+const DEFAULT_MOD_SHAPE: ModShape = 'pingpong';
+
+/** Rate choices: Tempo in bars (¼ bar = 1 beat), Free in seconds. */
+export const TEMPO_RATES = [0.25, 0.5, 1, 2, 4, 8, 16];
+export const FREE_RATES = [1, 2, 4, 8, 16, 32, 64];
+
+const isClock = (v: any) => isDriver(v) && /^clock\.(bars|beats|phase)$/.test(v.driver);
 
 export function modSourceOf(v: any): (typeof MOD_SOURCES)[number] | null {
   if (!isDriver(v)) return null;
-  return (
-    MOD_SOURCES.find((m) =>
-      Object.entries(m.spec).every(([k, val]) => k === 'decay' || k === 'rate' || v[k] === val)
-    ) ?? null
-  );
+  const id =
+    v.driver === 'clock.bars' || v.driver === 'clock.beats'
+      ? 'tempo'
+      : v.driver === 'clock.phase'
+      ? 'free'
+      : MOD_SOURCES.find((m) => m.spec.driver === v.driver && m.spec.band === v.band)?.id;
+  return MOD_SOURCES.find((m) => m.id === id) ?? null;
 }
 
-/** Route a modulation source onto a param (range defaults to value → max). */
+/** A clock driver's cycle length: bars for Tempo, seconds for Free. */
+export function modPeriod(v: any): number | null {
+  if (!isDriver(v)) return null;
+  if (v.driver === 'clock.bars') return Number(v.n ?? 1);
+  if (v.driver === 'clock.beats') return Number(v.n ?? 1) / 4;
+  if (v.driver === 'clock.phase') return 1 / Math.max(1e-6, Number(v.rate ?? 0.1));
+  return null;
+}
+
+export function modShapeOf(v: any): ModShape | null {
+  return isClock(v) ? ((v.shape as ModShape) ?? 'saw') : null;
+}
+
+function clockKeys(kind: 'tempo' | 'free', period: number): Record<string, any> {
+  if (kind === 'free') return { driver: 'clock.phase', rate: 1 / period };
+  return period < 1 ? { driver: 'clock.beats', n: period * 4 } : { driver: 'clock.bars', n: period };
+}
+
+/** Rewrite one modulated param's driver object (no-op if it isn't one). */
+function patchMod(binding: string, param: string, fn: (prev: Record<string, any>) => Record<string, any>) {
+  mutateBinding(binding, (b) => {
+    const prev = b.params?.[param];
+    if (!isDriver(prev)) return;
+    b.params = { ...(b.params ?? {}), [param]: fn(prev) };
+  });
+}
+
+/** Route a modulation source onto a param. A fresh routing sweeps from the
+ *  current value toward the far end of the param's range; re-routing keeps
+ *  the range, and clock → clock keeps the shape. */
 export function modulate(
   binding: string,
   param: string,
@@ -380,22 +514,53 @@ export function modulate(
       next = isDriver(prev) && Array.isArray(prev.range) ? prev.range[0] : current;
     } else {
       const src = MOD_SOURCES.find((m) => m.id === sourceId)!;
-      const range =
-        isDriver(prev) && Array.isArray(prev.range)
-          ? prev.range
-          : [current, current + (hi - current) * 0.75 || hi];
-      next = { ...src.spec, range: range.map((x: number) => Math.min(hi, Math.max(lo, x))) };
+      const span = hi - lo || 1;
+      let to = current + (hi - current) * 0.75;
+      // Already near the top: sweep downward instead of a dead range.
+      if (Math.abs(to - current) < span * 0.05) to = current - (current - lo) * 0.75;
+      const range = isDriver(prev) && Array.isArray(prev.range) ? prev.range : [current, to];
+      let spec: Record<string, any> = { ...src.spec };
+      if (src.group === 'clock') {
+        const same = modSourceOf(prev)?.id === src.id;
+        const period = same ? modPeriod(prev)! : src.id === 'tempo' ? 4 : 8;
+        const shape = modShapeOf(prev) ?? DEFAULT_MOD_SHAPE;
+        spec = { ...clockKeys(src.id as 'tempo' | 'free', period), shape };
+        if (shape === 'random') spec.seed = isDriver(prev) && prev.seed != null ? prev.seed : newSeed();
+      }
+      next = { ...spec, range: range.map((x: number) => Math.min(hi, Math.max(lo, x))) };
     }
     b.params = { ...(b.params ?? {}), [param]: next };
   });
 }
 
 export function setModRange(binding: string, param: string, from: number, to: number) {
-  mutateBinding(binding, (b) => {
-    const prev = b.params?.[param];
-    if (!isDriver(prev)) return;
-    b.params = { ...(b.params ?? {}), [param]: { ...prev, range: [from, to] } };
+  patchMod(binding, param, (prev) => ({ ...prev, range: [from, to] }));
+}
+
+const newSeed = () => Math.floor(Math.random() * 10000);
+
+/** Clock modulations only. Picking `random` again re-rolls its sequence. */
+export function setModShape(binding: string, param: string, shape: ModShape) {
+  patchMod(binding, param, (prev) => {
+    if (!isClock(prev)) return prev;
+    const { seed: _seed, ...rest } = prev;
+    return shape === 'random' ? { ...rest, shape, seed: newSeed() } : { ...rest, shape };
   });
+}
+
+/** Cycle length for a clock modulation — bars (Tempo) or seconds (Free). */
+export function setModRate(binding: string, param: string, period: number) {
+  patchMod(binding, param, (prev) => {
+    const kind = modSourceOf(prev)?.id;
+    if (kind !== 'tempo' && kind !== 'free') return prev;
+    const { driver: _d, n: _n, rate: _r, ...rest } = prev;
+    return { ...clockKeys(kind, period), ...rest };
+  });
+}
+
+/** How long each onset hit glows, in seconds. */
+export function setModDecay(binding: string, param: string, decay: number) {
+  patchMod(binding, param, (prev) => (prev.driver === 'audio.onset' ? { ...prev, decay } : prev));
 }
 
 /** Write the design leg's knob pins into scene.json params and clear them —

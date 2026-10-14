@@ -34,6 +34,7 @@ import { dropPendingCommits } from './state/sceneCommit';
 import { useAutopilot } from './state/autopilot';
 import { useClipsPoller } from './state/clips';
 import { ensureMasks } from './state/masks';
+import { loadLayout } from './ui/layoutStore';
 import { useShortcuts } from './state/shortcuts';
 import { useAutopilotDriver } from './state/autopilot';
 import { HelpOverlay, Toasts, TopBar } from './components/TopBar';
@@ -83,6 +84,8 @@ async function hydrate() {
   try {
     const p = await projectCurrent();
     st.setProject(p);
+    // Panel layout is per project (ui_layout.json); no-op for the same one.
+    loadLayout(p.scene_path);
     if (prev && prev.scene_path !== p.scene_path) useAutopilot.getState().setOn(false);
   } catch (e) {
     console.warn('project_current:', e);

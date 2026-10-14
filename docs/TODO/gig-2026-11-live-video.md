@@ -85,7 +85,11 @@ spend cap".
 **C3 — clip files** — landed with P5: `generated/<stem>.mp4` → `<stem>.mov`
 (HAP) + `<stem>.mov.meta.json` (`parent` = the mp4) + `<stem>.thumb.jpg`
 (written by the MCP). Contract now in [mcp-server.md](../reference/mcp-server.md)
-"Playable clips".
+"Playable clips". Proposed change (2026-10-12, not built):
+[studio-content-library.md](studio-content-library.md) moves renders out of
+the project into a media library and has shows hold imported copies in
+`<project>/clips/` behind named **decks** (`decks.json` replacing
+`clipgrid.json`). That plan's package D1 lands by ≈ 7 Nov or after the gig.
 
 **C4 — `source_box` in `pack.json`** — landed with P4: optional per-layer
 `[x0, y0, x1, y1]`, pack pixels, max-exclusive like `bbox`, may extend past

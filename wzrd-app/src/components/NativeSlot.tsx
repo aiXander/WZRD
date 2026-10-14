@@ -16,6 +16,7 @@
 import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import { previewSetSlot, type PreviewParams } from '../api/ipc';
 import { previewMode } from '../api/previewMode';
+import { LAYOUT_EVENT } from '../ui/layoutStore';
 
 export function NativeSlot({
   params,
@@ -79,6 +80,9 @@ export function NativeSlot({
     ro.observe(el);
     window.addEventListener('resize', onForce);
     window.addEventListener('scroll', onMove, true);
+    // A panel resize/swap (ui/layoutSplit.tsx) can move the slot without
+    // resizing it, which the ResizeObserver doesn't see.
+    window.addEventListener(LAYOUT_EVENT, onMove);
     if (previewMode() === 'window') window.addEventListener('focus', onForce);
     if (import.meta.env.DEV && previewMode() === 'underlay') checkHole(el);
     return () => {
@@ -86,6 +90,7 @@ export function NativeSlot({
       ro.disconnect();
       window.removeEventListener('resize', onForce);
       window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener(LAYOUT_EVENT, onMove);
       window.removeEventListener('focus', onForce);
       previewSetSlot({ x: 0, y: 0, width: 0, height: 0, visible: false }).catch(() => {});
     };

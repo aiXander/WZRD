@@ -77,6 +77,20 @@ registry is the whole job of "make X MIDI-mappable".
 **The keyboard shortcuts may later move onto the same registry** (one table
 for keys and MIDI) — optional, not part of this plan.
 
+### Fader addressability today (checked 2026-10-14)
+
+Mouse-wheel fader nudging was removed (the wheel always scrolls), so MIDI is
+the only non-pointer path to a fader. Already action-addressable in
+`state/actions.ts`: masters `setMaster`, crossfade `setCrossfade`, mixer
+`setOpacity(binding, v)`, author dials `setSceneParam`, perform dials
+`pin(binding, param, v, leg)`, mod ranges `setModRange`. Gaps a bridge needs
+closed first: (1) the shared-knob fader in `LayerParams` calls `paramSet`
+IPC directly, not an action; (2) a dial's min/max is computed inside
+`LayerParams` (`rangeFor`), unreachable for a `selected.dial.N` control;
+(3) current-value getters exist only for the mixer (`mixOf`) — soft
+takeover needs them for the rest; (4) LayerStack's "only on the leg your
+hands are on" check lives in the component, not the action.
+
 ## File formats
 
 **Profile** — `library/midi/<name>.midi.json` (reusable):

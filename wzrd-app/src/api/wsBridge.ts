@@ -61,6 +61,8 @@ const SHELL_COMMANDS = new Set([
   'clips_list',
   'clip_thumb',
   'clip_file',
+  'ui_layout_read',
+  'ui_layout_write',
   'list_effects',
   'read_effect',
   'read_scene_file',

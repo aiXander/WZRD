@@ -66,6 +66,60 @@ point is one sitting.
 
 | Block | Owner | Duration | What it proves |
 |---|---|---|---|
+| B8 | operator-UI sprint 2026-10-14 | ≈ 10 min | the native preview follows resized/swapped panels; Perform layer × deletes |
+
+### B8 — operator-UI sprint (2026-10-14): panel layout × native preview, Perform delete
+
+**Owner:** the 2026-10-14 operator-UI feedback sprint — resizable/swappable
+panels and Perform mixer delete ([operator-ui.md](../reference/operator-ui.md)
+"Panel layout", "Layer delete"). Both were verified in the browser seat
+only; the native underlay is invisible there. (Wheel-on-fader removal needs
+no screen: `ui/Fader.tsx` has no wheel listener.) **Duration:** ≈ 10 min.
+
+**Preconditions:** `projects/fixture-a` exists (else
+`uv run python wzrd-app/scripts/fixture_projects.py`). Work on a copy so
+the fixture's scene and layout stay clean.
+
+**Commands** (repo root, wrapped in `caffeinate -dims`):
+
+    rm -rf projects/b8 && cp -R projects/fixture-a projects/b8 && rm -f projects/b8/ui_layout.json
+    export B=test_results/afk-b8 && mkdir -p $B
+    (cd wzrd-app && WZRD_SCENE=../projects/b8/scene.json pnpm tauri dev > ../$B/app.log 2>&1 &)
+    until grep -q "preview underlay installed" $B/app.log; do sleep 1; done; sleep 5
+    source .claude/skills/afk-session/scripts/appenv.sh
+    sidebyside
+    # 1. Perform: unlock, drag the side column 200 px left, then swap stage/side.
+    room perform
+    js "import('/src/ui/layoutStore.ts').then(m=>(m.setLayoutLocked(false),'ok'))"
+    shot b8-perform-before
+    js "(()=>{const e=[...document.querySelectorAll('[class*=cursor-col-resize]')].pop();const r=e.getBoundingClientRect(),o={bubbles:true,pointerId:1,isPrimary:true,buttons:1,clientY:r.top+200};e.dispatchEvent(new PointerEvent('pointerdown',{...o,clientX:r.left+4}));for(const d of [50,100,150,200]){window.dispatchEvent(new PointerEvent('pointermove',{...o,clientX:r.left+4-d}))}window.dispatchEvent(new PointerEvent('pointerup',{...o,buttons:0,clientX:r.left-196}));return 'ok'})()"
+    sleep 1; shot b8-perform-resized
+    js "import('/src/ui/layoutStore.ts').then(m=>(m.setPaneOrder('perform.cols',['side','main']),m.notifyLayout(),'ok'))"
+    sleep 1; shot b8-perform-swapped
+    # 2. Prepare: resize the left column (the surface map's native slot must follow).
+    room prepare
+    js "(()=>{const e=[...document.querySelectorAll('[class*=cursor-col-resize]')][0];const r=e.getBoundingClientRect(),o={bubbles:true,pointerId:1,isPrimary:true,buttons:1,clientY:r.top+200};e.dispatchEvent(new PointerEvent('pointerdown',{...o,clientX:r.left+4}));window.dispatchEvent(new PointerEvent('pointermove',{...o,clientX:r.left+124}));window.dispatchEvent(new PointerEvent('pointerup',{...o,buttons:0,clientX:r.left+124}));return 'ok'})()"
+    sleep 1; shot b8-prepare-resized
+    # 3. Perform delete (DESIGN): rows before / after clicking the first row's ×.
+    room perform
+    js "document.querySelectorAll('[aria-label^=\"Delete \"]').length" > $B/rows-before.txt
+    js "(document.querySelector('[aria-label^=\"Delete \"]').click(), 'ok')"; sleep 2
+    js "document.querySelectorAll('[aria-label^=\"Delete \"]').length" > $B/rows-after.txt
+    cat projects/b8/ui_layout.json > $B/ui_layout.json
+
+**Pass criteria:** in `b8-perform-resized`, `-swapped` and
+`b8-prepare-resized` the live picture fills the monitor / surface-map frame
+exactly: no offset, no stale strip, no picture leaking under another panel.
+`ui_layout.json` has `perform.cols/side` ≈ 516 and `order.perform.cols =
+["side","main"]`. `rows-after.txt` is one less than `rows-before.txt`
+(the deck is on DESIGN after load). If the `cursor-col-resize` selector
+misses, record "selector drift" and move on.
+
+**Results:** _(filled by the runner)_
+
+**After the run:** delete `projects/b8`. Pass → delete this block and its
+runbook row. A misplaced native picture is a `notifyLayout()` gap — see the
+operator-ui.md trap on NativeSlot moves.
 
 ---
 

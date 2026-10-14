@@ -356,12 +356,12 @@ impl ScalarValue {
 #[derive(Debug, Clone)]
 pub enum DriverSpec {
     Const(f32),
-    /// Phase ramp 0..1 across `n` bars.
-    ClockBars { n: f32 },
-    /// Phase ramp 0..1 across `n` beats.
-    ClockBeats { n: f32 },
-    /// Hz-based phase ramp 0..1 across `1/rate` seconds.
-    ClockPhase { rate: f32 },
+    /// One `shape` cycle (0..1) across `n` bars.
+    ClockBars { n: f32, shape: Shape },
+    /// One `shape` cycle (0..1) across `n` beats.
+    ClockBeats { n: f32, shape: Shape },
+    /// Hz-based: one `shape` cycle (0..1) across `1/rate` seconds.
+    ClockPhase { rate: f32, shape: Shape },
     /// Wallclock seconds since engine start (unbounded; for raw `time`).
     ClockTime,
     AudioBand(AudioBand),
@@ -381,21 +381,32 @@ impl DriverSpec {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("driver object missing `driver` field: {v}"))?;
         match driver {
-            "const" => {
-                let value = v.get("value").and_then(Value::as_f64).unwrap_or(0.0);
-                Ok(Self::Const(value as f32))
-            }
             "clock.bars" => {
                 let n = v.get("n").and_then(Value::as_f64).unwrap_or(1.0).max(1e-3) as f32;
-                Ok(Self::ClockBars { n })
+                Ok(Self::ClockBars { n, shape: Shape::parse(v)? })
             }
             "clock.beats" => {
                 let n = v.get("n").and_then(Value::as_f64).unwrap_or(1.0).max(1e-3) as f32;
-                Ok(Self::ClockBeats { n })
+                Ok(Self::ClockBeats { n, shape: Shape::parse(v)? })
             }
             "clock.phase" => {
                 let rate = v.get("rate").and_then(Value::as_f64).unwrap_or(0.1) as f32;
-                Ok(Self::ClockPhase { rate })
+                Ok(Self::ClockPhase { rate, shape: Shape::parse(v)? })
+            }
+            // These have no cycle to shape — a `shape` here is a mistake
+            // worth surfacing, not silently ignoring.
+            "const" | "clock.time" | "audio.band" | "audio.onset" | "ui.slider"
+                if v.get("shape").is_some_and(|s| !s.is_null()) =>
+            {
+                bail!(
+                "`shape` only applies to the periodic clocks (clock.bars / clock.beats / \
+                 clock.phase), not {driver:?} — to invert an audio or slider driver, \
+                 swap the `range` ends instead ([to, from])"
+                )
+            }
+            "const" => {
+                let value = v.get("value").and_then(Value::as_f64).unwrap_or(0.0);
+                Ok(Self::Const(value as f32))
             }
             "clock.time" => Ok(Self::ClockTime),
             "audio.rms" => bail!(
@@ -426,9 +437,9 @@ impl DriverSpec {
     pub fn eval(&self, frame: &FrameContext) -> f32 {
         match self {
             DriverSpec::Const(v) => *v,
-            DriverSpec::ClockBars { n } => phase(frame.bar_time(), *n),
-            DriverSpec::ClockBeats { n } => phase(frame.beat_time(), *n),
-            DriverSpec::ClockPhase { rate } => phase(frame.elapsed_sec, 1.0 / rate.max(1e-6)),
+            DriverSpec::ClockBars { n, shape } => shape.eval(frame.bar_time() / n.max(1e-6)),
+            DriverSpec::ClockBeats { n, shape } => shape.eval(frame.beat_time() / n.max(1e-6)),
+            DriverSpec::ClockPhase { rate, shape } => shape.eval(frame.elapsed_sec * rate.max(1e-6)),
             DriverSpec::ClockTime => frame.elapsed_sec,
             DriverSpec::AudioBand(b) => frame.band(*b),
             DriverSpec::AudioOnset { band, decay } => frame.onset(*band, *decay),
@@ -443,9 +454,11 @@ impl DriverSpec {
     pub fn describe(&self) -> String {
         match self {
             DriverSpec::Const(v) => format!("const({v})"),
-            DriverSpec::ClockBars { n } => format!("clock.bars({n})"),
-            DriverSpec::ClockBeats { n } => format!("clock.beats({n})"),
-            DriverSpec::ClockPhase { rate } => format!("clock.phase({rate})"),
+            DriverSpec::ClockBars { n, shape } => format!("clock.bars({n}){}", shape.suffix()),
+            DriverSpec::ClockBeats { n, shape } => format!("clock.beats({n}){}", shape.suffix()),
+            DriverSpec::ClockPhase { rate, shape } => {
+                format!("clock.phase({rate}){}", shape.suffix())
+            }
             DriverSpec::ClockTime => "clock.time".to_string(),
             DriverSpec::AudioBand(b) => format!("audio.band({})", band_name(*b)),
             DriverSpec::AudioOnset { band, .. } => {
@@ -533,13 +546,113 @@ fn parse_band(v: &Value) -> Result<AudioBand> {
     AudioBand::parse(band).ok_or_else(|| anyhow!("unknown band {band:?}"))
 }
 
-fn phase(t: f32, period: f32) -> f32 {
-    let p = period.max(1e-6);
-    let mut x = (t / p).fract();
-    if x < 0.0 {
-        x += 1.0;
+/// Waveform a periodic clock driver traces over one cycle — `"shape"` on a
+/// `clock.bars` / `clock.beats` / `clock.phase` object. Every shape maps
+/// into [0, 1] (so `range` and the probe's `max(from, to)` stay valid) and
+/// is a pure function of the clock *position* (cycles elapsed, unbounded):
+/// both §5.6 legs, a TAKE and a re-run trace the identical curve, the same
+/// transport-purity rule [`PickRate::cycle`] keeps for picks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shape {
+    /// 0 → 1 ramp, then a jump back to 0. The default: a driver without
+    /// `shape` behaves exactly as before shapes existed.
+    Saw,
+    /// 1 → 0 ramp, then a jump back to 1.
+    RampDown,
+    /// Triangle 0 → 1 → 0 — no jump, constant speed both ways.
+    PingPong,
+    /// `0.5 − 0.5·cos 2πx`: 0 → 1 → 0, eased at both turnarounds — the
+    /// smoothest shape.
+    Sine,
+    /// 1 for the first half of the cycle, 0 for the second.
+    Square,
+    /// A fresh random target every cycle, eased (smoothstep) from the
+    /// previous one — wandering but never jumping. Targets are a hash of
+    /// (cycle index, seed), so `seed` picks a different (still
+    /// deterministic) wander for params that share a rate.
+    Random { seed: u32 },
+}
+
+impl Shape {
+    pub const NAMES: &'static str = "saw | ramp_down | pingpong | sine | square | random";
+
+    /// Read `shape` (+ `seed` for `random`) off a clock driver object.
+    /// Missing / null → [`Shape::Saw`]; an unknown name is a parse error.
+    pub fn parse(v: &Value) -> Result<Self> {
+        let name = match v.get("shape") {
+            None | Some(Value::Null) => return Ok(Self::Saw),
+            Some(Value::String(s)) => s.as_str(),
+            Some(other) => bail!("driver `shape` must be a string ({}), got {other}", Self::NAMES),
+        };
+        Ok(match name {
+            "saw" | "ramp_up" => Self::Saw,
+            "ramp_down" => Self::RampDown,
+            "pingpong" | "triangle" => Self::PingPong,
+            "sine" => Self::Sine,
+            "square" => Self::Square,
+            "random" => Self::Random {
+                seed: v.get("seed").and_then(Value::as_f64).unwrap_or(0.0) as i64 as u32,
+            },
+            other => bail!("unknown driver shape {other:?} (expected {})", Self::NAMES),
+        })
     }
-    x
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Saw => "saw",
+            Self::RampDown => "ramp_down",
+            Self::PingPong => "pingpong",
+            Self::Sine => "sine",
+            Self::Square => "square",
+            Self::Random { .. } => "random",
+        }
+    }
+
+    /// Telemetry label suffix: empty for the default saw, so pre-shape
+    /// labels ("clock.bars(4)") are unchanged.
+    fn suffix(&self) -> String {
+        match self {
+            Self::Saw => String::new(),
+            other => format!(" {}", other.name()),
+        }
+    }
+
+    /// Evaluate at clock position `pos` (cycles elapsed; may be negative
+    /// right after a resync pulls the grid back).
+    pub fn eval(&self, pos: f32) -> f32 {
+        let cycle = pos.floor();
+        let x = (pos - cycle).clamp(0.0, 1.0);
+        match self {
+            Self::Saw => x,
+            Self::RampDown => 1.0 - x,
+            Self::PingPong => 1.0 - (2.0 * x - 1.0).abs(),
+            Self::Sine => 0.5 - 0.5 * (std::f32::consts::TAU * x).cos(),
+            Self::Square => {
+                if x < 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Random { seed } => {
+                let k = cycle as i64;
+                let a = hash_unit(k, *seed);
+                let b = hash_unit(k + 1, *seed);
+                let s = x * x * (3.0 - 2.0 * x);
+                a + (b - a) * s
+            }
+        }
+    }
+}
+
+/// splitmix64 of (cycle, seed) → uniform [0, 1). Stateless on purpose.
+fn hash_unit(cycle: i64, seed: u32) -> f32 {
+    let mut z = (cycle as u64) ^ (seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(32);
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
 /// Sampled-once-per-frame view of clock + audio state. Passed by reference
@@ -827,6 +940,93 @@ mod tests {
         .is_err());
     }
 
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn shapes_trace_their_waveforms() {
+        use Shape::*;
+        // (shape, [x=0, 0.25, 0.5, 0.75])
+        let cases: [(Shape, [f32; 4]); 5] = [
+            (Saw, [0.0, 0.25, 0.5, 0.75]),
+            (RampDown, [1.0, 0.75, 0.5, 0.25]),
+            (PingPong, [0.0, 0.5, 1.0, 0.5]),
+            (Sine, [0.0, 0.5, 1.0, 0.5]),
+            (Square, [1.0, 1.0, 0.0, 0.0]),
+        ];
+        for (shape, want) in cases {
+            for (i, w) in want.iter().enumerate() {
+                // Cycle 3 (and a negative one) must look like cycle 0.
+                for base in [0.0, 3.0, -2.0] {
+                    let got = shape.eval(base + i as f32 * 0.25);
+                    assert!(close(got, *w), "{shape:?} at {}: {got} != {w}", base + i as f32 * 0.25);
+                }
+            }
+        }
+        // The smooth shapes never jump across the cycle boundary.
+        for shape in [PingPong, Sine, Random { seed: 7 }] {
+            assert!((shape.eval(4.0 - 1e-3) - shape.eval(4.0)).abs() < 0.02, "{shape:?} jumps");
+        }
+    }
+
+    #[test]
+    fn random_shape_is_pure_bounded_and_seeded() {
+        let r = Shape::Random { seed: 1 };
+        let mut distinct = std::collections::HashSet::new();
+        for i in 0..400 {
+            let pos = i as f32 * 0.137 - 10.0;
+            let v = r.eval(pos);
+            assert!((0.0..=1.0).contains(&v), "out of range at {pos}: {v}");
+            assert_eq!(v, r.eval(pos), "not a pure function of position");
+            distinct.insert((r.eval(pos.floor()) * 1e4) as i32);
+        }
+        assert!(distinct.len() > 10, "targets don't vary per cycle");
+        // Lands exactly on each cycle's target at the boundary.
+        assert!(close(r.eval(5.0), hash_unit(5, 1)));
+        assert!(close(r.eval(5.5), 0.5 * (hash_unit(5, 1) + hash_unit(6, 1))));
+        let other = Shape::Random { seed: 2 };
+        assert!((0..8).any(|k| r.eval(k as f32) != other.eval(k as f32)), "seed ignored");
+    }
+
+    #[test]
+    fn shape_parses_defaults_and_rejects() {
+        let p = |v: serde_json::Value| DriverSpec::parse(&v);
+        // Back-compat: no shape = the old saw, label unchanged.
+        let d = p(serde_json::json!({"driver": "clock.bars", "n": 4})).unwrap();
+        assert!(matches!(d, DriverSpec::ClockBars { shape: Shape::Saw, .. }));
+        assert_eq!(d.describe(), "clock.bars(4)");
+        let d = p(serde_json::json!({"driver": "clock.beats", "n": 2, "shape": "pingpong"})).unwrap();
+        assert_eq!(d.describe(), "clock.beats(2) pingpong");
+        let d = p(serde_json::json!({"driver": "clock.phase", "rate": 0.5, "shape": "random", "seed": 9}))
+            .unwrap();
+        assert!(matches!(d, DriverSpec::ClockPhase { shape: Shape::Random { seed: 9 }, .. }));
+        let err = p(serde_json::json!({"driver": "clock.bars", "shape": "wobbly"})).unwrap_err();
+        assert!(err.to_string().contains("pingpong"), "{err}");
+        let err = p(serde_json::json!({"driver": "audio.band", "band": "low", "shape": "sine"}))
+            .unwrap_err();
+        assert!(err.to_string().contains("range"), "{err}");
+        assert!(p(serde_json::json!({"driver": "audio.band", "band": "low", "shape": null})).is_ok());
+    }
+
+    #[test]
+    fn shaped_clock_maps_through_range() {
+        let v = ScalarValue::parse(&serde_json::json!({
+            "driver": "clock.bars", "n": 1, "shape": "pingpong", "range": [0.2, 1.0]
+        }))
+        .unwrap();
+        let sliders = SliderBank::default();
+        let audio = AudioFeatures::new();
+        let mut t = Transport::new(120.0); // 1 bar = 2 s
+        let at = |t: &Transport| v.eval(&t.frame_context(&audio, &sliders, 1.0));
+        assert!(close(at(&t), 0.2)); // bar line = rest
+        t.step_by(1.0, 1.0); // half a bar = peak
+        assert!(close(at(&t), 1.0));
+        t.step_by(0.5, 1.0); // three quarters = halfway back down
+        assert!(close(at(&t), 0.6));
+        assert_eq!(v.describe(), "clock.bars(1) pingpong → 0.2..1");
+    }
+
     #[test]
     fn audio_listen_scales_audio_drivers_only() {
         let audio = null_audio();
@@ -836,7 +1036,7 @@ mod tests {
         // Bands are 0 on null audio anyway; the point is the scaling path
         // compiles and clock drivers ignore the listen master.
         assert_eq!(ctx.band(AudioBand::Low), 0.0);
-        let clock = DriverSpec::ClockPhase { rate: 1.0 };
+        let clock = DriverSpec::ClockPhase { rate: 1.0, shape: Shape::Saw };
         let _ = clock.eval(&ctx);
     }
 }

@@ -8,16 +8,23 @@ import { IN_TAURI } from '../api/transport';
 import { resyncBeat, setBpm, tapTempo } from '../state/actions';
 import { adoptAgentScene } from '../state/sceneCommit';
 import { useStore, type Route } from '../state/store';
-import { Dot, Kbd } from '../ui/primitives';
+import { Btn, Dot, Kbd } from '../ui/primitives';
+import { Popover } from '../ui/Popover';
+import { resetLayout, setLayoutLocked, useLayout } from '../ui/layoutStore';
 import { useTelemetryDemand } from '../api/telemetryDemand';
 import { DeckSwitch, TakeButton } from './DeckPanel';
 import { ProjectMenu } from './ProjectMenu';
 import { restartEngine } from '../state/actions';
 
+// The tab bar holds the rooms you live in. Align (once per load-in) and
+// Debug sit one click down in the ⚙ menu, with the panel-layout lock.
 const ROUTES: { id: Route; label: string; key: string; hint: string }[] = [
   { id: 'prepare', label: 'Prepare', key: '⌘1', hint: 'Build the look: regions, effects, code' },
-  { id: 'align', label: 'Align', key: '⌘2', hint: 'Land the light on the surface' },
-  { id: 'perform', label: 'Perform', key: '⌘3', hint: 'Play the show' },
+  { id: 'perform', label: 'Perform', key: '⌘2', hint: 'Play the show' },
+];
+const MENU_ROUTES: { id: Route; label: string; key: string; hint: string }[] = [
+  { id: 'align', label: 'Align', key: '⌘3', hint: 'Land the light on the surface — once per load-in' },
+  { id: 'debug', label: 'Debug', key: '⌘4', hint: 'Engine internals: logs, reloads, frame timing' },
 ];
 
 export function TopBar() {
@@ -53,6 +60,16 @@ export function TopBar() {
             {r.label}
           </button>
         ))}
+        {/* A menu room shows as a tab while you're in it, so you can see where you are. */}
+        {MENU_ROUTES.filter((r) => r.id === route).map((r) => (
+          <span
+            key={r.id}
+            title={`${r.hint} (${r.key}) — leave via Prepare / Perform`}
+            className="h-7 px-2.5 xl:px-3 rounded-md text-[12px] font-medium whitespace-nowrap bg-raised text-fg shadow-inset flex items-center"
+          >
+            {r.label}
+          </span>
+        ))}
       </nav>
 
       {route !== 'perform' && (
@@ -76,17 +93,9 @@ export function TopBar() {
 
       <Tempo />
       <Health />
+      <LayoutUnlockedChip />
 
-      <button
-        onClick={() => setRoute('debug')}
-        title="Engine internals: logs, reloads, frame timing (⌘4)"
-        className={
-          'h-7 w-7 shrink-0 rounded-md text-[13px] border ' +
-          (route === 'debug' ? 'bg-raised border-line2 text-fg' : 'border-transparent text-fg3 hover:text-fg hover:bg-raised')
-        }
-      >
-        ⚙
-      </button>
+      <SetupMenu />
       <button
         onClick={() => setShowHelp(true)}
         title="Keyboard shortcuts (?)"
@@ -95,6 +104,102 @@ export function TopBar() {
         ?
       </button>
     </header>
+  );
+}
+
+/** ⚙ — the rooms you don't live in (Align, Debug) and the panel layout:
+ *  lock (default on, so nothing moves mid-gig) and reset. */
+function SetupMenu() {
+  const route = useStore((s) => s.route);
+  const setRoute = useStore((s) => s.setRoute);
+  const locked = useLayout((s) => s.doc.locked);
+  const hasProject = useLayout((s) => s.scenePath != null);
+  const anchor = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const inMenuRoom = MENU_ROUTES.some((r) => r.id === route);
+  const room = route === 'prepare' || route === 'perform' ? route : null;
+  const go = (r: Route) => {
+    setRoute(r);
+    setOpen(false);
+  };
+  return (
+    <>
+      <button
+        ref={anchor}
+        onClick={() => setOpen((o) => !o)}
+        title="Setup: Align (⌘3), Debug (⌘4), panel layout"
+        className={
+          'h-7 w-7 shrink-0 rounded-md text-[13px] border ' +
+          (open || inMenuRoom ? 'bg-raised border-line2 text-fg' : 'border-transparent text-fg3 hover:text-fg hover:bg-raised')
+        }
+      >
+        ⚙
+      </button>
+      {open && (
+        <Popover anchor={anchor.current} onClose={() => setOpen(false)} width={280}>
+          <div className="label px-1 pb-1.5">Setup</div>
+          <div className="flex flex-col gap-0.5">
+            {MENU_ROUTES.map((r) => (
+              <button
+                key={r.id}
+                onClick={() => go(r.id)}
+                className={
+                  'flex items-center gap-2 px-2 py-1.5 rounded-md text-left border ' +
+                  (route === r.id ? 'bg-panel2 border-line2' : 'border-transparent hover:bg-panel2')
+                }
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12px] font-medium">{r.label}</div>
+                  <div className="text-[10px] text-fg3 truncate">{r.hint}</div>
+                </div>
+                <Kbd>{r.key}</Kbd>
+              </button>
+            ))}
+          </div>
+          <div className="label px-1 pt-3 pb-1.5 mt-2 border-t border-line">Panel layout</div>
+          <label className="flex items-start gap-2 px-2 py-1 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={locked}
+              onChange={(e) => setLayoutLocked(e.target.checked)}
+              className="mt-[2px] accent-[rgb(var(--deck))]"
+            />
+            <span className="min-w-0">
+              <span className="block text-[12px] font-medium">Lock layout</span>
+              <span className="block text-[10px] text-fg3 leading-snug">
+                Unlock to drag panel edges and swap panels by their ⠿ grip (Prepare, Perform).
+                {hasProject ? ' Saved with this project.' : ''}
+              </span>
+            </span>
+          </label>
+          <div className="flex items-center gap-1.5 px-2 pt-1.5">
+            {room && (
+              <Btn size="sm" onClick={() => resetLayout(room)} title={`Default sizes and order for ${room}`}>
+                Reset {room === 'prepare' ? 'Prepare' : 'Perform'}
+              </Btn>
+            )}
+            <Btn size="sm" tone="ghost" onClick={() => resetLayout()} title="Default sizes and order in every room">
+              Reset all
+            </Btn>
+          </div>
+        </Popover>
+      )}
+    </>
+  );
+}
+
+/** Visible reminder while panels can move — one click locks them again. */
+function LayoutUnlockedChip() {
+  const locked = useLayout((s) => s.doc.locked);
+  if (locked) return null;
+  return (
+    <button
+      onClick={() => setLayoutLocked(true)}
+      title="Panels can be resized and moved. Click to lock the layout."
+      className="h-7 px-2 shrink-0 whitespace-nowrap text-[10px] font-bold tracking-wider rounded-md bg-amber/15 text-amber border border-amber/60 hover:bg-amber/25"
+    >
+      LAYOUT UNLOCKED · LOCK
+    </button>
   );
 }
 
@@ -279,7 +384,8 @@ export function HelpOverlay() {
     ['M / S', 'Mute / solo selected layer'],
     ['[ ]', 'Selected layer opacity down / up'],
     ['⇧1 – ⇧9', 'Cue look N into design'],
-    ['⌘1 ⌘2 ⌘3', 'Prepare · Align · Perform'],
+    ['⌘1 ⌘2', 'Prepare · Perform'],
+    ['⌘3 ⌘4', 'Align · Debug (in the ⚙ menu)'],
     ['⌘S', 'Save design (bakes knob pins into scene.json)'],
   ];
   return (

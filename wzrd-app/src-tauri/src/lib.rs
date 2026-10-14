@@ -16,6 +16,7 @@ mod clips;
 #[cfg(debug_assertions)]
 mod devport;
 mod engine;
+mod layout;
 mod projects;
 mod rpc;
 #[cfg(target_os = "macos")]
@@ -386,6 +387,8 @@ pub fn run() {
             clips::clips_list,
             clips::clip_thumb,
             clips::clip_file,
+            layout::ui_layout_read,
+            layout::ui_layout_write,
         ])
         .on_window_event(|window, event| {
             // The engine window has its own handler (engine.rs); closing the

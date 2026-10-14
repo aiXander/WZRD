@@ -7,10 +7,16 @@
 // Rows come from the control leg's scene: on LIVE you see (and ride) what's
 // on the wall; on DESIGN you see the draft, with NEW / EDITED tags against
 // what's live.
+//
+// Each row has a delete × in its title line (on the selected row, on hover
+// otherwise) — away from M/S and the fader so a mid-set grab can't hit it.
+// Deleting is structural, so it's a DESIGN act: on DESIGN it deletes (⌘Z
+// restores), on LIVE the × moves hands to DESIGN instead (the "edit in
+// DESIGN" rule) — the wall keeps the layer until TAKE either way.
 
 import { useEffect, useMemo } from 'react';
 import type { PackInfo } from '../api/ipc';
-import { controlLeg, MIX, setOpacity, toggleMute, toggleSolo } from '../state/actions';
+import { controlLeg, deleteLayerOnHands, MIX, setOpacity, toggleMute, toggleSolo } from '../state/actions';
 import { getMask, useMaskVersion } from '../state/masks';
 import {
   bindingHue,
@@ -142,6 +148,25 @@ export function LayerStack() {
                     {tag}
                   </span>
                 )}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteLayerOnHands(b.id);
+                  }}
+                  title={
+                    leg === 'live'
+                      ? 'Layers are deleted on DESIGN — click to move hands there'
+                      : 'Delete from DESIGN (Delete / ⌫) — ⌘Z restores it; the wall keeps it until TAKE'
+                  }
+                  aria-label={`Delete ${layerTitle(b)}`}
+                  className={
+                    'ml-auto w-5 h-5 shrink-0 rounded flex items-center justify-center text-[13px] leading-none focus:opacity-100 ' +
+                    (leg === 'live' ? 'text-fg4 hover:text-design hover:bg-design/10 ' : 'text-fg3 hover:text-bad hover:bg-bad/15 ') +
+                    (sel ? 'opacity-100' : 'opacity-0 group-hover:opacity-100')
+                  }
+                >
+                  ×
+                </button>
               </div>
               <div className="text-[10px] text-fg3 truncate">
                 {targetLabel(b, pack)} · {prettify(effectName(b.effect))}
