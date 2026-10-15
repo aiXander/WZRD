@@ -1,0 +1,19 @@
+{
+  "description": "Studio monitor (studio plan P1): LIVE plays the seven-clip E1 scene at 60 Hz (paced) while a 960×540 native preview slot (offscreen here) plays one more 1080p HAP clip via `preview.file` — its own decode thread + upload + contain-fit blit, no design leg. Guards: LIVE holds 60 fps, no stale frames.",
+  "scene": "../scenes/clips7.scene.json",
+  "paced": true,
+  "warmup_frames": 180,
+  "frames": 900,
+  "preview": {
+    "size": [960, 540],
+    "params": { "file": true }
+  },
+  "timeline": [
+    { "at_frame": 0, "method": "preview.file", "params": { "path": { "$path": "../.media/clip_2.mov" } } }
+  ],
+  "gate": {
+    "steady": true,
+    "stale": "zero",
+    "media": "clips"
+  }
+}

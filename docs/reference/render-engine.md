@@ -119,6 +119,29 @@ agents.
   soaked through a gig, then it is deleted
   ([native-preview-underlay.md](../TODO/native-preview-underlay.md) U7).
   HTML rules for the hole: [operator-ui.md](operator-ui.md) trap list.
+- **Studio file preview (studio plan P1, 2026-10-15).** A third kind of
+  view on the same underlay: `PreviewParams.file` (set by the shell for a
+  slot with **id `"studio"`** — rooms are exclusive, so it shares the one
+  `NSView`) shows the file opened by `preview.file {path|null}` instead of
+  any leg: one HAP clip or PNG/JPEG still, opened with the same
+  `video::ImageSource` the compositor uses (its own decode thread +
+  staging ring, playhead = wall clock since open, looping), blitted
+  contain-fit over black by `shaders/file_preview.wgsl` (`fs_file`, HAP Q
+  YCoCg handled like `sample_image`). **It never touches a leg:**
+  `design_demand` / `live_demand_occluded` ignore a file-mode slot, so the
+  Studio monitor alone renders no composite. The source is dropped (decode
+  thread exits on channel disconnect — `video::tests::
+  dropping_a_clip_ends_its_decode_thread`) on `preview.file null` **and**
+  whenever the slot's params switch away from `file`, so a webview that
+  forgets to close it can't leak a thread. Open cost lands on the render
+  thread (first-frame decode + staging alloc, ≈ 3–8 ms once per pick —
+  one frame, inside budget). Cost is charged to `Stage::PreviewPresent` /
+  `GpuPass::Preview`; bench: `studio-preview` (§2.10), which attaches an
+  **offscreen preview target** (`GpuContext::attach_preview_offscreen`) so
+  a windowless run pays the same upload + blit. Code: `core.rs`
+  (`FilePreview`, `cmd_preview_file`, `present_file_preview`), `gpu.rs`
+  (`PreviewOut`, `PreviewDraw`, `render_preview_file`,
+  `FilePreviewUniforms::contain`).
 - **Crash containment (spike b):** the render loop runs under
   `catch_unwind`; a render-thread panic (incl. wgpu's fatal-by-default
   validation panic after device loss) kills the engine but not the
@@ -423,7 +446,8 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `promote {fade_ms?, quantize?}` | queued | §2.6 — crossfade projector live→design over `fade_ms` (default: the §5.4 crossfade-time master, ms), then live adopts design's plan (pointer swap). `quantize: "bar"` (default) starts the fade on the next bar boundary; `"now"` immediately. Pending promote replaced by a newer one; **rejected while a fade is ramping**. |
 | `pull` | queued | §2.6 — hard-copy live's scene back into design. Rejected mid-ramp; cancels a pending promote + any in-flight probe apply. |
 | `preview.setSource {source}` | queued | §2.6 — `"live"` \| `"design"`: which composite the native preview blits (when the slot doesn't pin one). |
-| `preview.snapshot {width?}` | queued | JPEG of **exactly what the native preview slot shows** (its `PreviewParams`: program view, photo blend, dim), rendered offscreen; default width = slot drawable capped at 1024. Reply `{encoding, width, height, data_b64, params, leg, slot_px}`. Errors when no slot is visible. The agent's way to verify the underlay — webview screenshots can't see it. |
+| `preview.file {path \| null}` | queued | Studio monitor (§1b "Studio file preview"): open one HAP `.mov` or PNG/JPEG still (absolute, or relative to the scene dir) for a slot whose params set `file`; `null` closes it. Never touches a leg. Reply `{path, kind: clip\|still, width, height, fps?, frames?, duration_s?, open_ms}`; a non-HAP / unreadable file is an error naming why. |
+| `preview.snapshot {width?}` | queued | JPEG of **exactly what the native preview slot shows** (its `PreviewParams`: program view, photo blend, dim — or the file preview), rendered offscreen; default width = slot drawable capped at 1024. Reply `{encoding, width, height, data_b64, params, leg (`file` in Studio), file?, slot_px}`. Errors when no slot is visible. The agent's way to verify the underlay — webview screenshots can't see it. |
 | `probe.setThresholds {a_ms, b_ms}` | inline | §2.6 probe bands, A < B, ms of predicted full-res p95. Sidecar-persisted (venue state). |
 | `probe.getThresholds` | inline | Current `{a_ms, b_ms}`. |
 | `effect.upsert {name, wgsl, descriptor?}` | queued | §2.7 verdict-in-reply: naga-validates **before** touching disk (bad WGSL → line-mapped diagnostics in the reply, nothing written), then writes `effects/<name>/`, rescans the registry (so the watcher echo of the self-write dedupes to nothing), and re-applies the design scene — the reply defers through the §2.6 probe and carries verdict + thumbnail + `{epoch, rev}` when the scene binds the effect. |
@@ -1206,7 +1230,9 @@ The regression gate every engine change runs (rule in §6). Three parts:
 **Scenario format** (`render-core/perf/scenarios/*.json`; scenes and
 fixtures in `perf/scenes/`): `{description, scene, size?, warmup_frames?,
 frames, paced?, two_leg? (default true), alignment?, audio?: {lmh,
-onset_hz}, subscribe?: [channel], actor? ("ui"), timeline?: [...], gate?}`.
+onset_hz}, subscribe?: [channel], preview?: {size, params}, actor? ("ui"),
+timeline?: [...], gate?}`. `preview` holds a native preview slot visible
+for the whole run on an offscreen target (`params` = `PreviewParams`).
 Paths are relative to the scenario file. Timeline entries are `{at_frame,
 method, params, every_frames?, count?}` (frames count from the first
 warm-up frame) or `{at_frame, hz, method, params}` (a background thread at
@@ -1214,7 +1240,8 @@ a fixed rate — knob storms); they go through `rpc::dispatch` from a worker
 thread, exactly like a WS connection, so they exercise the real `promote` /
 `param.set` / `scene.load` paths. Param directives: `{"$alt": [a, b]}`
 (by repetition), `{"$scene": file}` (staged scene JSON string for
-`scene.load`), `{"$file": file}` (text, e.g. WGSL), `{"$json": file}`.
+`scene.load`), `{"$file": file}` (text, e.g. WGSL), `{"$json": file}`,
+`{"$path": file}` (absolute path string, e.g. for `preview.file`).
 `audio` feeds the engine's own OSC listener on a free port (the real ingest
 path). `gate` is read only by the gate script. **The scene is staged**
 into a temp dir first (scene + a copy of `effects/` + optional alignment;
@@ -1233,6 +1260,7 @@ pack and `image.clip` paths made absolute; never `session.json` or
 | `edit-churn` | 300 × `effect.upsert` + 300 × `scene.load`, single leg: resource counts flat, rebuild ms | uncapped |
 | `preview-remote` | a `preview` subscriber as design's only consumer (JPEG readback; design renders on capture frames only) | uncapped |
 | `preview-clips` | `clips-7` + a `preview` subscriber: a clip-drawing design leg stays per-frame, **stale = 0**, JPEG ≈ 15 Hz | paced |
+| `studio-preview` | `clips-7` on LIVE + the Studio monitor (offscreen 960×540 slot, `file: true`) playing an 8th 1080p HAP clip via `preview.file`: LIVE 60 fps, **stale = 0**, no design leg | paced |
 | `knob-latency` | `param.set` at 100 Hz → knob→submit p95 | paced |
 | `capacity-clips` | info only: largest N clip bindings with headroom ≥ 0 and no stale | uncapped |
 

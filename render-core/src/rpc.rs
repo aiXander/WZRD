@@ -181,6 +181,12 @@ pub enum Command {
         width: Option<u32>,
         reply: Sender<Result<Value, String>>,
     },
+    /// `preview.file` — open (or with `None` close) the Studio monitor's
+    /// file source (studio plan P1). Never touches a leg.
+    PreviewFile {
+        path: Option<String>,
+        reply: Sender<Result<Value, String>>,
+    },
     /// Live tempo / downbeat resync (`transport.set`). `leg: None` = both.
     Transport {
         bpm: Option<f32>,
@@ -207,6 +213,7 @@ impl Command {
             Command::Pull { .. } => "pull",
             Command::PreviewSource { .. } => "preview.setSource",
             Command::PreviewSnapshot { .. } => "preview.snapshot",
+            Command::PreviewFile { .. } => "preview.file",
             Command::Transport { .. } => "transport.set",
         }
     }
@@ -697,6 +704,29 @@ pub fn dispatch(
                 .map_err(RpcError::message)
         }
 
+        // Studio monitor (studio plan P1): one HAP clip / still outside any
+        // scene, shown by a slot whose params set `file`. `path: null`
+        // closes it (its decode thread exits).
+        "preview.file" => {
+            #[derive(Deserialize)]
+            struct Params {
+                path: Option<String>,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::new(Command::PreviewFile {
+                    path: p.path,
+                    reply: reply_tx,
+                }))
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
         // §5.14 alignment layer — all inline: a corner drag must not queue
         // behind the render thread, and none of these rebuild a plan. No
         // `base_rev` CAS either: unlike the scene this has one human editor at
@@ -1165,6 +1195,9 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
         }
         Command::PreviewSnapshot { width, reply } => {
             core.cmd_preview_snapshot(width, reply);
+        }
+        Command::PreviewFile { path, reply } => {
+            let _ = reply.send(core.cmd_preview_file(path));
         }
         Command::Transport {
             bpm,

@@ -113,6 +113,12 @@ struct Scenario {
     /// drivers read real values: `{lmh: [l, m, h], onset_hz}`.
     #[serde(default)]
     audio: Option<AudioPin>,
+    /// Hold a native preview slot visible for the whole run, on an
+    /// offscreen target: `{size: [w, h], params: PreviewParams}` (e.g.
+    /// `{"file": true}` + a `preview.file` timeline action = the Studio
+    /// monitor playing a clip). Default: no preview.
+    #[serde(default)]
+    preview: Option<BenchPreview>,
     /// Telemetry channels a bench-side subscriber holds for the whole run
     /// (e.g. `preview` — wakes the JPEG readback + the design composite).
     #[serde(default)]
@@ -126,6 +132,14 @@ struct Scenario {
     #[serde(default)]
     #[allow(dead_code)]
     gate: Value,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct BenchPreview {
+    size: [u32; 2],
+    #[serde(default)]
+    params: crate::core::PreviewParams,
 }
 
 fn default_size() -> [u32; 2] {
@@ -160,7 +174,8 @@ fn default_lmh() -> [f32; 3] {
 /// directives: `{"$alt": [a, b, …]}` (picked by repetition index),
 /// `{"$scene": "file"}` (a scene file, staged like the main one, as a JSON
 /// string — for `scene.load`), `{"$file": "file"}` (raw text, e.g. WGSL),
-/// `{"$json": "file"}` (a JSON value, e.g. an `alignment.set` patch).
+/// `{"$json": "file"}` (a JSON value, e.g. an `alignment.set` patch),
+/// `{"$path": "file"}` (the file's absolute path, e.g. for `preview.file`).
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 struct Action {
@@ -232,6 +247,11 @@ pub fn run(args: BenchArgs) -> Result<()> {
     };
     let mut core = Core::with_topology(&cli, sc.two_leg)?;
     core.init_gpu_offscreen(sc.size[0], sc.size[1], paced.then_some(crate::perf::BUDGET_HZ))?;
+    if let Some(pv) = &sc.preview {
+        core.attach_preview_offscreen(pv.size[0], pv.size[1])?;
+        core.set_preview_params(pv.params);
+        core.set_preview_visible(true);
+    }
     let adapter = core.adapter_info();
     let (ctx, cmd_tx) = core.control_channel();
 
@@ -520,6 +540,11 @@ fn resolve(v: &Value, rep: usize, scenario_dir: &Path, work_dir: &Path) -> Resul
             let path = scenario_dir.join(rel);
             let raw = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?
+        }
+        Value::Object(m) if m.len() == 1 && m.contains_key("$path") => {
+            let rel = m["$path"].as_str().ok_or_else(|| anyhow!("$path needs a path"))?;
+            let path = scenario_dir.join(rel);
+            json!(path.canonicalize().with_context(|| format!("resolving {}", path.display()))?.to_string_lossy())
         }
         Value::Object(m) if m.len() == 1 && m.contains_key("$file") => {
             let rel = m["$file"].as_str().ok_or_else(|| anyhow!("$file needs a path"))?;

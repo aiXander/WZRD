@@ -33,8 +33,8 @@ use crate::compositor::{resolve_effect_def, Carry, PassPlan};
 use crate::drivers::{Crossfade, Masters, ParamOverrides, SliderBank, Transport};
 use crate::effects::{EffectKind, EffectRegistry, InputSlot};
 use crate::gpu::{
-    FinalPassUniforms, GpuContext, Leg, LayerIdentity, LayerParamsGpu, PreviewExtraUniforms,
-    PreviewInput,
+    FilePreviewUniforms, FinalPassUniforms, GpuContext, Leg, LayerIdentity, LayerParamsGpu,
+    PreviewDraw, PreviewExtraUniforms, PreviewInput,
 };
 use crate::osc::{try_spawn, AudioFeatures, OscListener};
 use crate::pack::LoadedPack;
@@ -53,6 +53,7 @@ use crate::telemetry::{
     FpsAccumulator, FrameCounts, HotReloadEvent, MastersState, PreviewSampler, ProbeReport,
 };
 use crate::watch::{ChangeKind, SceneWatcher};
+use crate::video::ImageSource;
 use crate::Cli;
 use crate::ws;
 
@@ -127,6 +128,10 @@ pub struct PreviewParams {
     pub photo_weight: f32,
     /// The composite itself; 0 = photo only.
     pub light_weight: f32,
+    /// Studio file preview (studio plan P1): show the file opened with
+    /// `preview.file` instead of any leg — the shell's `"studio"` slot sets
+    /// it. Every other field is ignored, and neither leg renders for it.
+    pub file: bool,
 }
 
 impl Default for PreviewParams {
@@ -138,8 +143,20 @@ impl Default for PreviewParams {
             dim: 1.0,
             photo_weight: 0.0,
             light_weight: 1.0,
+            file: false,
         }
     }
+}
+
+/// Studio file preview (P1): one media file opened outside any scene and
+/// played into the native preview while `PreviewParams::file` is set. Its
+/// own decode thread (a clip) and playhead (wall clock since open, looping);
+/// it never touches either leg. Dropping it ends the decode thread.
+struct FilePreview {
+    path: PathBuf,
+    source: ImageSource,
+    bind_group: wgpu::BindGroup,
+    opened: Instant,
 }
 
 /// §5.6 design leg — the AI/operator scratchpad. `None` on single-leg
@@ -327,6 +344,10 @@ pub struct Core {
     preview_visible: bool,
     /// What the native preview view shows (host-set with the slot rect).
     preview_params: PreviewParams,
+    /// `preview.file` — the Studio monitor's source (P1).
+    file_preview: Option<FilePreview>,
+    /// What the file-preview uniform buffer last received.
+    last_file_uniforms: Option<FilePreviewUniforms>,
 
     // Telemetry emit pacing.
     last_drivers_emit: Instant,
@@ -639,6 +660,8 @@ impl Core {
             occluded: false,
             preview_visible: false,
             preview_params: PreviewParams::default(),
+            file_preview: None,
+            last_file_uniforms: None,
             last_drivers_emit: Instant::now(),
             last_audio_emit: Instant::now(),
             frame_budget,
@@ -1911,6 +1934,7 @@ impl Core {
             PromotePhase::Pending { .. } | PromotePhase::Ramping { .. }
         ) || (self.preview_visible
             && !self.preview_params.program
+            && !self.preview_params.file
             && self.preview_leg() == Leg::Design)
             || self.jpeg_wants(jpeg_subscribed, plan)
     }
@@ -1923,6 +1947,7 @@ impl Core {
     /// re-renders it from scratch, so skipping leaves nothing stale behind.
     fn live_demand_occluded(&self, jpeg_subscribed: bool) -> bool {
         (self.preview_visible
+            && !self.preview_params.file
             && (self.preview_params.program || self.preview_leg() == Leg::Live))
             || (!self.two_leg
                 && self.plan.as_ref().is_some_and(|p| self.jpeg_wants(jpeg_subscribed, p)))
@@ -2092,7 +2117,105 @@ impl Core {
     /// Host-set preview view parameters (D3) — which composite, program
     /// view, dim, photo/light weights. Takes effect next frame.
     pub fn set_preview_params(&mut self, params: PreviewParams) {
+        // Leaving the Studio slot releases its file (and decode thread),
+        // even if the webview never sent `preview.file null`.
+        if !params.file && self.file_preview.take().is_some() {
+            log::info!("file preview closed (slot switched to a leg view)");
+        }
         self.preview_params = params;
+    }
+
+    /// §2.10 bench: a windowless preview target, so a scenario can hold a
+    /// slot visible (e.g. the Studio file preview) and pay its real cost.
+    pub fn attach_preview_offscreen(&mut self, width: u32, height: u32) -> Result<()> {
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("attach_preview_offscreen before init_gpu"))?;
+        gpu.attach_preview_offscreen(width, height);
+        self.last_preview_uniforms = None;
+        self.last_file_uniforms = None;
+        Ok(())
+    }
+
+    /// `preview.file {path | null}` (studio plan P1): open one HAP clip (or
+    /// a PNG/JPEG still) outside any scene for the Studio monitor, or close
+    /// it. Relative paths resolve against the scene dir. Shown only while
+    /// the slot's `PreviewParams::file` is set; never touches a leg.
+    pub fn cmd_preview_file(&mut self, path: Option<String>) -> Result<serde_json::Value, String> {
+        let Some(raw) = path else {
+            if let Some(old) = self.file_preview.take() {
+                log::info!("file preview closed ({})", old.path.display());
+            }
+            return Ok(serde_json::json!({ "path": null }));
+        };
+        let gpu = self.gpu.as_ref().ok_or("no GPU context")?;
+        let path = scene_dir(&self.scene_path).join(&raw);
+        // Drop the previous stream first: its thread ends on disconnect.
+        self.file_preview = None;
+        let started = Instant::now();
+        let source = ImageSource::open(gpu, &path, 0.0).map_err(|e| format!("{e:#}"))?;
+        let bind_group = gpu
+            .file_preview_bind_group(source.view())
+            .ok_or("no native preview attached")?;
+        let (w, h) = source.size();
+        let mut reply = serde_json::json!({
+            "path": path.to_string_lossy(),
+            "kind": if source.is_clip() { "clip" } else { "still" },
+            "width": w,
+            "height": h,
+            "open_ms": (started.elapsed().as_secs_f64() * 1e4).round() / 10.0,
+        });
+        if let Some((fps, frames, duration)) = source.clip_timing() {
+            reply["fps"] = serde_json::json!((fps * 1000.0).round() / 1000.0);
+            reply["frames"] = serde_json::json!(frames);
+            reply["duration_s"] = serde_json::json!((duration * 1000.0).round() / 1000.0);
+        }
+        log::info!("file preview opened: {} ({w}x{h})", path.display());
+        self.last_file_uniforms = None;
+        self.file_preview = Some(FilePreview {
+            path,
+            source,
+            bind_group,
+            opened: Instant::now(),
+        });
+        Ok(reply)
+    }
+
+    /// The file preview's contain-fit uniform for the current drawable.
+    fn file_uniforms(&self) -> FilePreviewUniforms {
+        let target = self.gpu.as_ref().and_then(|g| g.preview_size()).unwrap_or((1, 1));
+        match &self.file_preview {
+            Some(f) => FilePreviewUniforms::contain(f.source.size(), target, f.source.encoding()),
+            None => FilePreviewUniforms::empty(),
+        }
+    }
+
+    /// Studio file preview present (P1): upload the playhead frame, blit.
+    fn present_file_preview(&mut self) {
+        let uniforms = self.file_uniforms();
+        let write = (self.last_file_uniforms.map(|u| bytemuck::bytes_of(&u).to_vec())
+            != Some(bytemuck::bytes_of(&uniforms).to_vec()))
+        .then_some(uniforms);
+        self.last_file_uniforms = Some(uniforms);
+        let ts = self.gpu_timer.as_mut().and_then(|t| t.writes(GpuPass::Preview));
+        let Some(gpu) = self.gpu.as_ref() else { return };
+        let (file, playhead) = match self.file_preview.as_mut() {
+            Some(f) => (
+                Some((&mut f.source, &f.bind_group)),
+                f.opened.elapsed().as_secs_f64(),
+            ),
+            None => (None, 0.0),
+        };
+        match gpu.render_preview_file(file, playhead, write, ts) {
+            Ok(true) => {
+                if let Some(f) = self.file_preview.as_mut() {
+                    f.source.after_submit();
+                }
+            }
+            Ok(false) => {}
+            Err(e) => log::warn!("file preview present failed: {e}"),
+        }
     }
 
     pub fn preview_params(&self) -> PreviewParams {
@@ -2107,6 +2230,10 @@ impl Core {
     /// un-mastered (§5.4 convention) — then dim / photo / light weights.
     fn present_preview(&mut self) {
         if !self.preview_visible {
+            return;
+        }
+        if self.preview_params.file {
+            self.present_file_preview();
             return;
         }
         let (input, uniforms) = self.preview_uniforms();
@@ -2187,13 +2314,19 @@ impl Core {
         let w = width.unwrap_or(sw.min(1024)).clamp(16, 4096);
         let h = ((w as f64 * sh as f64 / sw.max(1) as f64).round() as u32).max(1);
         let (input, _) = self.preview_uniforms();
+        let file_mode = self.preview_params.file;
+        let draw = if file_mode {
+            PreviewDraw::File(self.file_preview.as_ref().map(|f| &f.bind_group))
+        } else {
+            PreviewDraw::View(input)
+        };
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("preview snapshot encoder"),
             });
         let Some((buffer, bytes_per_row, bgra)) =
-            gpu.encode_preview_snapshot(&mut encoder, input, w, h)
+            gpu.encode_preview_snapshot(&mut encoder, draw, w, h)
         else {
             let _ = reply.send(Err("no native preview attached".into()));
             return;
@@ -2202,10 +2335,12 @@ impl Core {
         let meta = serde_json::json!({
             "params": self.preview_params,
             "leg": match input {
+                _ if file_mode => "file",
                 PreviewInput::Program => "program",
                 PreviewInput::Leg(Leg::Live) => "live",
                 PreviewInput::Leg(Leg::Design) => "design",
             },
+            "file": self.file_preview.as_ref().map(|f| f.path.to_string_lossy().into_owned()),
             "slot_px": [sw, sh],
         });
         self.preview.push_snapshot(
@@ -2842,6 +2977,7 @@ impl Core {
             total += plan.images.iter().map(|i| i.gpu_bytes()).sum::<u64>();
         }
         total += self.preview.gpu_bytes();
+        total += self.file_preview.as_ref().map_or(0, |f| f.source.gpu_bytes());
         total += self.gpu_timer.as_ref().map_or(0, GpuTimer::gpu_bytes);
         Some(total)
     }

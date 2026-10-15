@@ -305,20 +305,16 @@ agent time, parallel across lanes.
   blocking;
 - the browser bridge shows the same thumbs.
 
-### P1 — file preview source (ENG + SHELL)
+### P1 — file preview source (ENG + SHELL) — **done 2026-10-15**
 
-- An engine source that plays one HAP file **outside any scene** into a
-  native preview slot (a new slot id beside `"main"`). It uses the
-  underlay's `PreviewTarget`/slot mechanism
-  ([../reference/render-engine.md](../reference/render-engine.md) §1b) and
-  `video.rs`'s decoder.
-- It never touches the design or live legs.
-- Command: `preview.file {path | null}`.
-
-**Gate:**
-- a HAP clip plays in the Studio slot while LIVE holds 60 fps (perf-gate
-  table plus a bench scenario covering it);
-- closing the slot releases its decode thread.
+`preview.file {path|null}` plays one HAP clip / still into the native
+preview when the slot's id is `"studio"` (`PreviewParams.file`); no leg
+renders for it; the source and its decode thread drop on `null` or when
+the slot leaves file mode. Bench `studio-preview`: LIVE 60 fps, stale 0.
+Still owed by A2: the on-screen check (AFK block) once the Studio room
+mounts the slot. Done — see
+[../reference/render-engine.md](../reference/render-engine.md) §1b
+"Studio file preview".
 
 ### A2 — the Studio room (UI)
 

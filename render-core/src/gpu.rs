@@ -43,6 +43,8 @@ const FULLSCREEN_VS_WGSL: &str = include_str!("shaders/fullscreen_vs.wgsl");
 const FINAL_PASS_WGSL: &str = include_str!("shaders/final_pass.wgsl");
 const WARP_BAKE_WGSL: &str = include_str!("shaders/warp_bake.wgsl");
 const DOWNSCALE_WGSL: &str = include_str!("shaders/downscale.wgsl");
+/// Studio file preview (P1) — one media file, contain-fit, no leg.
+const FILE_PREVIEW_WGSL: &str = include_str!("shaders/file_preview.wgsl");
 
 /// Uniform-array bound on §5.14 warp handles. Mirrored by `MAX_POINTS` in
 /// `alignment.rs` and by the `MAX_POINTS` const in `warp_bake.wgsl` — all
@@ -316,6 +318,79 @@ impl PreviewExtraUniforms {
     }
 }
 
+/// `fs_file`'s uniform (Studio file preview, P1): where the image lands in
+/// dest uv (contain-fit) and how to read it — mirrors `FileUniforms` in
+/// `file_preview.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct FilePreviewUniforms {
+    pub image_box: [f32; 4],
+    /// (bound, encoding, 1 / box width, 1 / box height).
+    pub image_meta: [f32; 4],
+}
+
+impl FilePreviewUniforms {
+    /// Nothing open: the slot shows black.
+    pub fn empty() -> Self {
+        Self { image_box: [0.0; 4], image_meta: [0.0; 4] }
+    }
+
+    /// An `image` (w×h px) contain-fitted into a `target` (w×h px) drawable.
+    pub fn contain(image: (u32, u32), target: (u32, u32), encoding: ImageEncoding) -> Self {
+        let ia = image.0.max(1) as f32 / image.1.max(1) as f32;
+        let ta = target.0.max(1) as f32 / target.1.max(1) as f32;
+        let (bw, bh) = if ia > ta { (1.0, ta / ia) } else { (ia / ta, 1.0) };
+        let (x0, y0) = ((1.0 - bw) * 0.5, (1.0 - bh) * 0.5);
+        Self {
+            image_box: [x0, y0, x0 + bw, y0 + bh],
+            image_meta: [1.0, encoding.as_f32(), 1.0 / bw.max(1e-6), 1.0 / bh.max(1e-6)],
+        }
+    }
+}
+
+/// What a preview present draws: a leg / the program view through
+/// `fs_preview`, or (Studio P1) the file preview's bind group through
+/// `fs_file` (`None` = nothing open → black).
+#[derive(Clone, Copy)]
+pub enum PreviewDraw<'a> {
+    View(PreviewInput),
+    File(Option<&'a wgpu::BindGroup>),
+}
+
+/// Where the preview blit lands: the underlay's swapchain, or (§2.10 bench)
+/// an offscreen texture so a windowless run pays the same blit + decode.
+enum PreviewOut {
+    Surface(wgpu::Surface<'static>),
+    Offscreen {
+        texture: wgpu::Texture,
+        view: Arc<wgpu::TextureView>,
+    },
+}
+
+/// One acquired preview image (see [`PreviewOut`]).
+enum PreviewFrame {
+    Surface {
+        frame: wgpu::SurfaceTexture,
+        view: wgpu::TextureView,
+    },
+    Offscreen(Arc<wgpu::TextureView>),
+}
+
+impl PreviewFrame {
+    fn view(&self) -> &wgpu::TextureView {
+        match self {
+            PreviewFrame::Surface { view, .. } => view,
+            PreviewFrame::Offscreen(v) => v,
+        }
+    }
+
+    fn present(self) {
+        if let PreviewFrame::Surface { frame, .. } = self {
+            frame.present();
+        }
+    }
+}
+
 /// Native operator-preview swapchain: a second surface the same device
 /// blits onto — the Resolume-style preview. Runs `fs_preview`, the
 /// final-pass math plus a preview-only group 1 (surface photo + weights).
@@ -325,9 +400,13 @@ impl PreviewExtraUniforms {
 /// for the program view (the real LUT, which `fs_preview` indexes by uv
 /// because this target is never the LUT's size — D4).
 pub struct PreviewTarget {
-    surface: wgpu::Surface<'static>,
+    out: PreviewOut,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    /// Studio file preview (P1): `fs_file` + its group 0 layout + uniform.
+    file_pipeline: wgpu::RenderPipeline,
+    file_layout: wgpu::BindGroupLayout,
+    file_buffer: wgpu::Buffer,
     bind_group_live: wgpu::BindGroup,
     bind_group_design: wgpu::BindGroup,
     /// Rebuilt whenever the warp LUT is reallocated (`resize_warp`).
@@ -923,7 +1002,12 @@ impl GpuContext {
                 Output::Offscreen(o) => texture_bytes(&o.texture),
             };
         if let Some(p) = self.preview.as_ref() {
-            total += swapchain(&p.config) + p.buffer.size() + p.extra_buffer.size();
+            total += match &p.out {
+                PreviewOut::Surface(_) => swapchain(&p.config),
+                PreviewOut::Offscreen { texture, .. } => texture_bytes(texture),
+            } + p.buffer.size()
+                + p.extra_buffer.size()
+                + p.file_buffer.size();
         }
         total
     }
@@ -1062,14 +1146,48 @@ impl GpuContext {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&self.device, &config);
+        self.install_preview(PreviewOut::Surface(surface), config);
+        log::info!("preview surface attached ({width}x{height}, {format:?})");
+        Ok(())
+    }
 
+    /// §2.10 bench: a preview target with no surface — the blit lands in an
+    /// offscreen `Rgba8UnormSrgb` texture, so a windowless run pays the
+    /// same preview work (e.g. the Studio file preview's decode + blit).
+    pub fn attach_preview_offscreen(&mut self, width: u32, height: u32) {
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        let (texture, view) = create_offscreen_output(&self.device, &config);
+        self.install_preview(
+            PreviewOut::Offscreen { texture, view: Arc::new(view) },
+            config,
+        );
+        log::info!("offscreen preview target attached ({width}x{height})");
+    }
+
+    fn install_preview(&mut self, out: PreviewOut, config: wgpu::SurfaceConfiguration) {
+        let format = config.format;
         // Same shader as the projector pass, `fs_preview` entry, compiled
         // for the preview surface's own format; uniforms written per present.
         let (extra_layout, pipeline) =
             create_preview_pipeline(&self.device, format, &self.final_bind_group_layout);
+        let (file_layout, file_pipeline) = create_file_preview_pipeline(&self.device, format);
         let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("preview blit uniform"),
             contents: bytemuck::bytes_of(&FinalPassUniforms::identity()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let file_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("file preview uniform"),
+            contents: bytemuck::bytes_of(&FilePreviewUniforms::empty()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let make_group = |label: &str, view: &wgpu::TextureView, mix_view: &wgpu::TextureView| {
@@ -1112,9 +1230,12 @@ impl GpuContext {
         let extra_bind_group =
             create_preview_extra_bind_group(&self.device, &extra_layout, &self.photo_view, &extra_buffer);
         self.preview = Some(PreviewTarget {
-            surface,
+            out,
             config,
             pipeline,
+            file_pipeline,
+            file_layout,
+            file_buffer,
             bind_group_live,
             bind_group_design,
             bind_group_program,
@@ -1123,8 +1244,6 @@ impl GpuContext {
             extra_buffer,
             extra_bind_group,
         });
-        log::info!("preview surface attached ({width}x{height}, {format:?})");
-        Ok(())
     }
 
     pub fn resize_preview(&mut self, width: u32, height: u32) {
@@ -1137,7 +1256,35 @@ impl GpuContext {
             }
             pv.config.width = width;
             pv.config.height = height;
-            pv.surface.configure(&self.device, &pv.config);
+            match &mut pv.out {
+                PreviewOut::Surface(surface) => surface.configure(&self.device, &pv.config),
+                PreviewOut::Offscreen { texture, view } => {
+                    let (t, v) = create_offscreen_output(&self.device, &pv.config);
+                    *texture = t;
+                    *view = Arc::new(v);
+                }
+            }
+        }
+    }
+
+    /// The preview's next image. `None` = skip this frame (a swapchain that
+    /// was `Lost`/`Outdated` got reconfigured).
+    fn acquire_preview(pv: &PreviewTarget, device: &wgpu::Device) -> Result<Option<PreviewFrame>, wgpu::SurfaceError> {
+        match &pv.out {
+            PreviewOut::Surface(surface) => match surface.get_current_texture() {
+                Ok(frame) => {
+                    let view = frame
+                        .texture
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    Ok(Some(PreviewFrame::Surface { frame, view }))
+                }
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    surface.configure(device, &pv.config);
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            },
+            PreviewOut::Offscreen { view, .. } => Ok(Some(PreviewFrame::Offscreen(Arc::clone(view)))),
         }
     }
 
@@ -1177,36 +1324,92 @@ impl GpuContext {
             self.queue
                 .write_buffer(&pv.extra_buffer, 0, bytemuck::bytes_of(&extra));
         }
-        let frame = match pv.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                pv.surface.configure(&self.device, &pv.config);
-                return Ok(());
-            }
-            Err(e) => return Err(e),
+        let Some(frame) = Self::acquire_preview(pv, &self.device)? else {
+            return Ok(());
         };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("preview blit encoder"),
             });
-        Self::encode_preview_pass(pv, &mut encoder, &view, input, timestamp_writes);
+        Self::encode_preview_pass(pv, &mut encoder, frame.view(), PreviewDraw::View(input), timestamp_writes);
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())
     }
 
+    /// Studio file preview (P1): upload `source`'s frame at `playhead_sec`
+    /// (a no-op for stills) and blit it contain-fit — never a leg. `file`
+    /// `None` clears the slot to black. `uniforms` is written only when
+    /// `Some` (the caller tracks changes). Returns whether a frame was
+    /// submitted, so the caller knows to recycle the source's staging slots.
+    pub fn render_preview_file(
+        &self,
+        file: Option<(&mut crate::video::ImageSource, &wgpu::BindGroup)>,
+        playhead_sec: f64,
+        uniforms: Option<FilePreviewUniforms>,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) -> Result<bool, wgpu::SurfaceError> {
+        let Some(pv) = self.preview.as_ref() else {
+            return Ok(false);
+        };
+        if let Some(u) = uniforms {
+            self.queue.write_buffer(&pv.file_buffer, 0, bytemuck::bytes_of(&u));
+        }
+        let Some(frame) = Self::acquire_preview(pv, &self.device)? else {
+            return Ok(false);
+        };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("file preview encoder"),
+            });
+        let group = match file {
+            Some((source, group)) => {
+                source.encode_upload(&mut encoder, playhead_sec);
+                Some(group)
+            }
+            None => None,
+        };
+        Self::encode_preview_pass(pv, &mut encoder, frame.view(), PreviewDraw::File(group), timestamp_writes);
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+        Ok(true)
+    }
+
+    /// Bind group for the Studio file preview over one opened source's
+    /// texture. `None` without an attached preview.
+    pub fn file_preview_bind_group(&self, view: &wgpu::TextureView) -> Option<wgpu::BindGroup> {
+        let pv = self.preview.as_ref()?;
+        Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("file preview bind group"),
+            layout: &pv.file_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: pv.file_buffer.as_entire_binding(),
+                },
+            ],
+        }))
+    }
+
     /// The preview blit itself, onto any view in the preview surface's
     /// format — the swapchain frame, or `preview.snapshot`'s offscreen
-    /// target. Uniforms must already be written (`render_preview`).
+    /// target. Uniforms must already be written (`render_preview` /
+    /// `render_preview_file`). `File(None)` just clears to black.
     fn encode_preview_pass(
         pv: &PreviewTarget,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        input: PreviewInput,
+        draw: PreviewDraw<'_>,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1223,30 +1426,40 @@ impl GpuContext {
             occlusion_query_set: None,
             timestamp_writes,
         });
-        pass.set_pipeline(&pv.pipeline);
-        pass.set_bind_group(
-            0,
-            match input {
-                PreviewInput::Leg(Leg::Live) => &pv.bind_group_live,
-                PreviewInput::Leg(Leg::Design) => &pv.bind_group_design,
-                PreviewInput::Program => &pv.bind_group_program,
-            },
-            &[],
-        );
-        pass.set_bind_group(1, &pv.extra_bind_group, &[]);
-        pass.draw(0..3, 0..1);
+        match draw {
+            PreviewDraw::View(input) => {
+                pass.set_pipeline(&pv.pipeline);
+                pass.set_bind_group(
+                    0,
+                    match input {
+                        PreviewInput::Leg(Leg::Live) => &pv.bind_group_live,
+                        PreviewInput::Leg(Leg::Design) => &pv.bind_group_design,
+                        PreviewInput::Program => &pv.bind_group_program,
+                    },
+                    &[],
+                );
+                pass.set_bind_group(1, &pv.extra_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            PreviewDraw::File(Some(group)) => {
+                pass.set_pipeline(&pv.file_pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            PreviewDraw::File(None) => {}
+        }
     }
 
     /// `preview.snapshot`: render exactly what the native preview shows
-    /// (same input, uniforms and weights as the last `render_preview`) into
-    /// an offscreen `width × height` texture in the preview surface's
-    /// format, and copy it into a fresh readback buffer. Returns the
-    /// buffer, its padded row pitch, and whether the bytes are BGRA. `None`
-    /// without an attached preview.
+    /// (same draw, uniforms and weights as the last present) into an
+    /// offscreen `width × height` texture in the preview surface's format,
+    /// and copy it into a fresh readback buffer. Returns the buffer, its
+    /// padded row pitch, and whether the bytes are BGRA. `None` without an
+    /// attached preview.
     pub fn encode_preview_snapshot(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        input: PreviewInput,
+        draw: PreviewDraw<'_>,
         width: u32,
         height: u32,
     ) -> Option<(wgpu::Buffer, u32, bool)> {
@@ -1268,7 +1481,7 @@ impl GpuContext {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Self::encode_preview_pass(pv, encoder, &view, input, None);
+        Self::encode_preview_pass(pv, encoder, &view, draw, None);
         let (buffer, bytes_per_row) = self.encode_readback(encoder, &texture, width, height);
         let bgra = matches!(
             format,
@@ -1776,6 +1989,7 @@ mod tests {
             ("final_pass", FINAL_PASS_WGSL),
             ("warp_bake", WARP_BAKE_WGSL),
             ("downscale", DOWNSCALE_WGSL),
+            ("file_preview", FILE_PREVIEW_WGSL),
         ] {
             let composed = compose_output_shader(src);
             let module = naga::front::wgsl::parse_str(&composed)
@@ -2629,6 +2843,83 @@ fn create_preview_pipeline(
         cache: None,
     });
     (extra_bgl, pipeline)
+}
+
+/// Studio file preview (P1): `fs_file` over one source texture + its
+/// contain-fit uniform. Group 0 = (texture, sampler, uniform).
+fn create_file_preview_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("file preview bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("file preview shader"),
+        source: wgpu::ShaderSource::Wgsl(compose_output_shader(FILE_PREVIEW_WGSL).into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("file preview pipeline layout"),
+        bind_group_layouts: &[&layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("file preview pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_file",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    (layout, pipeline)
 }
 
 fn create_preview_extra_bind_group(

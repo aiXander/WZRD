@@ -6,19 +6,19 @@
   "backend": "Metal",
   "driver": "",
   "git": {
-   "dirty": false,
-   "sha": "7a6628f6e497"
+   "dirty": true,
+   "sha": "fc0b1dcf6745"
   },
   "os": "macos",
   "profile": "release",
   "hostname": "Xanders-MacBook-Pro"
  },
- "updated": "2026-10-12T17:25:26",
+ "updated": "2026-10-15T18:48:22",
  "git": {
-  "sha": "7a6628f6e497",
-  "dirty": false
+  "sha": "fc0b1dcf6745",
+  "dirty": true
  },
- "reason": "post perf-pass 2026-10-12 (P1-P6): quiet machine (load ~2.5, battery, same as the 366aa13 baseline). Interleaved A/B vs 366aa13: layers-heavy gpu p50 -12% / p95 equal (old baseline p95 1.61 was a best-of-3 outlier; original binary reads 2.35 today), warp-64 gpu p50 -26%, warp_bake p50 -8%; new rows fabric-7, preview-clips",
+ "reason": "studio P1: new studio-preview scenario (Studio monitor plays a HAP file via preview.file while LIVE runs clips7)",
  "scenarios": {
   "clips-7": {
    "actions.errors": 0,
@@ -346,6 +346,37 @@
    "knob→submit": null,
    "monitor": 0.004,
    "resources.growth": 0,
+   "stale": 0
+  },
+  "studio-preview": {
+   "actions.errors": 0,
+   "cpu.acquire": 18.691,
+   "cpu.encode": 0.545,
+   "cpu.host": 0.001,
+   "cpu.inbound.cmds": 0.001,
+   "cpu.inbound.misc": 0.001,
+   "cpu.inbound.probe": 0.0,
+   "cpu.inbound.watch": 0.001,
+   "cpu.pace": 0.0,
+   "cpu.present": 0.0,
+   "cpu.preview.jpeg": 0.0,
+   "cpu.preview.present": 0.351,
+   "cpu.submit": 0.251,
+   "cpu.telemetry": 0.021,
+   "cpu.tick.design": 0.012,
+   "cpu.tick.live": 0.261,
+   "cpu.work": 1.288,
+   "decode": 1.894,
+   "fps": 60.0,
+   "frame.max": 11.098,
+   "gpu.composite.live": 0.834,
+   "gpu.final": 0.269,
+   "gpu.preview": 0.034,
+   "gpu.total": 1.11,
+   "knob→submit": null,
+   "monitor": 0.003,
+   "resources.growth": 0,
+   "rpc.preview.file": 3.815,
    "stale": 0
   }
  }

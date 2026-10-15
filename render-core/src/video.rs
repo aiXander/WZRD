@@ -185,6 +185,18 @@ impl ImageSource {
         matches!(self.kind, SourceKind::Clip(_))
     }
 
+    /// A clip's `(fps, frames, duration_sec)`; `None` for a still.
+    pub fn clip_timing(&self) -> Option<(f64, u32, f64)> {
+        match &self.kind {
+            SourceKind::Still { .. } => None,
+            SourceKind::Clip(c) => Some((
+                c.info.fps(),
+                c.info.samples.len() as u32,
+                c.info.duration_sec(),
+            )),
+        }
+    }
+
     /// Perf-monitor PM1 GPU-MB inventory: the texture, plus a clip's
     /// staging ring.
     pub fn gpu_bytes(&self) -> u64 {
@@ -1398,6 +1410,27 @@ mod tests {
         let SourceKind::Clip(c) = &source.kind else { panic!("clip expected") };
         assert_eq!(c.current, Some(5)); // 4 fps: 1.25 s → frame 5
         assert!(source.is_current(1.25, 0.0));
+    }
+
+    /// Dropping a source ends its decode thread (studio P1 gate: closing
+    /// the Studio monitor releases it). The thread holds the only other
+    /// strong ref to the stream's stats, so it is gone once that is.
+    #[test]
+    fn dropping_a_clip_ends_its_decode_thread() {
+        let Some(gpu) = crate::compositor::tests::test_gpu() else {
+            eprintln!("no BC-capable adapter — skipping");
+            return;
+        };
+        let source = ImageSource::open(&gpu, &fixture("hap.mov"), 0.0).unwrap();
+        let SourceKind::Clip(c) = &source.kind else { panic!("clip expected") };
+        let weak = Arc::downgrade(&c.stats);
+        assert!(weak.strong_count() >= 2, "decode thread holds a ref");
+        drop(source);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while weak.strong_count() > 0 {
+            assert!(std::time::Instant::now() < deadline, "decode thread still alive");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// `open_many` = `open` per job, results in job order, failures per job.

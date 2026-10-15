@@ -67,6 +67,7 @@ const QUEUED_METHODS: &[&str] = &[
     "pull",
     "preview.setSource",
     "preview.snapshot",
+    "preview.file",
     "identity.setGroups",
 ];
 
@@ -103,10 +104,12 @@ struct PreviewCfg {
 /// underlay.md §4.1). CSS px, viewport-relative (== AppKit points).
 #[derive(Debug, Clone, Deserialize)]
 pub struct PreviewSlot {
-    /// Slot id — only `"main"` exists today (rooms are exclusive); keyed so
-    /// a second monitor is additive later.
+    /// Slot id. `"main"` (default) shows a leg / the program view per
+    /// `params`; `"studio"` is the Studio monitor (studio plan P1) — it
+    /// forces `params.file`, so it shows the `preview.file` source and no
+    /// leg renders for it. Rooms are exclusive, so both share the one
+    /// underlay view.
     #[serde(default)]
-    #[allow(dead_code)]
     pub id: Option<String>,
     pub x: f64,
     pub y: f64,
@@ -451,7 +454,8 @@ impl EngineWindows {
     ) -> Result<()> {
         use tauri::Manager;
         let show = slot.visible && slot.width >= 4.0 && slot.height >= 4.0;
-        let params = slot.params.unwrap_or_default();
+        let mut params = slot.params.unwrap_or_default();
+        params.file = slot.id.as_deref() == Some("studio");
         let hidden = PreviewCfg {
             width: 1,
             height: 1,
