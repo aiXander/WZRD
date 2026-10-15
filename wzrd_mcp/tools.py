@@ -495,6 +495,14 @@ def _tf_pack_media(args: dict) -> dict[str, bytes]:
     return files
 
 
+def _tf_estimate(args: dict) -> float:
+    quick = args.get("use_upscale") is False and args.get("upscale_esrgan") is False
+    return _TF_EST_QUICK_USD if quick else _TF_EST_FULL_USD
+
+
+jobs.ESTIMATORS["texture_flow"] = _tf_estimate
+
+
 def _tf_target() -> tuple[str, str]:
     return os.getenv("TEXTUREFLOW_APP", "wzrd-textureflow"), os.getenv("WZRD_MODAL_ENV", "wzrd")
 
@@ -583,15 +591,16 @@ async def texture_flow(
         raise ToolError("texture_flow needs images= (1-6 style images) or recipe=")
     sent = dict(args)  # local paths, before packing — what the record keeps
     region_info = provenance.region_meta(region) if region else {}
-    quick = args.get("use_upscale") is False and args.get("upscale_esrgan") is False
-    provenance.check_spend(_TF_EST_QUICK_USD if quick else _TF_EST_FULL_USD, allow_over_cap)
+    provenance.check_spend(_tf_estimate(args), allow_over_cap)
 
     files = await asyncio.to_thread(_tf_pack_media, args)
     app_name, env = _tf_target()
     mb = sum(len(b) for b in files.values()) / 1e6
     log_progress("texture_flow", f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
     tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
-    res = await with_keepalive(tf.render.remote.aio(args=args, files=files), ctx, "TextureFlow")
+    call = await tf.render.spawn.aio(args=args, files=files)
+    jobs.set_remote(f"modal|{call.object_id}", call.cancel.aio)
+    res = await with_keepalive(call.get.aio(), ctx, "TextureFlow")
 
     # The main video is the library item; the previews are scratch beside the job.
     response: dict = {}

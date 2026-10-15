@@ -19,7 +19,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.utilities.types import Image
 
-from . import library, project
+from . import jobs, library, project
 from .file_io import resolve_input_async
 from .server import tool
 
@@ -209,6 +209,16 @@ def _same_render(a: Path, b: Path) -> bool:
         return False
 
 
+def clip_path(src: Path) -> Path:
+    """Where *src*'s HAP goes: beside it (same stem), else the library."""
+    if _beside_ok(src):
+        mov = src.with_suffix(".mov") if src.suffix.lower() != ".mov" else src.with_name(f"{src.stem}_hap.mov")
+        if mov.exists() and not _same_render(mov, src):
+            mov = project.unique(src.parent, mov.stem, ".mov")  # a foreign file of that name stays
+        return mov
+    return Path(library.output_path("to_hap", ".mov", name=src.stem))
+
+
 def make_clip(video: str, codec: str = "hap") -> dict:
     """Transcode *video* to a HAP `.mov` the engine plays (blocking).
 
@@ -219,12 +229,7 @@ def make_clip(video: str, codec: str = "hap") -> dict:
     from wzrd.clips import to_hap
 
     src = Path(video).resolve()
-    if _beside_ok(src):
-        mov = src.with_suffix(".mov") if src.suffix.lower() != ".mov" else src.with_name(f"{src.stem}_hap.mov")
-        if mov.exists() and not _same_render(mov, src):
-            mov = project.unique(src.parent, mov.stem, ".mov")  # a foreign file of that name stays
-    else:
-        mov = Path(library.output_path("to_hap", ".mov", name=src.stem))
+    mov = clip_path(src)
     info = to_hap(src, mov, codec)
     return {"clip": str(mov), "hap": {k: info[k] for k in ("codec", "size", "padded", "mb")}}
 
@@ -263,6 +268,9 @@ async def to_hap(video: str, codec: str = "hap", region: Optional[str] = None,
 
     info = region_meta(region) if region else {}  # refuse an unknown id before transcoding
     path = await resolve_input_async(video, suffix=".mp4")
+    if job := jobs.current_job.get():  # the HAP lands beside its source, not in dest
+        jobs.update(job, dest=str(clip_path(Path(path).resolve()).parent))
+    jobs.submitted()  # checks passed: a wait=false caller gets its job id now
     result = await asyncio.to_thread(make_clip, path, codec)
     result["_provenance"] = {**info, "variant_of": {result["clip"]: path}}
     return {"video": path, **result}

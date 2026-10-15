@@ -24,7 +24,7 @@ from google import genai
 from google.genai import errors, types
 from PIL import Image
 
-from . import library, project, provenance
+from . import jobs, library, project, provenance
 from ._keepalive import with_keepalive
 from ._log import log_progress
 from .file_io import resolve_input_async
@@ -183,6 +183,17 @@ async def _generate_one(
 _EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 
 
+def _estimate(args: dict) -> float:
+    """Pre-call cost: tier price × images (+ refs). Without a resolution, the
+    1K price — a canvas project may pick 2K, which the call itself prices."""
+    tier = str(args.get("resolution") or "1K").upper()
+    refs = len(args.get("image_urls") or [])
+    return int(args.get("num_images") or 1) * (_USD_PER_IMAGE.get(tier, 0.113) + _USD_PER_REF * refs)
+
+
+jobs.ESTIMATORS["nano_banana"] = _estimate
+
+
 @tool(title="Nano Banana image", tags={"generate", "image"}, open_world=True, project_arg=True, render=True)
 async def nano_banana(
     prompt: str,
@@ -235,7 +246,7 @@ async def nano_banana(
     resolution = resolution.upper()
     region_info = provenance.region_meta(region) if region else {}
     provenance.check_spend(
-        num_images * (_USD_PER_IMAGE.get(resolution, 0.113) + _USD_PER_REF * len(image_urls)),
+        _estimate({"num_images": num_images, "resolution": resolution, "image_urls": image_urls}),
         allow_over_cap,
     )
     client, backend = _client()

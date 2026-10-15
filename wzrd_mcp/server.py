@@ -142,6 +142,7 @@ from . import media_tools as _media_tools  # noqa: E402, F401
 from . import fal_tools as _fal_tools  # noqa: E402, F401
 from . import google_tools as _google_tools  # noqa: E402, F401
 from . import local_tools as _local_tools  # noqa: E402, F401
+from . import studio_tools as _studio_tools  # noqa: E402, F401
 from . import engine_tools as _engine_tools  # noqa: E402, F401  (no-op without `websockets`)
 from . import hub as _hub  # noqa: E402, F401  (the app's /api/* routes)
 

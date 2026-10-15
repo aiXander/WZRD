@@ -293,6 +293,42 @@ async def _jobs(request, body):
     return {"version": jobs.version(), "now": time.time(), "jobs": rows, "spend": jobs.spend()}
 
 
+@api("/api/jobs/cancel", ("POST",))
+async def _jobs_cancel(request, body):
+    return await jobs.cancel(body["job"])
+
+
+@api("/api/estimate", ("POST",))
+async def _estimate(request, body):
+    tool = body["tool"]
+    if tool not in jobs.ESTIMATORS:
+        raise ValueError(f"no estimate for {tool!r} (free, or not a render tool)")
+    return {"tool": tool, "usd": jobs.estimate(tool, body.get("args") or {}, int(body.get("count", 1))),
+            "spend": jobs.spend()}
+
+
+@api("/api/render", ("POST",))
+async def _render(request, body):
+    """Start `count` render jobs from the app (S16): each is the MCP tool
+    called with `wait=false`, recorded `by: "app"`. Errors before submit
+    (bad args, spend cap, unknown region) come back as 400."""
+    name, args, count = body["tool"], dict(body.get("args") or {}), int(body.get("count", 1))
+    t = await mcp.get_tool(name)
+    if t is None or "render" not in (t.tags or set()):
+        raise ValueError(f"{name!r} is not a render tool")
+    if not 1 <= count <= 12:
+        raise ValueError("count must be 1-12")
+    token = jobs.current_by.set("app")
+    started = []
+    try:
+        for _ in range(count):
+            res = await t.run({**args, "wait": False})
+            started.append(json.loads(res.content[0].text))
+    finally:
+        jobs.current_by.reset(token)
+    return {"jobs": started}
+
+
 @api("/api/jobs/item")
 async def _job(request, body):
     return jobs.get(_q(request, "job") or "")

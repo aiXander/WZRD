@@ -24,7 +24,7 @@ import fal_client
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from . import library, project, provenance
+from . import jobs, library, project, provenance
 from ._keepalive import with_keepalive
 from .file_io import resolve_input_async
 from .media_tools import attach_clip
@@ -69,7 +69,7 @@ def _user_error(error: Exception) -> str:
 async def _fal_subscribe(
     endpoint: str, args: dict, tool_name: str = "", ctx: Optional[Context] = None,
 ) -> dict:
-    """Call fal_client.subscribe in a thread with retry + exponential backoff.
+    """Submit to FAL's queue and wait in a thread, with retry + exponential backoff.
 
     When *ctx* is provided, `with_keepalive` pings it while the job runs so the
     MCP client connection doesn't time out during long FAL jobs.
@@ -85,24 +85,12 @@ async def _fal_subscribe(
             if tool_name:
                 log_progress(tool_name, f"Submitting to FAL ({endpoint})...")
 
-            def _on_update(update):
-                if isinstance(update, fal_client.InProgress):
-                    for log_entry in update.logs:
-                        msg = log_entry["message"]
-                        logger.info(msg)
-                        if tool_name:
-                            log_progress(tool_name, f"FAL: {msg}")
-
-            return await with_keepalive(
-                asyncio.to_thread(
-                    fal_client.subscribe,
-                    endpoint,
-                    arguments=args,
-                    with_logs=True,
-                    on_queue_update=_on_update,
-                ),
-                ctx, "FAL",
-            )
+            # submit + get (not subscribe): the request id is known up front,
+            # so cancel_job can stop the remote side (H2).
+            handle = await asyncio.to_thread(fal_client.submit, endpoint, arguments=args)
+            jobs.set_remote(f"fal|{endpoint}|{handle.request_id}",
+                            lambda: asyncio.to_thread(handle.cancel))
+            return await with_keepalive(asyncio.to_thread(handle.get), ctx, "FAL")
 
         except Exception as exc:
             last_err = exc
@@ -175,6 +163,19 @@ _KLING_V25_5S = 0.35
 _KLING_V25_PER_EXTRA_S = 0.07
 _KLING_V3_PER_S = 0.084
 _KLING_V3_PER_S_AUDIO = 0.126
+
+
+def _kling_v25_estimate(args: dict) -> float:
+    return _KLING_V25_5S + _KLING_V25_PER_EXTRA_S * max(0, int(args.get("duration") or 5) - 5)
+
+
+def _kling_v3_estimate(args: dict) -> float:
+    rate = _KLING_V3_PER_S_AUDIO if args.get("generate_audio") else _KLING_V3_PER_S
+    return int(args.get("duration") or 5) * rate
+
+
+jobs.ESTIMATORS["kling_v25_image_to_video"] = _kling_v25_estimate
+jobs.ESTIMATORS["kling_v3_image_to_video"] = _kling_v3_estimate
 
 
 def _with_cost(result: dict, usd: float, endpoint: str, region_info: dict) -> dict:
@@ -280,7 +281,7 @@ async def kling_v25_image_to_video(
         hap: Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.
     """
     region_info = provenance.region_meta(region) if region else {}
-    usd = _KLING_V25_5S + _KLING_V25_PER_EXTRA_S * max(0, int(duration) - 5)
+    usd = _kling_v25_estimate({"duration": duration})
     provenance.check_spend(usd, allow_over_cap)
     image_url, tail_image_url = await _to_fal_urls([image_url, tail_image_url])
 
@@ -340,7 +341,7 @@ async def kling_v3_image_to_video(
         hap: Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.
     """
     region_info = provenance.region_meta(region) if region else {}
-    usd = int(duration) * (_KLING_V3_PER_S_AUDIO if generate_audio else _KLING_V3_PER_S)
+    usd = _kling_v3_estimate({"duration": duration, "generate_audio": generate_audio})
     provenance.check_spend(usd, allow_over_cap)
     aspect_ratio = aspect_ratio or _nearest_aspect(start_image_url, ("16:9", "9:16", "1:1"))
     start_image_url, end_image_url = await _to_fal_urls([start_image_url, end_image_url])

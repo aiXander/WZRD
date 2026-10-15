@@ -82,9 +82,9 @@ idempotent=, open_world=)` — never `@mcp.tool` by hand:
   of every output of a dict result (below). Tool bodies carry no
   try/except/log boilerplate; raise `ToolError` for an actionable refusal.
 - **Injected params.** `tool(project_arg=True)` adds `project=` (venue,
-  region and generator tools); `tool(render=True)` adds `dest=`, the tag
-  `render` and a job row per call (`nano_banana`, `texture_flow`, `kling_*`,
-  `to_hap`); `dest_arg=True` adds `dest=` alone (`extract_frames`,
+  region and generator tools); `tool(render=True)` adds `dest=`, `wait=`,
+  the tag `render` and a job row per call (`nano_banana`, `texture_flow`,
+  `kling_*`, `to_hap`); `dest_arg=True` adds `dest=` alone (`extract_frames`,
   `concat_videos`). They are spliced into the published signature and
   stripped before the body runs, so bodies never see them.
 - **Annotations** are MCP behaviour hints: `open_world` = paid/remote call
@@ -206,8 +206,9 @@ python -m wzrd_mcp`); Claude Code attaches with
 JSON over `library.py` / `jobs.py`, errors `{error}` with 400/500.
 `hello`, `roots` (+`/remove`), `library/{list, item, index, label, move,
 rename, delete, delete_scored, signal, tags}`, `thumb?id=`, `selection`,
-`jobs` (long-poll on `version`, or `since`), `jobs/item`, `spend`,
-`recipes`. The exact shapes are the route functions — read `hub.py`.
+`jobs` (long-poll on `version`, or `since`), `jobs/item`, `jobs/cancel`,
+`render` (`{tool, args, count}` → each a `wait=false` call of the render
+tool, `by: "app"`), `estimate`, `spend`, `recipes`. The exact shapes are the route functions — read `hub.py`.
 Destructive operations (delete) exist **only** here, never as MCP tools: an
 agent can't delete by construction.
 
@@ -258,6 +259,23 @@ record outlives a deleted file.
   (`fp_…`). A row whose path vanished but whose fingerprint reappears
   elsewhere follows the file. Vanished files get `missing = 1`; `/api`
   delete sets `purged` once a render has no file left.
+
+**Jobs** (`jobs.py`, MCP tools `jobs` / `cancel_job` in `studio_tools.py`):
+every render-tool call is a `jobs` row. `wait=false` runs the body as an
+asyncio task in the hub (`jobs.detach`) and replies `{job, status:
+"running", dest, eta_s}` once the call is *submitted* — it passed its
+checks (`check_spend` signals it; `to_hap` calls `jobs.submitted()`) — or
+straight away with the error/result if it ends first, so a cap refusal or
+bad `region=` still fails synchronously. Remote calls register with
+`jobs.set_remote` (`modal|<call id>` via `.spawn` + `.get`; `fal|<endpoint>|<request id>`
+via `fal_client.submit` + `handle.get`) so `cancel` stops the billing side
+first, then the task; Nano Banana has no remote handle. A job whose process
+died without `ended` reads **lost** (pid check on read); cancelling a lost
+job still cancels its recorded remote call. ETA = median `duration_s` of
+the last 20 successful jobs with the same tool + size args (`SIZE_ARGS`).
+Pre-call estimates live in `jobs.ESTIMATORS` (registered by the tool
+modules; shared by `check_spend` and `/api/estimate`). A job's `dest` is
+the folder its outputs land in — `to_hap` records its source's folder.
 
 **Spend cap** (`jobs.py`): daily and global, default $20/day
 (`settings.daily_cap_usd`; `/api/spend` or `set_project(daily_cap_usd=…)`
@@ -352,7 +370,8 @@ D16: the default is what a Finder-launched app sees). Code:
 | `hub.py` | the hub: `hub.lock`, idle exit, `/api/*` routes |
 | `library.py` | media root + roots + selection, `library.db` schema/migrations, indexing, labels, move/rename/delete, generator output routing |
 | `identity.py` | fingerprint, the embedded `wzrd` tag (read/write), probe, thumbnails, ULIDs |
-| `jobs.py` | job rows, status (lost = no `ended` + dead pid), ETA, the daily spend cap |
+| `jobs.py` | job rows, status (lost = no `ended` + dead pid), ETA, estimators, `wait=false` detach + cancel, the daily spend cap |
+| `studio_tools.py` | agent tools for the Studio side: `jobs`, `cancel_job` |
 | `provenance.py` | render records for every output (`record_outputs`), legacy sidecar reads, `region=` → pack layer box |
 | `recipe_tools.py` | style recipe library: `list_recipes`, `save_recipe`, `apply_recipe` (the `texture_flow(recipe=)` merge) |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |

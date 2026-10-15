@@ -148,12 +148,14 @@ def _session() -> Optional[str]:
 #: Params `server.tool()` can add to a tool's signature; stripped before the body runs.
 _PROJECT_DOC = ("Project (show) this call works on — its files, and what region= resolves against. "
                 "Pass it on every call; omitted = the show open in the app.")
+_WAIT_DOC = ("false = return at once with a job id (the render runs in the hub); poll jobs(job), "
+             "stop it with cancel_job(job). Use for batches and anything over ~1 min. Default true.")
 _DEST_DOC = ('Where outputs land: omit or "library" = the Studio target folder, else the media '
              'library\'s inbox/; "project" = the project\'s generated/ (e.g. a segmentation map); '
              'or an absolute folder path.')
 
 
-def _injected_params(project_arg: bool, dest_arg: bool) -> list[inspect.Parameter]:
+def _injected_params(project_arg: bool, dest_arg: bool, render: bool) -> list[inspect.Parameter]:
     from pydantic import Field
 
     out = []
@@ -163,6 +165,9 @@ def _injected_params(project_arg: bool, dest_arg: bool) -> list[inspect.Paramete
     if dest_arg:
         out.append(inspect.Parameter("dest", inspect.Parameter.KEYWORD_ONLY, default=None,
                                      annotation=Annotated[Optional[str], Field(description=_DEST_DOC)]))
+    if render:
+        out.append(inspect.Parameter("wait", inspect.Parameter.KEYWORD_ONLY, default=True,
+                                     annotation=Annotated[bool, Field(description=_WAIT_DOC)]))
     return out
 
 
@@ -176,11 +181,12 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
     sees an actionable message instead of FastMCP's masked "internal error".
     Tool bodies therefore need no try/except/log boilerplate of their own.
 
-    Around the body it also sets the call's scope: the MCP session (whose
-    `set_project` the call resolves against), a `project=` override
-    (`project_arg`), and for `render` tools the `dest=` routing plus a
-    `jobs` row from start to finish. A dict result gets its outputs tagged
-    and recorded (`provenance.record_outputs`).
+    Around the body it also sets the call's scope: the `project=` it
+    resolves against (`project_arg`), the `dest=` routing of generator
+    outputs (`dest_arg`, implied by `render`), and for `render` tools a
+    `jobs` row from start to finish plus `wait=false` (the body runs as a
+    hub task, see `jobs.detach`). A dict result gets its outputs tagged and
+    recorded (`provenance.record_outputs`).
 
     Applied by `server.tool()` — never stack it by hand.
     """
@@ -189,7 +195,7 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
     from . import jobs, library, project
 
     dest_arg = dest_arg or render
-    extra = _injected_params(project_arg, dest_arg)
+    extra = _injected_params(project_arg, dest_arg, render)
     extra_names = {p.name for p in extra}
 
     @functools.wraps(fn)
@@ -201,9 +207,42 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
         if timing is not None:
             timing["tool_name"] = fn.__name__
             timing["tool_start"] = time.time()
-        sid = _session()
         tokens = [(project.call_project, project.call_project.set(project.call_project.get()))]
         job = None
+
+        async def body():
+            """The call proper: body → records → job end. Runs inline, or as a
+            hub task for `wait=false` (it then owns the job's end itself)."""
+            try:
+                result = await fn(*args, **kwargs)
+                records, cost = [], None
+                if isinstance(result, dict):
+                    result, records, cost = await asyncio.to_thread(
+                        _with_provenance, fn.__name__, client_args, result, t0, job)
+                if job:
+                    jobs.finish(job, ok=True, outputs=[r["path"] for r in records], est_usd=cost)
+                    result = {"job": job, **result} if isinstance(result, dict) else result
+                log_done(fn.__name__, t0, result if isinstance(result, dict) else None)
+                return result
+            except asyncio.CancelledError:
+                if job:
+                    jobs.finish(job, ok=False, error="cancelled", cancelled=True)
+                    log_progress(fn.__name__, f"job {job} cancelled")
+                raise
+            except ToolError as exc:
+                if job:
+                    jobs.finish(job, ok=False, error=str(exc))
+                log_error(fn.__name__, exc, t0, tb=False)
+                raise
+            except Exception as exc:
+                if job:
+                    jobs.finish(job, ok=False, error=str(exc))
+                log_error(fn.__name__, exc, t0)
+                raise ToolError(str(exc)) from exc
+            finally:
+                if job:
+                    jobs.forget(job)
+
         try:
             if scope.get("project"):
                 tokens.append((project.call_project, project.call_project.set(project.slugify(scope["project"]))))
@@ -211,37 +250,17 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
                 try:
                     library.check_dest(scope.get("dest"))
                 except ValueError as exc:
+                    log_error(fn.__name__, exc, t0, tb=False)
                     raise ToolError(str(exc))
                 tokens.append((library.current_dest, library.current_dest.set(scope.get("dest"))))
             if render:
                 job = jobs.start(fn.__name__, {k: v for k, v in client_args.items() if v is not None},
-                                 by=jobs.current_by.get(), session=sid, project=project.active_project(),
-                                 dest=str(library.dest_dir()))
+                                 by=jobs.current_by.get(), session=_session(),
+                                 project=project.active_project(), dest=str(library.dest_dir()))
                 tokens.append((jobs.current_job, jobs.current_job.set(job)))
-            result = await fn(*args, **kwargs)
-            records, cost = [], None
-            if isinstance(result, dict):
-                result, records, cost = await asyncio.to_thread(
-                    _with_provenance, fn.__name__, client_args, result, t0, job)
-            if job:
-                jobs.finish(job, ok=True, outputs=[r["path"] for r in records], est_usd=cost)
-                result = {"job": job, **result} if isinstance(result, dict) else result
-            log_done(fn.__name__, t0, result if isinstance(result, dict) else None)
-            return result
-        except asyncio.CancelledError:
-            if job:
-                jobs.finish(job, ok=False, error="cancelled", cancelled=True)
-            raise
-        except ToolError as exc:
-            if job:
-                jobs.finish(job, ok=False, error=str(exc))
-            log_error(fn.__name__, exc, t0, tb=False)
-            raise
-        except Exception as exc:
-            if job:
-                jobs.finish(job, ok=False, error=str(exc))
-            log_error(fn.__name__, exc, t0)
-            raise ToolError(str(exc)) from exc
+                if scope.get("wait") is False:
+                    return await jobs.detach(job, body, str(library.dest_dir()))
+            return await body()
         finally:
             for var, token in reversed(tokens):
                 var.reset(token)

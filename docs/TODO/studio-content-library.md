@@ -1,6 +1,6 @@
 # Studio: content generation, the media library and clip decks (sprint plan)
 
-> **Status: agreed with Xander 2026-10-15 (grilling session); building. H1 and P1 done.**
+> **Status: agreed with Xander 2026-10-15 (grilling session); building. H1, H2 and P1 done.**
 > Every decision below is settled. Don't re-litigate them; ask Xander if
 > a build finding contradicts one. **Deadline:** everything lands by
 > **7 Nov 2026**, decks included, before the gig's dress-rehearsal week
@@ -166,23 +166,18 @@ lane: `clips.rs` reads the database instead of sidecars (query sent to the
 app agent). Done — see
 [../reference/mcp-server.md](../reference/mcp-server.md).
 
-### H2 — non-blocking jobs + cancel (PY)
+### H2 — non-blocking jobs + cancel (PY) — **done 2026-10-15**
 
-- `wait=false` on `texture_flow`, `kling_*` and `nano_banana` registers an
-  asyncio task in the hub and returns `{job, dest, eta_s}`.
-- `jobs(job?)` reads the `jobs` table; `cancel_job(job)` cancels the remote
-  call (Modal `FunctionCall.cancel`, FAL cancel) and marks the job
-  `cancelled`.
-- A job whose hub died mid-render shows as **lost** (no `ended`, `pid`
-  dead).
-- ETA = median `duration_s` of the last 20 successful jobs of the same tool
-  and size args.
-- ~~Add `with_keepalive` to the blocking `texture_flow` path~~ — done in H1.
-
-**Gate:**
-- queue 4 TextureFlows from chat, keep chatting, all 4 land;
-- cancel one mid-render → no output, Modal shows it cancelled;
-- kill the hub mid-render → the job reads lost.
+Shipped: `wait=false` on every render tool (`jobs.detach`: replies with
+`{job, dest, eta_s}` once the call passed its checks), MCP tools `jobs` /
+`cancel_job` (`studio_tools.py`), Modal `spawn` + FAL `submit` so cancel
+stops the remote side, lost detection, ETA medians, `/api/render`,
+`/api/estimate`, `/api/jobs/cancel`; TextureFlow's keepalive came with H1.
+Gate passed: a Claude Code session queued 4 TextureFlows with
+`wait=false`, kept talking, all 4 landed (61–77 s each); one cancelled
+12 s in left no file and Modal reported the call cancelled; a hub killed
+mid-render left its job `lost`, and cancelling it stopped the Modal call.
+Done — see [../reference/mcp-server.md](../reference/mcp-server.md) "Jobs".
 
 ### H3 — agent tools + skills (PY)
 

@@ -6,10 +6,19 @@ process died before `ended` was written reads **lost**. The spend cap is
 daily and global: today's (local midnight on) `est_usd` over all jobs —
 running ones count with their pre-estimate, so a parallel batch can't
 overshoot.
+
+`wait=false` (H2): `logged_tool` runs the body as an asyncio task in this
+process and replies as soon as the call is **submitted** — the tool passed
+its checks (`check_spend`, or an explicit `submitted()`) — or finishes,
+whichever comes first. A tool that starts a remote call registers it with
+`set_remote` so `cancel` can stop the remote side too (Modal
+`FunctionCall.cancel`, FAL `cancel`); Nano Banana has no remote handle, so
+cancelling only drops the request.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import statistics
@@ -17,7 +26,7 @@ import threading
 import time
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from fastmcp.exceptions import ToolError
 
@@ -40,6 +49,15 @@ SIZE_ARGS = {
     "kling_v3_image_to_video": ("duration", "generate_audio"),
     "to_hap": ("codec",),
 }
+
+# Pre-call cost estimates per render tool, args -> USD (registered by the
+# tool modules; `/api/estimate` and the tools' own `check_spend` share them).
+ESTIMATORS: dict[str, Callable[[dict], float]] = {}
+
+# In-process runtime of detached / cancellable jobs.
+_tasks: dict[str, asyncio.Task] = {}
+_cancellers: dict[str, Callable[[], Awaitable[Any]]] = {}
+_submitted: dict[str, asyncio.Event] = {}
 
 # Bumped on every job change; `/api/jobs` long-polls on it.
 _version = 0
@@ -208,6 +226,106 @@ def check_spend(est_usd: float, allow_over_cap: bool) -> None:
         )
     if job:
         update(job, est_usd=round(float(est_usd), 4))
+    submitted()
+
+
+def estimate(tool: str, args: dict, count: int = 1) -> float:
+    if tool not in ESTIMATORS:
+        return 0.0
+    return round(ESTIMATORS[tool](args) * max(1, count), 4)
+
+
+# ---------------------------------------------------------------------------
+# Detached jobs + cancel (S17)
+# ---------------------------------------------------------------------------
+def submitted() -> None:
+    """The running call passed its checks: a `wait=false` caller may return now."""
+    ev = _submitted.get(current_job.get() or "")
+    if ev:
+        ev.set()
+
+
+def set_remote(remote: str, cancel: Optional[Callable[[], Awaitable[Any]]] = None) -> None:
+    """Record the remote call behind the running job (`modal|<call id>`,
+    `fal|<endpoint>|<request id>`) and how to cancel it."""
+    job = current_job.get()
+    if not job:
+        return
+    update(job, remote=remote)
+    if cancel:
+        _cancellers[job] = cancel
+
+
+async def detach(job: str, body: Callable[[], Awaitable[Any]], dest: Optional[str]) -> Any:
+    """Run *body* as a hub task; return once it is submitted (or done)."""
+    ev = asyncio.Event()
+    _submitted[job] = ev
+    task = asyncio.create_task(body(), name=f"wzrd-job-{job}")
+    _tasks[job] = task
+    waiter = asyncio.create_task(ev.wait())
+    try:
+        done, _ = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        waiter.cancel()
+    if task in done:
+        return task.result()  # finished (or failed) before submitting: reply as a blocking call would
+    row = library.query_one("SELECT tool, size_key, dest FROM jobs WHERE id=?", (job,))
+    return {"job": job, "status": "running", "dest": (row["dest"] if row else None) or dest,
+            "eta_s": eta(row["tool"], row["size_key"]) if row else None,
+            "note": "rendering in the hub; jobs(job) for status, cancel_job(job) to stop it"}
+
+
+def forget(job: str) -> None:
+    _tasks.pop(job, None)
+    _cancellers.pop(job, None)
+    _submitted.pop(job, None)
+
+
+async def _cancel_remote(remote: Optional[str]) -> Optional[str]:
+    if not remote:
+        return None
+    kind, _, rest = remote.partition("|")
+    if kind == "modal":
+        import modal
+
+        await modal.FunctionCall.from_id(rest).cancel.aio()
+        return "modal"
+    if kind == "fal":
+        import fal_client
+
+        endpoint, _, request_id = rest.rpartition("|")
+        await asyncio.to_thread(fal_client.cancel, endpoint, request_id)
+        return "fal"
+    return None
+
+
+async def cancel(job: str) -> dict:
+    """Stop a running job: the remote call first (no more billing), then the
+    hub task. A job this process doesn't run (lost, or another process's)
+    is cancelled remotely by its recorded id and marked cancelled."""
+    row = library.query_one("SELECT * FROM jobs WHERE id=?", (job,))
+    if not row:
+        raise ToolError(f"no job {job!r}")
+    status = status_of(row)
+    if status not in ("running", "lost"):
+        raise ToolError(f"job {job} is {status} — nothing to cancel")
+    remote = None
+    try:
+        canceller = _cancellers.pop(job, None)
+        if canceller:
+            await canceller()
+            remote = (row["remote"] or "").partition("|")[0] or "remote"
+        else:
+            remote = await _cancel_remote(row["remote"])
+    except Exception as exc:  # noqa: BLE001 — still stop our side
+        remote = f"remote cancel failed: {exc}"
+    task = _tasks.get(job)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.wait({task}, timeout=10)
+    if status_of(library.query_one("SELECT * FROM jobs WHERE id=?", (job,))) in ("running", "lost"):
+        finish(job, ok=False, error="cancelled", cancelled=True)
+    return {**get(job), "remote_cancel": remote}
 
 
 def spend() -> dict:
