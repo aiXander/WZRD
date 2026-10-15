@@ -9,7 +9,7 @@
 //   └────────┴─ drawer: clip grid | code (scene.json + WGSL) ┴┘
 //
 // Building a layer is two clicks: a region on the map, an effect card.
-// Putting a rendered clip on a region is one: its slot in the clip grid.
+// Putting a rendered clip on a region is one: its slot in a clip deck.
 
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { nativeUnderlay } from '../api/previewMode';
@@ -160,7 +160,7 @@ export function Prepare() {
             </Btn>
             <span className="text-[10px] text-fg4 truncate min-w-0">
               {drawer === 'clips'
-                ? 'Rendered videos, a row per region. Click = play it there in DESIGN (one per row) · click again or ■ = stop · TAKE sends it to the wall.'
+                ? 'The show’s clip decks, a row per region. Click = play it there in DESIGN (one per row) · click again or ■ = stop · drag to re-file · TAKE sends it to the wall.'
                 : 'Plain files: scene.json + effects/*/shader.wgsl. ⌘S (or Save) in the editor saves the open file; a shader save hot-reloads.'}
             </span>
           </div>

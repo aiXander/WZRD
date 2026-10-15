@@ -228,6 +228,19 @@ pub fn record(id: &str) -> Result<Value, String> {
         .flatten()
         .collect();
     render["files"] = json!(files);
+    // The args the job was submitted with — exactly the tool's inputs, which
+    // is what "More like this" re-runs (the record's args also carry
+    // provenance-only keys like `model`). Null for a render made without a
+    // job row (an agent's blocking call).
+    let job_args = render["job"]
+        .as_str()
+        .and_then(|j| {
+            conn.query_row("SELECT args FROM jobs WHERE id = ?1", [j], |r| r.get::<_, Option<String>>(0))
+                .ok()
+        })
+        .map(json_col)
+        .unwrap_or(Value::Null);
+    render["job_args"] = job_args;
     Ok(render)
 }
 
@@ -257,6 +270,64 @@ pub fn tags() -> Result<Value, String> {
 }
 
 /// Files by render id or fingerprint — D3's Relink search, steps 1 and 2.
+/// Items for many paths at once (deck slots' thumbnails + labels): the
+/// indexed row when there is one, else a bare item; a legacy
+/// `<stem>.thumb.jpg` beside the file stands in for a missing thumbnail.
+pub fn items_for(paths: &[String]) -> Result<Vec<Value>, String> {
+    let mut by_path: HashMap<String, Value> = HashMap::new();
+    if let Some(conn) = open_db()? {
+        let mut stmt = conn
+            .prepare_cached(&format!("{ITEM_SELECT} WHERE f.path = ?1"))
+            .map_err(|e| e.to_string())?;
+        for p in paths {
+            if let Ok(v) = stmt.query_row([p], item_from_row) {
+                by_path.insert(p.clone(), v);
+            }
+        }
+    }
+    Ok(paths
+        .iter()
+        .map(|p| {
+            let path = Path::new(p);
+            let mut v = by_path.remove(p).unwrap_or_else(|| {
+                json!({
+                    "path": p,
+                    "name": path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    "indexed": false,
+                })
+            });
+            if v.get("thumb").map_or(true, Value::is_null) {
+                let legacy = path.with_extension("thumb.jpg");
+                if legacy.is_file() {
+                    v["thumb"] = json!(legacy.to_string_lossy());
+                }
+            }
+            v["exists"] = json!(path.is_file());
+            v
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn library_items(paths: Vec<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || items_for(&paths).map(Value::Array))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// `(render_id, fp)` of an indexed, present file at `path`.
+pub fn file_row(path: &str) -> Result<Option<(String, String)>, String> {
+    let Some(conn) = open_db()? else { return Ok(None) };
+    let mut stmt = conn
+        .prepare_cached("SELECT render_id, fp FROM files WHERE path = ?1 AND missing = 0")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([path]).map_err(|e| e.to_string())?;
+    match rows.next().map_err(|e| e.to_string())? {
+        Some(r) => Ok(Some((r.get(0).map_err(|e| e.to_string())?, r.get(1).map_err(|e| e.to_string())?))),
+        None => Ok(None),
+    }
+}
+
 #[allow(dead_code)] // D3 Relink
 pub fn find_files(id: Option<&str>, fp: Option<&str>) -> Result<Vec<Value>, String> {
     let Some(conn) = open_db()? else { return Ok(Vec::new()) };
@@ -275,7 +346,6 @@ pub fn find_files(id: Option<&str>, fp: Option<&str>) -> Result<Vec<Value>, Stri
 }
 
 /// The newest playable renders made for `project` (D1's incoming strip).
-#[allow(dead_code)] // D1 incoming strip
 pub fn recent_for_project(project: &str, limit: u32) -> Result<Vec<Value>, String> {
     let Some(conn) = open_db()? else { return Ok(Vec::new()) };
     let sql = format!(
@@ -296,9 +366,15 @@ pub fn recent_for_project(project: &str, limit: u32) -> Result<Vec<Value>, Strin
 // ---------------------------------------------------------------------------
 
 /// Directories the webview may load media from: the library home (incl. the
-/// thumbnail cache), every extra root, and the projects root.
+/// thumbnail cache), every extra root, the projects root, and the style
+/// recipe library (previews + style images in Studio's Render panel).
 pub fn allowed_dirs(projects_root: Option<PathBuf>) -> Vec<PathBuf> {
-    let mut dirs = vec![hub::media_root()];
+    let recipes = std::env::var("WZRD_RECIPES_ROOT")
+        .map(|p| hub::expand_home(&p))
+        .unwrap_or_else(|_| hub::repo_dir().join("library").join("recipes"));
+    // The thumbnail cache sits under a dot-folder, which a `<root>/**`
+    // scope glob never matches (leading dots must be literal) — list it.
+    let mut dirs = vec![hub::media_root(), hub::media_root().join(".wzrd").join("thumbs"), recipes];
     if let Ok(Value::Array(rs)) = roots() {
         dirs.extend(
             rs.iter()
@@ -407,6 +483,16 @@ pub fn devport_dispatch(cmd: &str, a: &Value, app: &AppHandle) -> Option<Result<
             None => Err("library_record: missing id".into()),
         },
         "library_tags" => tags(),
+        "library_items" => items_for(
+            &a["paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        )
+        .map(Value::Array),
         _ => return None,
     })
 }

@@ -6,7 +6,8 @@
 // The open folder is the target folder: renders started from here (or by
 // an agent reading `studio_selection()`) land in it. Keys (only while no
 // input has focus): arrows move (⇧ extends), space plays in the monitor,
-// 0–9 score (− clears), T tag, N note, M move, ⌫ delete media (records are
+// 0–9 score (− clears), T tag, N note, M move, D add to the open show’s
+// active deck, ⌫ delete media (records are
 // kept; a multi-selection needs a second ⌫ within 2 s), Esc deselects.
 // No telemetry subscriptions here — the only engine use is the monitor's
 // `preview.file`.
@@ -17,8 +18,11 @@ import { FolderTree } from '../components/studio/FolderTree';
 import { MediaGrid, gridColumns } from '../components/studio/MediaGrid';
 import { Monitor } from '../components/studio/Monitor';
 import { RecordPanel } from '../components/studio/RecordPanel';
+import { RenderPanel } from '../components/studio/RenderPanel';
+import { Seg } from '../ui/primitives';
 import { StyleTray } from '../components/studio/StyleTray';
 import { KeyPrompt, type PromptKind } from '../components/studio/KeyPrompt';
+import { addToDeck } from '../state/decks';
 import { useHub, useJobsFeed } from '../state/hub';
 import {
   deleteMedia,
@@ -33,6 +37,48 @@ import {
 } from '../state/studio';
 
 const POLL_MS = 2000;
+const TAB_KEY = 'wzrd.studio.side';
+
+type SideTab = 'record' | 'render';
+
+/** Under the monitor: the focused item's record + labels, or the Render
+ *  panel (R1). The choice is a per-machine convenience (localStorage). */
+function SideTabs({ onPrompt }: { onPrompt: (k: PromptKind) => void }) {
+  const [tab, setTab] = useState<SideTab>(() => {
+    try {
+      return localStorage.getItem(TAB_KEY) === 'render' ? 'render' : 'record';
+    } catch {
+      return 'record';
+    }
+  });
+  const pick = (t: SideTab) => {
+    setTab(t);
+    try {
+      localStorage.setItem(TAB_KEY, t);
+    } catch {
+      /* ignore */
+    }
+  };
+  return (
+    <div className="flex-1 min-h-0 flex flex-col gap-1.5">
+      <Seg<SideTab>
+        value={tab}
+        onChange={pick}
+        options={[
+          { id: 'record', label: 'Record' },
+          { id: 'render', label: 'Render' },
+        ]}
+      />
+      {tab === 'record' ? (
+        <RecordPanel onPrompt={onPrompt} />
+      ) : (
+        <section className="flex-1 min-h-0 border border-line rounded-lg bg-panel">
+          <RenderPanel />
+        </section>
+      )}
+    </div>
+  );
+}
 
 export function Studio() {
   const hubState = useHub((s) => s.status?.state);
@@ -103,6 +149,10 @@ export function Studio() {
         case 'N':
           e.preventDefault();
           return setPrompt('note');
+        case 'd':
+        case 'D':
+          e.preventDefault();
+          return void addToDeck(targets().filter((t) => t.kind === 'video'));
         case 'm':
         case 'M':
           e.preventDefault();
@@ -144,7 +194,7 @@ export function Studio() {
         <Pane id="side" size="400px" min={300} label="Monitor + record">
           <div className="h-full min-h-0 flex flex-col gap-2">
             <Monitor />
-            <RecordPanel onPrompt={setPrompt} />
+            <SideTabs onPrompt={setPrompt} />
           </div>
         </Pane>
       </Split>

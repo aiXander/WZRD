@@ -12,7 +12,7 @@
 //! the current `Session` (engine + scene path) on a project switch or an
 //! "engine restart"; the windows outlive every engine.
 
-mod clips;
+mod decks;
 #[cfg(debug_assertions)]
 mod devport;
 mod engine;
@@ -394,9 +394,6 @@ pub fn run() {
             projects::project_current,
             projects::project_open,
             projects::engine_restart,
-            clips::clips_list,
-            clips::clip_thumb,
-            clips::clip_file,
             layout::ui_layout_read,
             layout::ui_layout_write,
             hub::hub_status,
@@ -407,6 +404,11 @@ pub fn run() {
             library::library_roots,
             library::library_record,
             library::library_tags,
+            library::library_items,
+            decks::decks_read,
+            decks::decks_write,
+            decks::deck_slots,
+            decks::library_incoming,
         ])
         .on_window_event(|window, event| {
             // The engine window has its own handler (engine.rs); closing the

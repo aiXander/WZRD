@@ -112,7 +112,7 @@ function ImageRow({ value }: { value: any }) {
     <div className="flex items-center gap-2 h-8 px-2 rounded-md bg-panel2 border border-line text-[11px]">
       <span className="text-fg3 shrink-0">Clip</span>
       <span className="num truncate flex-1 text-fg" title={clip ?? undefined}>
-        {clip ? clip.split('/').pop() : 'none — pick one in the clip grid'}
+        {clip ? clip.split('/').pop() : 'none — pick one in the clip decks'}
       </span>
       {clip && value.placement === 'canvas' && <span className="text-[9px] text-fg4">canvas</span>}
       {clip && value.rate != null && value.rate !== 1 && <span className="num text-[9px] text-fg4">×{value.rate}</span>}

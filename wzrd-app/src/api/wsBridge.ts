@@ -59,9 +59,6 @@ const SHELL_COMMANDS = new Set([
   'project_current',
   'project_open',
   'engine_restart',
-  'clips_list',
-  'clip_thumb',
-  'clip_file',
   'ui_layout_read',
   'ui_layout_write',
   'list_effects',
@@ -81,6 +78,11 @@ const SHELL_COMMANDS = new Set([
   'library_roots',
   'library_record',
   'library_tags',
+  'library_items',
+  'decks_read',
+  'decks_write',
+  'deck_slots',
+  'library_incoming',
 ]);
 
 let ws: WebSocket | null = null;

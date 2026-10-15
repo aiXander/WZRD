@@ -8,7 +8,8 @@ example pack from `python test.py layerpack`) with a few clips in
 embedded `wzrd` tag with one shared render id, and registered in the media
 library's `library.db` (rows + a cached thumbnail; `generated/` is added as a
 library root). No sidecars. One clip has no region (the "unassigned" row),
-one has no thumbnail (placeholder). Every
+one has no thumbnail (placeholder). A `decks.json` (Studio contract L6)
+puts every HAP into one deck "Main", in its region's row. Every
 library clip effect (`library/effects/`, gig plan C6) is copied into the
 project's `effects/` — a copy, never a link, as a real project gets them —
 plus the generative example effects (`render-core/examples/effects/`) the
@@ -109,7 +110,8 @@ def layer_boxes(project: Path) -> dict[str, list[int]]:
 
 
 def make_clip(project: Path, stem: str, region: str | None, hue: int, thumb: bool,
-              folder: Path | None = None) -> None:
+              folder: Path | None = None) -> dict:
+    """Render one clip pair; returns the HAP's deck slot (L6)."""
     gen = folder or project / "generated"
     gen.mkdir(parents=True, exist_ok=True)
     box = layer_boxes(project).get(region) if region else None
@@ -137,6 +139,7 @@ def make_clip(project: Path, stem: str, region: str | None, hue: int, thumb: boo
         with library.tx() as c:
             c.execute("UPDATE renders SET thumb=NULL WHERE id=?", (record["id"],))
     print(f"  {stem}: {w}x{h} region={region} thumb={thumb} id={record['id']}")
+    return {"path": str(mov), "id": record["id"], "fp": identity.fingerprint(mov)}
 
 
 def build(name: str, spec: dict) -> None:
@@ -152,9 +155,12 @@ def build(name: str, spec: dict) -> None:
     print(f"{project}")
     (project / "generated").mkdir()
     library.add_root(str(project / "generated"))
+    rows: dict[str, list] = {"_unassigned": []}
     for stem, region, hue, thumb in spec["clips"]:
-        make_clip(project, stem, region, hue, thumb)
+        rows.setdefault(region or "_unassigned", []).append(make_clip(project, stem, region, hue, thumb))
         time.sleep(1.1)  # distinct `created` seconds → stable newest-first order
+    decks = {"schema": 1, "active": "Main", "decks": [{"name": "Main", "rows": rows}]}
+    (project / "decks.json").write_text(json.dumps(decks, indent=2))
 
 
 def main() -> None:

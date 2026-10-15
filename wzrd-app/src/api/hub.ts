@@ -74,6 +74,8 @@ export type RenderRecord = {
   project: string | null;
   region: string | null;
   job: string | null;
+  /** The args its job was submitted with (the tool's own inputs), or null. */
+  job_args?: Record<string, any> | null;
   parent: string | null;
   /** The L2 creation record: `{tool, args, inputs, est_usd, canvas, …}`. */
   record: Record<string, any>;
@@ -162,6 +164,13 @@ export async function listFolder(dir: string, hubUp: boolean): Promise<FolderLis
 export const libraryRoots = () => call<Root[]>('library_roots');
 export const libraryRecord = (id: string) => call<RenderRecord>('library_record', { id });
 export const libraryTags = () => call<Record<string, number>>('library_tags');
+/** Items for many paths (deck slots): indexed rows, else bare `{path, name}`;
+ *  `exists` says whether the file is on disk. */
+export const libraryItems = (paths: string[]) =>
+  call<(Partial<LibraryItem> & { path: string; exists: boolean })[]>('library_items', { paths });
+/** The newest playable renders made for a show (D1's incoming strip). */
+export const libraryIncoming = (project: string, limit = 24) =>
+  call<LibraryItem[]>('library_incoming', { project, limit });
 
 // ---------- library writes (hub only) ----------
 
@@ -198,6 +207,29 @@ export const putSelection = (patch: Partial<Selection>) => hubCall<Selection>('P
 /** Long-poll: resolves when the job set changed since `version` (or after `wait` s). */
 export const jobsFeed = (version?: number, wait = 20) =>
   hubCall<JobsFeed>('GET', `/api/jobs?${q({ version, wait: version === undefined ? 0 : wait, limit: 60 })}`);
+
+// ---------- rendering (H2: every render is a non-blocking job) ----------
+
+/** The render-tracked tools `/api/render` runs. */
+export type RenderTool = 'texture_flow' | 'nano_banana' | 'kling_v25_image_to_video' | 'to_hap';
+type StartedJob = { job: string; status: string; dest: string | null; eta_s: number | null; note?: string };
+export type Estimate = { tool: string; usd: number; spend: Spend };
+
+/** Start `count` jobs of `tool` (each its own seed unless `args.seed` is set). */
+export const startRender = (tool: RenderTool, args: Record<string, unknown>, count = 1) =>
+  hubCall<{ jobs: StartedJob[] }>('POST', '/api/render', { tool, args, count });
+export const estimateRender = (tool: RenderTool, args: Record<string, unknown>, count = 1) =>
+  hubCall<Estimate>('POST', '/api/estimate', { tool, args, count });
+export const cancelJob = (job: string) => hubCall<unknown>('POST', '/api/jobs/cancel', { job });
+
+export type Recipe = {
+  name: string;
+  when_to_use?: string;
+  look?: string;
+  images?: number;
+  preview?: string | null;
+};
+export const listRecipes = () => hubCall<{ root: string; recipes: Recipe[] }>('GET', '/api/recipes');
 
 // ---------- media URLs ----------
 

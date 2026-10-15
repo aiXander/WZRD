@@ -32,7 +32,7 @@ import { ingestAlignment } from './state/alignment';
 import { hydrateOverrides, loadLooks, refreshLiveScene, resetActionState } from './state/actions';
 import { dropPendingCommits } from './state/sceneCommit';
 import { useAutopilot } from './state/autopilot';
-import { useClipsPoller } from './state/clips';
+import { useDecksLoader, usePlayedSignals } from './state/decks';
 import { useHubWire } from './state/hub';
 import { ensureMasks } from './state/masks';
 import { loadLayout } from './ui/layoutStore';
@@ -177,7 +177,8 @@ export default function App() {
   const lastPromote = useRef<string>('idle');
   useShortcuts();
   useAutopilotDriver();
-  useClipsPoller();
+  useDecksLoader();
+  usePlayedSignals();
   useHubWire();
 
   // The whole room re-tints with the deck (see index.css `--deck`).

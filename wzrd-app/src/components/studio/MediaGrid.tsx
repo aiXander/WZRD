@@ -6,8 +6,9 @@
 // style tray takes them; D1's deck slots will too).
 
 import { memo, useEffect, useRef, useState } from 'react';
-import { mediaUrl, type Job, type LibraryItem } from '../../api/hub';
-import { useHub } from '../../state/hub';
+import { cancelJob, mediaUrl, startRender, type Job, type LibraryItem } from '../../api/hub';
+import { refreshJobs, useHub } from '../../state/hub';
+import { useStore } from '../../state/store';
 import {
   clickItem,
   deleteScoredHere,
@@ -60,6 +61,7 @@ export function MediaGrid() {
           {running.length ? ` · rendering ${running.length}` : ''}
         </span>
         <div className="flex-1" />
+        <MakeFolderPlayable />
         <ScoreFilter />
         <DeleteScored />
       </header>
@@ -205,10 +207,56 @@ function JobTile({ job }: { job: Job }) {
         </span>
       </div>
       {frac != null && <div className="absolute bottom-0 left-0 h-[2px] bg-deck" style={{ width: `${frac * 100}%` }} />}
-      <div className="px-1.5 py-1 text-[10px] text-fg2 truncate">
-        {job.tool} · {job.by}
+      <div className="px-1.5 py-1 text-[10px] text-fg2 flex items-center gap-1 min-w-0">
+        <span className="truncate flex-1">
+          {job.tool} · {job.by}
+        </span>
+        <button
+          className="text-fg3 hover:text-bad shrink-0"
+          title="Cancel this render (no output; Modal / FAL cancel the remote call)"
+          onClick={() =>
+            cancelJob(job.job)
+              .then(refreshJobs)
+              .catch((e) => useStore.getState().toast(`Cancel failed: ${e}`, 'bad'))
+          }
+        >
+          ✕
+        </button>
       </div>
     </div>
+  );
+}
+
+/** Videos in this folder the engine can't play yet and that have no HAP
+ *  beside them (S8) — "Make playable" queues a `to_hap` job for each. */
+function MakeFolderPlayable() {
+  const listing = useStudio((s) => s.listing);
+  const [busy, setBusy] = useState(false);
+  const items = listing?.items ?? [];
+  const hasHap = new Set(items.filter((i) => i.variant === 'hap' || i.codec === 'hap').map((i) => i.render_id));
+  const todo = items.filter((i) => i.kind === 'video' && !i.playable && !hasHap.has(i.render_id));
+  if (!todo.length) return null;
+  return (
+    <Btn
+      size="sm"
+      tone="ghost"
+      disabled={busy}
+      title="Write a HAP .mov beside every video here that has none, so it can go on a deck"
+      onClick={async () => {
+        setBusy(true);
+        try {
+          for (const it of todo) await startRender('to_hap', { video: it.path });
+          useStore.getState().toast(`Making ${todo.length} file${todo.length === 1 ? '' : 's'} playable`, 'ok');
+          refreshJobs();
+        } catch (e) {
+          useStore.getState().toast(`Make playable failed: ${e}`, 'bad');
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      Make playable ({todo.length})
+    </Btn>
   );
 }
 

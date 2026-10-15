@@ -1,137 +1,14 @@
-// A2 — the clip grid's data (gig plan D12): the project's HAP clips (C3,
-// loaded at project open and polled every 2 s while a grid is on screen, so
-// agent renders appear without a reload), which region
-// row each sits in (C2 sidecar `region`, overridden by the operator's
-// drag-filing in clipgrid.json), which are NEW, and the two scene writes the
-// grid makes on DESIGN: put a clip on a region's binding (C5), or stop it.
+// The two scene writes a deck slot makes on DESIGN (gig C5, studio D1): put
+// a clip on a region's binding, or stop it. The decks themselves (which
+// clips sit in which row) live in `state/decks.ts`.
 //
 // Semantics, one rule: a region row is a radio group — each region plays at
-// most one grid clip on DESIGN. Click an idle clip = it replaces whatever the
+// most one deck clip on DESIGN. Click an idle clip = it replaces whatever the
 // region played; click the playing one again (or the row's ■ slot) = stop.
-//
-// NEW is in memory per project: every clip present at the first load is
-// "seen"; anything that arrives later is NEW until it is clicked.
 
-import { useEffect, useState } from 'react';
-import { create } from 'zustand';
-import { clipFile, clipsList, clipThumb, type ClipEntry, type PackInfo } from '../api/ipc';
 import { commitSceneMutation } from './sceneCommit';
 import { inputsFor, parseScene, uniqueId, type Binding } from './scene';
 import { useStore } from './store';
-
-const POLL_MS = 2000;
-
-type ClipsState = {
-  /** scene_path the list belongs to — a switch starts a fresh list. */
-  project: string | null;
-  clips: ClipEntry[];
-  /** Operator filing: clip path → region id | null (unassigned). */
-  rows: Record<string, string | null>;
-  seen: Set<string>;
-  /** `path|mtime` → JPEG data URL. */
-  thumbs: Record<string, string>;
-};
-
-export const useClips = create<ClipsState>(() => ({
-  project: null,
-  clips: [],
-  rows: {},
-  seen: new Set(),
-  thumbs: {},
-}));
-
-const signature = (cs: ClipEntry[]) =>
-  cs.map((c) => `${c.path}:${c.mtime_ms}:${c.thumb ?? ''}:${c.sidecar ? 1 : 0}`).join('|');
-
-/** `clips_list` runs off the main thread now (async command), so a scan can
- *  overtake a `clip_file` write: a poll that overlapped a filing keeps the
- *  optimistic rows instead of flicking the clip back for one interval. */
-let fileWrites = 0;
-let fileWritesInFlight = 0;
-
-async function poll() {
-  const project = useStore.getState().project?.scene_path ?? null;
-  if (!project) return;
-  const writes0 = fileWrites;
-  let res: Awaited<ReturnType<typeof clipsList>>;
-  try {
-    res = await clipsList();
-  } catch {
-    return;
-  }
-  // A switch landed while the scan was in flight: this list is stale.
-  if (useStore.getState().project?.scene_path !== project) return;
-  const cur = useClips.getState();
-  if (cur.project !== project) {
-    useClips.setState({
-      project,
-      clips: res.clips,
-      rows: res.rows ?? {},
-      seen: new Set(res.clips.map((c) => c.path)),
-      thumbs: {},
-    });
-    return;
-  }
-  const rows = writes0 !== fileWrites || fileWritesInFlight > 0 ? cur.rows : res.rows ?? {};
-  if (signature(cur.clips) !== signature(res.clips) || JSON.stringify(cur.rows) !== JSON.stringify(rows)) {
-    useClips.setState({ clips: res.clips, rows });
-  }
-}
-
-/** Mounted once (App): loads each project's list as soon as it opens —
- *  that first load is the NEW baseline (everything present then is "seen"),
- *  so NEW stays right even for clips that land while no grid is open. */
-export function useClipsPoller() {
-  useEffect(() => {
-    poll();
-    return useStore.subscribe((s, prev) => {
-      if (s.project?.scene_path !== prev.project?.scene_path) poll();
-    });
-  }, []);
-}
-
-/** Mounted grids (refcount) — the 2 s scan only runs while one is on
- *  screen. Every other room has nothing to show it in. */
-let gridsMounted = 0;
-let gridTimer = 0;
-
-/** Keep the list fresh while a `ClipGrid` is mounted: scan now, then every
- *  `POLL_MS` (skipped while the window is hidden). */
-export function useClipsLivePoll() {
-  useEffect(() => {
-    if (gridsMounted++ === 0) {
-      poll();
-      gridTimer = window.setInterval(() => {
-        if (!document.hidden) poll();
-      }, POLL_MS);
-    }
-    return () => {
-      if (--gridsMounted === 0) window.clearInterval(gridTimer);
-    };
-  }, []);
-}
-
-function markSeen(path: string) {
-  const seen = useClips.getState().seen;
-  if (seen.has(path)) return;
-  useClips.setState({ seen: new Set(seen).add(path) });
-}
-
-/** The row a clip sits in: operator filing first, then the sidecar's
- *  region; a region the pack doesn't have → unassigned (null). */
-export function rowOf(clip: ClipEntry, rows: Record<string, string | null>, pack: PackInfo | null): string | null {
-  const region = clip.path in rows ? rows[clip.path] : clip.sidecar?.region ?? null;
-  return region && pack?.layers.some((l) => l.id === region) ? region : null;
-}
-
-export function fileClip(path: string, region: string | null) {
-  useClips.setState((s) => ({ rows: { ...s.rows, [path]: region } }));
-  fileWrites++;
-  fileWritesInFlight++;
-  clipFile(path, region)
-    .catch((e) => useStore.getState().toast(`Could not re-file clip: ${e}`, 'bad'))
-    .finally(() => fileWritesInFlight--);
-}
 
 /** region id → clip paths its bindings play, in one leg's scene. Only
  *  bindings that target exactly that region count (a tag/group binding
@@ -179,7 +56,6 @@ export function bindClip(clip: string, region: string): string {
     }
     return s;
   });
-  markSeen(clip);
   useStore.getState().setSelectedBindingId(id);
   return id;
 }
@@ -214,24 +90,4 @@ export function stopClip(region: string, clip?: string): number {
   });
   if (st.selectedBindingId && removed.has(st.selectedBindingId)) st.setSelectedBindingId(null);
   return hits.length;
-}
-
-/** Thumbnail data URL for a clip (null while loading / when it has none). */
-export function useThumb(clip: ClipEntry): string | null {
-  const key = `${clip.path}|${clip.mtime_ms}`;
-  const cached = useClips((s) => s.thumbs[key] ?? null);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    if (cached || !clip.thumb || failed) return;
-    let live = true;
-    clipThumb(clip.thumb)
-      .then((b64) => {
-        if (live) useClips.setState((s) => ({ thumbs: { ...s.thumbs, [key]: `data:image/jpeg;base64,${b64}` } }));
-      })
-      .catch(() => live && setFailed(true));
-    return () => {
-      live = false;
-    };
-  }, [key, cached, clip.thumb, failed]);
-  return cached;
 }

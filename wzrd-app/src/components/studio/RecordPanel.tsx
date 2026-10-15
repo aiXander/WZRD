@@ -7,7 +7,10 @@
 // shows while the hub is down; label edits need the hub.
 
 import { useEffect, useState } from 'react';
-import { libraryRecord, type LibraryItem, type RenderRecord } from '../../api/hub';
+import { libraryRecord, startRender, type LibraryItem, type RenderRecord, type RenderTool } from '../../api/hub';
+import { activeDeck, addToDeck, useDecks } from '../../state/decks';
+import { refreshJobs } from '../../state/hub';
+import { useStore } from '../../state/store';
 import { addStyles, removeTag, setScore, short, targets, useStudio } from '../../state/studio';
 import { Btn } from '../../ui/primitives';
 import type { PromptKind } from './KeyPrompt';
@@ -16,6 +19,9 @@ export function RecordPanel({ onPrompt }: { onPrompt: (k: PromptKind) => void })
   const focus = useStudio((s) => s.focus);
   const item = useStudio((s) => s.listing?.items.find((i) => i.path === s.focus));
   const nSelected = useStudio((s) => s.selected.length);
+  const hasHap = useStudio((s) =>
+    item ? !!s.listing?.items.some((i) => i.render_id === item.render_id && i.codec === 'hap') : false
+  );
   const [rec, setRec] = useState<RenderRecord | null>(null);
   const labelKey = item ? `${item.render_id}|${item.score}|${item.tags.join(',')}|${item.notes}` : '';
 
@@ -106,6 +112,9 @@ export function RecordPanel({ onPrompt }: { onPrompt: (k: PromptKind) => void })
         <Btn size="sm" onClick={() => addStyles(targets().map((t) => t.path))} title="Add to the style tray (what an agent reads as 'these styles')">
           + Styles
         </Btn>
+        {item.kind === 'video' && <AddToDeck />}
+        {rec && MORE_TOOLS.has(rec.tool ?? '') && <MoreLikeThis rec={rec} />}
+        {item.kind === 'video' && !item.playable && !hasHap && <MakePlayable item={item} />}
       </footer>
     </section>
   );
@@ -177,3 +186,80 @@ function Tags({ item, onAdd }: { item: LibraryItem; onAdd: () => void }) {
   );
 }
 
+
+/** Tools "More like this" can re-run from a record's args. */
+const MORE_TOOLS = new Set(['texture_flow', 'nano_banana', 'kling_v25_image_to_video']);
+
+/** Same args, new seeds (S16) — N more jobs of the tool that made this. */
+function MoreLikeThis({ rec }: { rec: RenderRecord }) {
+  const [n, setN] = useState(4);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    // The job's own args when there is one; else the record's minus its
+    // provenance-only keys. A fresh seed either way.
+    const src = (rec.job_args ?? rec.record.args ?? {}) as Record<string, unknown>;
+    const { seed: _seed, model: _model, ...args } = src;
+    if (rec.tool === 'nano_banana') delete args.num_images;
+    setBusy(true);
+    try {
+      const r = await startRender(rec.tool as RenderTool, args, n);
+      useStore.getState().toast(`${r.jobs.length} more like this started`, 'ok');
+      refreshJobs();
+    } catch (e) {
+      useStore.getState().toast(`More like this refused: ${e}`, 'bad');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      <Btn size="sm" disabled={busy} onClick={run} title="Re-run this render's settings with new seeds">
+        More like this ×{n}
+      </Btn>
+      <button className="text-[10px] text-fg3 hover:text-fg px-0.5" onClick={() => setN((v) => (v % 8) + 1)} title="How many (click to cycle 1–8)">
+        ▾
+      </button>
+    </span>
+  );
+}
+
+/** Put the selected videos on the open show's active deck (D1), each in
+ *  its own region's row. A non-HAP video gets its HAP made first. Key: D. */
+function AddToDeck() {
+  const deck = useDecks((s) => activeDeck(s.doc)?.name);
+  if (!deck) return null;
+  return (
+    <Btn
+      size="sm"
+      onClick={() => addToDeck(targets().filter((t) => t.kind === 'video'))}
+      title={`Add the selected clips to the deck “${deck}” of the open show (D)`}
+    >
+      + Deck <span className="text-fg3">{deck}</span>
+    </Btn>
+  );
+}
+
+/** HAP beside the source (S8): the engine plays it; labels are shared. */
+function MakePlayable({ item }: { item: LibraryItem }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Btn
+      size="sm"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await startRender('to_hap', { video: item.path });
+          refreshJobs();
+        } catch (e) {
+          useStore.getState().toast(`Make playable failed: ${e}`, 'bad');
+        } finally {
+          setBusy(false);
+        }
+      }}
+      title="Write a HAP .mov beside this file (same render id) so it can go on a deck and play natively"
+    >
+      Make playable
+    </Btn>
+  );
+}

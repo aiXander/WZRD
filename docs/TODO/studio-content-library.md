@@ -110,21 +110,11 @@ idle check ignores a client's open `GET /mcp` stream; the app spawns it
 with `--extra mcp --extra engine --extra islands`. `/api` names follow the
 app agent's list (`library/delete_scored`, `move {paths, dest}`).
 
-**L6 — decks** (`<project>/decks.json`, replaces `clipgrid.json`)
-
-```json
-{"schema": 1, "active": "Intro",
- "decks": [{"name": "Intro",
-            "rows": {"<region id>": [{"path": "/abs/clip.mov", "id": "r_…", "fp": "…"}, null],
-                     "_unassigned": []}}]}
-```
-
-Slot paths are **absolute** (library files). `id`/`fp` are what Relink
-matches on. C5 clip bindings in `scene.json` may now be absolute too: the
-engine already accepts them (`compositor.rs` does `scene_dir.join(clip)`,
-which keeps an absolute path), but `engine_tools.py`'s binding docs and
-validation still say "relative to the scene dir", so update them. Deck
-names are unique per show; order = array order.
+**L6 landed with D1 (2026-10-15)** — `<project>/decks.json` (`{"schema":1,
+"active", "decks":[{"name","rows":{region|"_unassigned":[{path,id,fp}|null]}}]}`,
+absolute slot paths, unique deck names, array order) now lives in
+[../reference/operator-ui.md](../reference/operator-ui.md) "Clip decks".
+Absolute C5 clip paths are accepted by the engine and `engine_tools.py`.
 
 ## Work packages
 
@@ -230,52 +220,33 @@ ended; tray ⇄ `selection.styles` both ways; mp4 plays in the monitor.
 [../reference/operator-ui.md](../reference/operator-ui.md) "Studio + the
 hub".
 
-### R1 — Render panel + buttons (SHELL + UI)
+### R1 — Render panel + buttons (SHELL + UI) — **done 2026-10-15**
 
-- The S16 Render panel in Studio. Recipes come from `list_recipes`, with
-  their args as defaults; the cost estimate comes from the hub before Go.
-- **More like this** on any WZRD render (same args, new seeds, count).
-- **Make playable** on mp4 and DXV, for a single item or a whole folder.
-- All of these run as `wait=false` jobs, visible in the jobs pill like
-  agent jobs.
+Studio's Render tab (TextureFlow with recipe + tray styles, Image, Video;
+region → size; draft; count; live estimate + cap confirm), **More like
+this ×N** (re-runs the job's submitted args, new seed), **Make playable**
+(item or whole folder), ✕ cancel on job tiles. Gate evidence: 4 draft
+TextureFlow renders for main_facade from 2 tray styles, one cancelled, 3
+landed (HAP auto-made); 2 h264 clips made playable in ≈ 5 s; More like
+this ×4 → 4 jobs; one recipe (`tree-of-life`) + tray render for
+left_tower. Found + fixed by backend (0e9ec6f): output folder resolved at
+finish instead of submit. Done — see
+[../reference/operator-ui.md](../reference/operator-ui.md) "Studio + the
+hub" (Render panel).
 
-**Gate:** with no chat and no terminal:
-- render 4 clips from a recipe plus 2 tray styles for a region;
-- cancel one;
-- make 2 playable;
-- 4 variations of a favourite.
+### D1 — decks (SHELL + UI + PY tool) — **done 2026-10-15**
 
-### D1 — decks (SHELL + UI + PY tool)
-
-- `decks.json` (L6) replaces `clipgrid.json`.
-- Deck tabs (create, rename, reorder, two-click delete) in Prepare's drawer
-  and Perform's compact grid.
-- Click a slot = bind on design via `sceneCommit` (C5, absolute path); T
-  takes it live, as today.
-- **Add to deck** from Studio, or drag a render onto a slot. A non-HAP file
-  gets "Make playable" first (R1). The row = the render's `region` if this
-  show has it, else `_unassigned`.
-- The gig's "new from agent" lane becomes an **incoming strip**: the newest
-  playable renders whose `project` is this show; click = add to the active
-  deck and bind on design.
-- Log S6 signals: added to a deck; played live (seconds, from TAKE
-  telemetry).
-- ~~MCP tool `add_to_deck(path, deck?, region?)` for the agent (S18)~~ —
-  **done 2026-10-15** (`studio_tools.py`): resolves an mp4 to its HAP
-  (the one beside it first), row = `region` > the render's region if the
-  show's pack has it > `_unassigned`, first empty slot, creates a named
-  missing deck, atomic write, logs a `deck_add` signal. It refuses a show
-  with no `decks.json` but old clips (the app's migration must run first).
-- Update `engine_tools.py`'s C5 docs and validation for absolute clip paths.
-- Migration, once on open: `clipgrid.json` + `generated/*.mov` → one deck
-  "Main" with absolute paths; `fixture_projects.py` writes the new shape.
-
-**Gate:**
-- six clips into "Intro", six into "Drop";
-- in Perform, switch decks, click + T;
-- reopen the show → decks intact;
-- a clip from `projects/fixture-b` plays in fixture-a's deck with no copy
-  made.
+`decks.json` replaces `clipgrid.json` (one-time migration to deck "Main";
+`clips.rs` retired); deck tabs in both rooms; click = bind on DESIGN with
+the absolute path; Studio "+ Deck" / `D`; INCOMING strip; drag to re-file;
+missing-file warning; CAS writes against the agent's `add_to_deck`;
+S6 `deck_add` / `played` signals; `fixture_projects.py` writes a deck.
+Gate evidence: six clips into "Intro", six into "Drop"; in Perform a deck
+switch kept what played, click + T took a clip live; fixture-b's
+`tf_b01.mov` (added by the agent's `add_to_deck`) played on fixture-a's
+Left tower with no copy; switching to fixture-b (migrated on open) and
+back left all three decks intact. Done — see
+[../reference/operator-ui.md](../reference/operator-ui.md) "Clip decks".
 
 ### D2 — Save as (S21)
 

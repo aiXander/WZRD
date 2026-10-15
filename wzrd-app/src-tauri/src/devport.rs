@@ -33,7 +33,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::{clips, hub, layout, library, projects, rpc, AppState};
+use crate::{hub, layout, library, projects, rpc, AppState};
 
 pub fn spawn(app: AppHandle) {
     let port: u16 = std::env::var("WZRD_DEVPORT")
@@ -152,7 +152,12 @@ fn off_main(app: &AppHandle, cmd: &str, a: &Value) -> Option<Result<Value, Strin
             (Some(m), Some(p)) => hub::hub_call_in(&m, &p, a.get("body").filter(|b| !b.is_null())),
             _ => Err("hub_call: needs method + path".into()),
         },
-        _ => return library::devport_dispatch(cmd, a, app),
+        _ => {
+            if let Some(r) = crate::decks::devport_dispatch(cmd, a, &app.state::<AppState>()) {
+                return Some(r);
+            }
+            return library::devport_dispatch(cmd, a, app);
+        }
     })
 }
 
@@ -268,9 +273,6 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "project_current" => Ok(projects::project_current(st())),
         "project_open" => projects::project_open(app.clone(), st(), s("scenePath")?),
         "engine_restart" => projects::engine_restart(app.clone(), st()),
-        "clips_list" => clips::clips_list_in(&st()),
-        "clip_thumb" => ok(clips::clip_thumb_in(&st(), s("path")?)),
-        "clip_file" => ok(clips::clip_file(st(), s("path")?, opt("region"))),
         "ui_layout_read" => layout::ui_layout_read(s("scenePath")?),
         "ui_layout_write" => ok(layout::ui_layout_write(
             s("scenePath")?,

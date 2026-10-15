@@ -72,7 +72,7 @@ fn home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
-fn expand_home(p: &str) -> PathBuf {
+pub fn expand_home(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
         Some(rest) => home().join(rest),
         None => PathBuf::from(p),
@@ -81,7 +81,7 @@ fn expand_home(p: &str) -> PathBuf {
 
 /// The repo holding `wzrd_mcp` — `WZRD_REPO`, else this checkout (the app
 /// is built from it; a bundled app would set the env var).
-fn repo_dir() -> PathBuf {
+pub fn repo_dir() -> PathBuf {
     if let Ok(p) = std::env::var("WZRD_REPO") {
         return expand_home(&p);
     }
@@ -315,8 +315,11 @@ impl Hub {
         }
         if let Some(pid) = live_lock_pid() {
             log::info!("hub: lock held by live pid {pid} — waiting for it to answer");
-            self.wait_up(app, Some(pid));
-            return;
+            if self.wait_up(app, Some(pid)) {
+                return;
+            }
+            // It died without answering (a hub shutting down): spawn.
+            log::info!("hub: pid {pid} exited without answering — spawning");
         }
         if let Err(e) = spawn_detached() {
             self.set(app, HubStatus { state: "down", error: Some(e), ..self.status() });
@@ -325,14 +328,19 @@ impl Hub {
         self.wait_up(app, None);
     }
 
-    fn wait_up(&self, app: &AppHandle, pid: Option<u32>) {
+    /// Wait for `hello` to answer. With `pid` (a lock holder we didn't
+    /// spawn), give up early — `false` — if that process dies first.
+    fn wait_up(&self, app: &AppHandle, pid: Option<u32>) -> bool {
         self.set(app, HubStatus { state: "starting", pid, error: None, ..self.status() });
         let deadline = Instant::now() + SPAWN_WAIT;
         loop {
             let h = hello();
             if !matches!(h, Hello::Nothing(_)) {
                 self.set(app, self.status_from(&h));
-                return;
+                return true;
+            }
+            if pid.is_some_and(|p| !pid_alive(p)) {
+                return false;
             }
             if Instant::now() > deadline {
                 let log = wzrd_dir().join("hub.log");
@@ -348,7 +356,7 @@ impl Hub {
                         ..self.status()
                     },
                 );
-                return;
+                return true;
             }
             std::thread::sleep(Duration::from_millis(400));
         }
@@ -368,11 +376,27 @@ impl Hub {
             if let Some(pid) = pid {
                 log::info!("hub: restarting — SIGTERM {pid}");
                 let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while (pid_alive(pid) || !matches!(hello(), Hello::Nothing(_)))
-                    && Instant::now() < deadline
-                {
-                    std::thread::sleep(Duration::from_millis(200));
+                // uvicorn shuts down gracefully: it waits for open requests,
+                // incl. a job long-poll (≤ 20 s + slack).
+                let gone = |secs: u64| {
+                    let deadline = Instant::now() + Duration::from_secs(secs);
+                    while pid_alive(pid) || !matches!(hello(), Hello::Nothing(_)) {
+                        if Instant::now() >= deadline {
+                            return false;
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    true
+                };
+                // A hub older than the SIGTERM fix can sit in that graceful
+                // wait for good (the app's own long-polls keep arriving), and
+                // `ensure` would then re-attach to the dying process. Restart
+                // is explicit: kill it (sqlite is crash-safe; a job it was
+                // running shows as lost).
+                if !gone(30) {
+                    log::warn!("hub: {pid} ignored SIGTERM for 30 s — SIGKILL");
+                    let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+                    gone(5);
                 }
             }
             self.set(app, HubStatus { state: "starting", pid: None, error: None, ..self.status() });

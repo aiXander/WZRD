@@ -37,7 +37,7 @@ Every scalar now uses the effect descriptor's `min`/`max` (`LayerParams.tsx
 | Room | What it's for | Key files |
 |---|---|---|
 | **Studio** | Make, browse and label content (studio plan A2): library roots + folder tree, a folder grid of static thumbs, the preview monitor + the focused item's record and labels, the style tray. Full map: "Studio + the hub" below. | `Studio.tsx`, `components/studio/*`, `state/studio.ts` |
-| **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both, "Show regions" switch), inspector (target, effect cards, dials; Duplicate / Delete / deselect × in its header), bottom drawer = **clip grid** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `LayerList.tsx` (layer + region lists), `LayerInspector.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
+| **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both, "Show regions" switch), inspector (target, effect cards, dials; Duplicate / Delete / deselect × in its header), bottom drawer = **clip decks** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `LayerList.tsx` (layer + region lists), `LayerInspector.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
 | **Align** | §2.8 warp; side panel with the "projector bumped?" recovery hint, test patterns, background (lit-background warning). | `Align.tsx`, `WarpCanvas.tsx`, `state/alignment.ts` |
 | **Perform** | The booth: monitor (native preview, deck-coloured frame, PREVIEW/PROGRAM label), a slim looks strip + auto-pilot under it, one mixer panel with a Layers \| Clips tab (`MixerPanel`, tab in localStorage `wzrd.perform.mixerTab`; only the visible tab mounts, so the clip poll runs only on Clips), selected layer's dials, deck panel (switch, cue monitor, TAKE/CUT/PULL, FADE, BAR/NOW), masters + BLACK/FLASH/FREEZE + room audio. | `Perform.tsx`, `DeckPanel.tsx`, `LayerStack.tsx`, `ClipGrid.tsx compact`, `LayerParams.tsx`, `LooksBank.tsx`, `MastersPanel.tsx` |
 | **Debug** | Engine internals (unchanged content, restyled), plus the plain "Performance (frame profiler)" readout of the `perf` / `perf_spike` channels — headroom, stage p95 table, threads, clips, last spike ([render-engine.md](render-engine.md) §2.9). | `Debug.tsx` |
@@ -85,43 +85,58 @@ scene — the crash recovery.
   C2/C3 sidecars + thumbs); `--add-clip <project> --region <id>` simulates
   an agent render landing.
 
-## Clip grid (gig A2)
+## Clip decks (studio plan D1, 2026-10-15; was the gig's clip grid)
 
-Resolume's layer rows, but each row is a **region** of the pack (mask
-glyph + name) plus "Unassigned". Slots are the project's HAP clips
-(gig plan contract C3: `generated/<stem>.mov` + `<stem>.thumb.jpg`),
-newest first, placed by the C2 provenance sidecar's `region`.
+Resolume's clip stacks, per show, in `<project>/decks.json` (contract L6:
+`{"schema":1,"active":name,"decks":[{"name","rows":{region|"_unassigned":
+[{path,id,fp}|null…]}}]}`). Slots reference **library files in place by
+absolute path** (+ render id + fingerprint for Relink) — a clip from
+another show's folder plays without a copy. One deck is shown at a time;
+**switching decks never changes what plays**. `ClipGrid.tsx` (Prepare's
+drawer, Perform's compact Clips tab) + `state/decks.ts` + shell
+`src-tauri/src/decks.rs`.
 
-- **Each row is a radio group: one clip per region.** A leading ■ slot is
-  the "none" position (NONE / STOP); clicking the playing clip again or ■
-  calls `state/clips.ts::stopClip` — a `videoClip` binding (exists only to
-  show the clip) is removed, any other effect just loses its `image`
-  param (absent image = transparent in the engine). The next click
-  recreates `clip_<region>`, so leftover mixer pins re-apply.
-- **Click a slot = play that clip on that region in DESIGN**
-  (`state/clips.ts::bindClip`, through `commitSceneMutation`): set
-  `params.image.clip` (C5) on the first binding whose `select.id` is that
-  region and whose effect declares an `image` input (keeps its
-  placement/rate), else append `clip_<region>` with the built-in
-  `videoClip`. TAKE as usual — in Perform a swap is one click + T.
-- Design's clip per region gets a design-colour ring, live's a red top
-  bar (`clipsByRegion` over both legs' scene JSON; only exact `select.id`
-  bindings count — a tag/group binding isn't "this region's clip").
-- **Drag** a slot onto another row to re-file it. The filing is app state
-  in `<project>/clipgrid.json` (`{"schema":1,"rows":{clip: region|null}}`);
-  the sidecar is never touched — it keeps saying what the clip was made
-  for. An unassigned clip can't be clicked until it's filed.
-- **NEW** = arrived after the grid's first load for this project (in
-  memory, cleared on click). NEW clips also line up in a "new from agent"
-  lane on top of the grid (both rooms).
-- Shell: `src-tauri/src/clips.rs` — `clips_list` (dir scan + sidecars,
-  incl. the source mp4's sidecar via `parent` for prompt/tool/cost, plus
-  the filing map), `clip_thumb` (base64; the webview has no asset
-  protocol), `clip_file`. `clips_list`/`clip_thumb` are `async` commands
-  (off the main thread). Loaded once per project at open (`App` →
-  `useClipsPoller` — that load is NEW's baseline), then polled every 2 s
-  only while a `ClipGrid` is mounted (`useClipsLivePoll`, refcounted). A
-  scan that overlapped a `clip_file` keeps the optimistic filing.
+- **Rows = the pack's regions + Unassigned; each row is a radio group**
+  (one clip per region on DESIGN). Leading ■ = NONE/STOP. Click a slot =
+  `state/clips.ts::bindClip(absPath, region)` (sets `params.image.clip` on
+  the region's first `image`-input binding, else appends `clip_<region>`
+  with `videoClip`, via `commitSceneMutation`); click the playing one or ■
+  = `stopClip` (a `videoClip` binding is removed, any other effect just
+  loses `image`). TAKE as usual. DESIGN = design-colour ring, LIVE = red
+  top bar (`clipsByRegion` over both legs; relative C5 paths are made
+  absolute by `absClip` before comparing).
+- **Deck tabs:** create (+), rename (double-click), reorder (drag),
+  delete (✕ then "delete?" within 2.5 s; full grid only; a show keeps ≥ 1).
+- **Filling:** Studio "+ Deck" button / `D` key (the selection, each into
+  its render's region row if this pack has it, else Unassigned; a non-HAP
+  video queues `to_hap` and the slot points at the predicted `.mov`, so it
+  shows missing until the job lands); the **INCOMING strip** = the newest
+  playable renders whose `project` is this show and that aren't in the
+  active deck (`library_incoming`, polled 4 s) — click = add + play on
+  DESIGN, drag = file on a row; the agent's `add_to_deck` MCP tool. Drag a
+  slot to another row / slot to re-file; ✕ on hover removes it (the file
+  stays).
+- **Two writers, one file.** The app writes the whole doc with a
+  compare-and-swap on the file's mtime (`decks_write {doc, baseMtimeMs}` →
+  `"changed"` if the hub's `add_to_deck` wrote in between → re-read,
+  re-apply the op, retry once). While a grid is mounted the file is
+  re-read every 2 s (refcounted `useDecksLivePoll`), so an agent's add
+  shows up without a reload. `decks_read` also returns `missing` (slot
+  paths not on disk) → amber dashed "⚠ missing" tile.
+- **Migration, once:** a show with no `decks.json` gets one deck "Main"
+  from the old `clipgrid.json` filing + `generated/*.mov` (region from the
+  embedded tag / old sidecar), absolute paths, written on first read. The
+  hub's `add_to_deck` refuses a show that still needs it. Fingerprints
+  (`decks.rs::fingerprint`) match the hub's byte-for-byte (`<size>-<sha1
+  of first + last MiB>[:20]`, tested).
+- **Signals (S6)** to the hub's `/api/library/signal`: `deck_add` on add;
+  `played` + seconds when a clip leaves the LIVE scene (`usePlayedSignals`,
+  App-level). An engine restart or show switch resets the clocks without
+  a signal (it blanks the live scene, which isn't "left the wall").
+- Commands: `decks_read`, `decks_write`, `deck_slots {paths}` (id + fp for
+  new slots), `library_items {paths}` (thumbs/labels for slots),
+  `library_incoming {project, limit}`; all have devport twins.
+  `wzrd-app/scripts/fixture_projects.py` writes a "Main" deck directly.
 
 ## Studio + the hub (studio plan A1/A2, 2026-10-15)
 
@@ -143,7 +158,8 @@ the hub's own side (routes, `library.db` schema, jobs) is
   `.wzrd/hub.log`, a reaper thread so no zombie. The hub **outlives the
   app** and exits itself after 1 h idle; the monitor re-checks every 3 s
   and emits `hub:status`, but never respawns on its own — "Start hub" /
-  "Restart hub" (SIGTERM the pid, wait for the port, spawn) do. Repo dir:
+  "Restart hub" (SIGTERM the pid, wait ≤ 30 s for it and the port —
+  uvicorn drains open long-polls — then SIGKILL, then spawn) do. Repo dir:
   `WZRD_REPO`, else this checkout (compile-time). Commands: `hub_status`,
   `hub_ensure`, `hub_restart`, `hub_call {method, path, body}` — the thin
   `/api` proxy (a dependency-free loopback HTTP/1.1 client, chunked
@@ -184,8 +200,25 @@ the hub's own side (routes, `library.db` schema, jobs) is
   ≤ N…" = dry run then confirm) · `Monitor` + `RecordPanel` (score
   buttons, tags (agent tags ✦, read-only), notes, made-for chip, settings,
   inputs, "+ Styles"); `StyleTray` along the bottom with "Renders land
-  in". Tiles drag out as `application/x-wzrd-paths` (the tray takes them;
-  D1's deck slots will). No telemetry subscriptions.
+  in". Tiles drag out as `application/x-wzrd-paths` (the tray takes
+  them). No telemetry subscriptions.
+- **Render panel (R1)** — the side tab next to Record
+  (`RenderPanel.tsx`, tab remembered in `localStorage wzrd.studio.side`):
+  TextureFlow (recipe from `/api/recipes`; the tray's styles override the
+  recipe's), Image (`nano_banana`) and Video (`kling_v25_image_to_video`,
+  5/10 s). "Made for" region → size = the region's aspect, long side 640
+  (step 32) and `region` in the args; Draft = `n_steps 4`, no upscale;
+  count 1–12. `/api/estimate` (debounced) shows ≈ cost vs today's spend;
+  over the cap → confirm → `allow_over_cap`. Go = `POST /api/render`
+  (`wait=false` jobs, `by: app`), landing in the open folder — the hub
+  pins it at submit. Job tiles carry ✕ = `/api/jobs/cancel`.
+  **More like this ×N** (record footer, for texture_flow / nano_banana /
+  kling) re-runs the **job's submitted args** (`library_record.job_args`
+  — the record's own args carry provenance-only keys like `model` that
+  the tool rejects) minus `seed`. **Make playable** (record footer, or the
+  folder's "Make playable (n)" for every video without a HAP sibling)
+  queues `to_hap`; the `.mov` lands beside the source. `+ Deck <name>`
+  adds to the open show's active deck (see "Clip decks").
 - **Monitor (S10):** HAP → `<NativeSlot id="studio">` + `previewFile(path)`
   (engine `preview.file`, render-engine.md §1b — no leg renders);
   mp4/webm → `<video>`; stills → `<img>`; DXV/other → thumb + "Make
@@ -195,7 +228,7 @@ the hub's own side (routes, `library.db` schema, jobs) is
   never TAKE/mute/select layers): arrows move (⇧ extends; ↑↓ step a grid
   row via `gridColumns()`), space = play in the monitor, `0–9` score, `−`
   clears it, `T` tags (autocomplete from every tag in use, Tab completes),
-  `N` notes (⌘Enter), `M` move (folders the tree knows, or a typed
+  `N` notes (⌘Enter), `D` add to the open show's active deck, `M` move (folders the tree knows, or a typed
   absolute path), `⌫` delete media (records kept — S7; a multi-selection
   needs a second ⌫ within 2 s), Esc deselects. Keys act on the selection,
   else the cursor item (`studio.ts::targets`). Measured: 20 scores = 40
@@ -357,7 +390,7 @@ reconnect → hydrate. Use it to drive and screenshot the UI with browser
 tooling while `pnpm tauri dev` runs. Two seats are independent: edits from
 one aren't mirrored into the other's store (both declare actor `ui`).
 Browser-tooling traps (Claude in Chrome): CDP's synthetic mouse drag
-doesn't fire HTML5 drag-and-drop — exercise the clip grid's drop handlers
+doesn't fire HTML5 drag-and-drop — exercise the deck grid's drop handlers
 with dispatched `DragEvent`s; and the screenshot's coordinate frame can
 differ from the page's CSS viewport (seen: 1456 vs 1543 px), so
 coordinate clicks miss — click via element refs (`find`). In dev, the

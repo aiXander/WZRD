@@ -7,7 +7,7 @@
 //! do preserve unknown keys, but they read-modify-write from another
 //! process, and the UI writes on every drag — two writers racing on one
 //! file could silently drop the canvas lock. One writer per file, like
-//! `alignment.json` / `session.json` (engine) and `clipgrid.json` (app).
+//! `alignment.json` / `session.json` (engine) and `decks.json` (app).
 //!
 //! Both commands name the project by its scene path instead of using the
 //! current session: a debounced write that lands just after a project

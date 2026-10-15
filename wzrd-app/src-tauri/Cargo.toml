@@ -37,6 +37,9 @@ tauri-plugin-shell = "2"
 # Read-only browsing of the hub's library.db (studio plan L3) while the hub
 # is down. Bundled SQLite: no system lib dependency.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Content fingerprints (studio plan L3: size + sha1 of the first/last MiB),
+# for decks' migration and Relink — must match the hub's `identity.fingerprint`.
+sha1_smol = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # NSWindow.occlusionState polling — tao has no Occluded event (collapse

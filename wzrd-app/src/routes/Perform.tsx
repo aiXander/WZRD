@@ -107,7 +107,7 @@ const TAB_KEY = 'wzrd.perform.mixerTab';
 
 /** Layers (the mixer) and Clips share one full-height panel behind a tab —
  *  stacked, each showed ~2 rows. The tab is remembered per machine. Only the
- *  visible one is mounted (the clip grid's 2 s poll runs only while shown). */
+ *  visible one is mounted (the deck grid's 2 s re-read runs only while shown). */
 function MixerPanel() {
   const leg = useStore((s) => s.deck?.preview_source ?? 'design');
   const [tab, setTabState] = useState<MixerTab>(() => {

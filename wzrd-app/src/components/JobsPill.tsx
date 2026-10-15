@@ -5,7 +5,7 @@
 // only while the popover is open — or while Studio holds it anyway.
 
 import { useRef, useState } from 'react';
-import { hubCall, type Job } from '../api/hub';
+import { cancelJob, type Job } from '../api/hub';
 import { refreshJobs, useHub, useJobsFeed } from '../state/hub';
 import { useStore } from '../state/store';
 import { Btn } from '../ui/primitives';
@@ -98,7 +98,7 @@ function JobRow({ job }: { job: Job }) {
             onClick={async () => {
               setBusy(true);
               try {
-                await hubCall('POST', '/api/jobs/cancel', { job: job.job });
+                await cancelJob(job.job);
                 refreshJobs();
               } catch (e) {
                 useStore.getState().toast(`Cancel failed: ${e}`, 'bad');
