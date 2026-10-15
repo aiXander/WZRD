@@ -1,325 +1,431 @@
-# Studio — content generation, the media library, and named clip decks (sprint plan)
+# Studio: content generation, the media library and clip decks (sprint plan)
 
-> **Status: proposed 2026-10-12 — waiting for Xander's review. Nothing built.**
-> Decisions marked **(confirm)** are open until he signs off; the rest are
-> the recommendation. Supersedes [vj-toolbox.md](vj-toolbox.md) phase 4
-> (in-app generation: MCP client, job tray, ratings) and changes how the
-> gig's clip grid gets its clips ([gig-2026-11-live-video.md](gig-2026-11-live-video.md)
-> D10/D12, contract C3). Current state it builds on:
-> [../reference/mcp-server.md](../reference/mcp-server.md) (project folder,
-> provenance sidecars, playable clips, recipes),
+> **Status: agreed with Xander 2026-10-15 (grilling session), ready to build. Nothing built yet.**
+> Every decision below is settled. Don't re-litigate them; ask Xander if
+> a build finding contradicts one. **Deadline:** everything lands by
+> **7 Nov 2026**, decks included, before the gig's dress-rehearsal week
+> ([gig-2026-11-live-video.md](gig-2026-11-live-video.md)). **H1 lands
+> before ≈ 24 Oct**, when the venue photos arrive and library rendering starts,
+> so that every venue render is recorded.
+>
+> This plan supersedes the gig plan's contracts **C2** (provenance sidecar) and
+> **C3** (clip files), its per-project spend cap (D10), and its
+> `clipgrid.json` grid (D12). It also absorbs [vj-toolbox.md](vj-toolbox.md)
+> phase 4 (in-app generation). Current state it builds on:
+> [../reference/mcp-server.md](../reference/mcp-server.md) (project
+> folder, sidecars, playable clips, recipes, spend cap) and
 > [../reference/operator-ui.md](../reference/operator-ui.md) (rooms, clip
-> grid, projects). Read this whole file before starting a package.
+> grid, projects, native preview slots). Read this whole file before starting a
+> package.
 
-## What Xander asked for (2026-10-12)
+## What Xander wants
 
-Making content and playing it live are two different activities, and the
-app only serves the second. Before and during a gig Xander:
+Making content and playing it live are two activities, and the app only
+serves the second. Xander will **render and review content from inside the
+app**, not mainly from a chat terminal:
 
-1. browses folders of **style images** on the Mac and picks some;
-2. chats with the agent (Claude Code + the WZRD MCP server) to render
-   images, TextureFlow clips, Kling videos;
-3. watches which **render jobs** are running, sees results as they land
-   (small player), sorts renders into **folders**, converts the good clips
-   to the engine's format (HAP);
-4. keeps **metadata for every render** — settings, style images, prompts,
-   and whether it was good — because most TextureFlow renders come out bad
-   and that history is how future agents pick better settings;
-5. then pulls clips from that library into a live show, organised in
-   **named decks** like Resolume.
+1. browse folders of style images and of past renders, including his Resolume
+   library (`~/Visuals`, ≈ 199 GB, almost all **DXV**);
+2. render images, TextureFlow clips and Kling videos, from a form in the app
+   or from a Claude Code session; watch the jobs; cancel the bad ones;
+3. **label** renders when he feels like it: a 0–9 score, free tags (moods,
+   themes) and notes. Labelling is **opt-in, never mandatory**;
+4. **delete freely** to save disk, but keep every render's settings and labels,
+   so a database builds up for hill-climbing aesthetics ("which settings
+   score ≥ 7 with this style?");
+5. make the good clips playable (HAP) **in place**, with no duplicate files;
+6. pull clips from the library, including past projects, into a show's
+   **decks** (Resolume's stacks of clips) and play them.
 
-"Saving a project" means saving the **show**: effects, what's in the
-decks, looks, masters. The content library is not a project, just a UI
-over folders on disk.
+## The model
 
-## The model: two worlds, and disk is the bus
-
-| | **Media library** | **Show** (a project) |
+| | **Media library** | **Show** (a project, as today) |
 |---|---|---|
-| What | every render, clip and still ever made; style-image folders | one live set at one venue: pack + regions, `scene.json`, effects, **decks**, looks, masters, alignment |
-| Where | one folder tree, default `~/WZRD/media/` (L1) + read-only style folders anywhere | `projects/<name>/`, unchanged |
-| Organised by | folders Xander makes, ratings, tags | regions × decks |
-| UI | new **Studio** room | Prepare / Align / Perform, as today |
-| Saved | always — files *are* the state | autosaves as today; "Save as" forks a show (S8) |
+| What | every file WZRD made, plus folders indexed in place | one venue's set: pack + regions, `scene.json`, effects, **decks**, looks, masters, alignment |
+| Where | home `~/WZRD/media/` (new renders) + **extra roots** indexed in place (`~/Visuals`, `projects/*/generated`, …) | `projects/<name>/`, unchanged |
+| UI | new **Studio** room | Prepare / Align / Perform |
 
-A clip crosses from library to show by **import = copy** into
-`<project>/clips/` (an APFS clone, so no extra disk). The show never points
-into the library, so reorganising the library can't break a show. This is
-the same rule the effects library uses (gig contract C6: "projects get
-copies, never links").
+- **Shows reference library files in place**, by absolute path. Nothing is
+  copied. Deleting a file a show uses breaks that slot, and that is Xander's
+  responsibility, as in Resolume. **Never refuse a delete.** Missing files
+  are a per-slot warning (the engine already does this) and get fixed by the
+  on-demand **Relink missing** button (package D3).
+- **A render's identity travels inside the file.** At creation the hub
+  embeds a `wzrd` metadata tag in the media file itself: the render id and the
+  full creation record. Labels live in a database keyed by that id, **not by
+  path**. Renaming, moving and new subfolders never break a record, and the
+  record outlives a deleted file. Foreign files (DXV, anything not made by
+  WZRD) are identified by a content **fingerprint** instead.
+- **The MCP server is the hub.** It is one long-lived HTTP process that owns
+  the database, runs render jobs, holds the Studio selection and applies the
+  spend cap. The app and every Claude Code session talk to it. Later the
+  agent's view of the whole app (and a camera) hangs off the same hub, so
+  **don't design anything that assumes the agent and the app can't talk**.
 
-**Disk is the bus.** The agent (in a terminal) and the app never talk to
-each other directly. They meet in files under the library root:
-
-- the **render record** = each file's provenance sidecar, extended (L2);
-- the **job journal** — one line when a render starts, one when it ends (L3);
-- the **Studio selection** — what Xander has selected in the app right now (L4).
-
-So the app works with no chat open, the agent works with no app open, and
-a crash on either side loses nothing. It's also why the in-app chat can
-come later without redesigning anything (S10).
-
-## How it looks in practice
-
-Show night, between sets. Xander opens **Studio** (the projector keeps
-playing LIVE; the TopBar keeps TAKE and the health lamps).
-
-1. **Style tab:** his style folders (`~/Pictures/styles/…`) as a thumbnail
-   grid. He clicks three images; they go into the **style tray** along the
-   bottom. Each image shows how often it has been used and how many of
-   those renders he kept.
-2. He opens the folder `wintercircus/fabric` as the **target folder**,
-   switches to his Claude Code terminal and types: *"4 TextureFlows for the
-   left fabric with these styles, colder than last time."* The agent calls
-   `studio_selection` (gets the three paths + target folder) and
-   `find_renders` (sees which settings he kept and rejected for those
-   styles), then queues four `texture_flow` jobs (S5).
-3. Four **running-job tiles** appear in the folder at once, with elapsed
-   time against the usual duration for that kind of job ("1:40 of ~5:00").
-   Results replace the tiles as they land.
-4. **Culling:** arrow keys move, space plays the clip in the inspector,
-   `X` rejects, `K` keeps, `F` favourites, `N` adds a note ("too busy at the
-   hem"). Rejects drop out of view but their record stays.
-5. A favourite: **"More like this"** queues 4 renders with the same settings
-   and new seeds, no chat needed (package A3). Or he says "save that as a
-   recipe" in chat.
-6. **"Add to deck"** on a kept clip: it's made HAP if needed, cloned into the
-   open show, and placed in the active deck's row for the region it was made
-   for. In Perform: deck tabs `Intro | Drift | Drop`; click a slot = it plays
-   on that region in DESIGN; **T** takes it live, as today.
-
-## Decisions
+## Decisions (settled 2026-10-15)
 
 | # | Decision | Why |
 |---|---|---|
-| S1 | **One media library root**, default `~/WZRD/media/`, override `WZRD_MEDIA_ROOT` (read by the MCP *and* the app). Not in the repo: media is big and not versioned. Style folders are a separate **read-only** list in the app's `settings.json` (`style_roots`). WZRD never writes into them **(confirm the default path)** | Both processes must agree with no shared config. A Finder-launched app sees no env vars, so the default is what runs (gig D16's rule) |
-| S2 | **The render record is the sidecar** (C2, extended by L2): rating, notes, tags, input hashes, job id, duration, project. **A record is never deleted.** "Purge" deletes the media and keeps sidecar + thumb | Bad renders are the learning signal. Deleting the file must not delete what was learned |
-| S3 | **Ratings: reject / unrated / keep / favourite** (`-1 / absent / 1 / 2`), keyboard-first culling. No 1–5 stars **(confirm)** | Fast enough to rate everything mid-gig, which matters more than resolution. Stars get skipped |
-| S4 | **A job journal** written by the MCP for every render-class tool: `start` + `end` (outputs or error). The app's job view and ETAs come from it. Failed jobs live only here, with their args + error | No MCP progress plumbing, and it covers agent-started and button-started jobs alike. TextureFlow sends no progress at all today |
-| S5 | **Render tools can return immediately** (`wait=false` → job id). The work keeps running in the MCP server; results land in the library and the journal; `jobs()` reports status. Default stays blocking | A full TextureFlow is 5–6 min. A blocking call freezes the chat for the whole batch, which is exactly the gig moment |
-| S6 | **Generator output goes to the library, venue authoring stays in the project.** `nano_banana`, `texture_flow`, `kling_*`, `to_hap`, `extract_frames`, `concat_videos` default to the Studio target folder, else `inbox/`. `import_photos`, `prepare_surface`, `extract_color_regions`, `build_layerpack` keep writing into the project. A `dest="project"` arg covers the in-between cases (a segmentation map for `extract_color_regions`); the `run-sheet` skill uses it. `region=` still resolves against the **active project's** pack, and the record stores `project` | Content outlives a show; the pack and its sources are venue facts |
-| S7 | **Spend cap stays per project** (gig D10), summed from journal `end` lines tagged with that project, not from an rglob of project sidecars | Renders no longer live in the project folder; the journal is cheaper to sum anyway |
-| S8 | **Save = the show.** Autosave stays (crash safety, all files already autosave). Add **"Save as…"** = fork the show (scene, effects, decks, looks, session, alignment, pack, cloned clips) under a new name. No dirty/revert model **(confirm — or do you want an explicit Save with "unsaved changes"?)** | An explicit save adds a "forgot to save" failure for no gain on a live rig. A fork is what "save a version of tonight's set" needs |
-| S9 | **Decks = named pages of the clip grid**, per show, Resolume's meaning. Rows stay **regions** (gig D12), columns are slots. One deck is shown at a time; switching decks changes what the grid shows, never what's playing | That's how Resolume decks behave, and it keeps D12's surface-language rows |
-| S10 | **Naming collision:** today "deck" also means the DESIGN \| LIVE area (`DeckPanel.tsx`, the engine's `deck.preview_source`, the design spec's "two legs, one deck"). From now on **"deck" = a named clip page** in UI copy and docs; the DESIGN \| LIVE area becomes the **TAKE panel**, the two sides stay **legs**. Wire names (`deck.*` RPC fields) don't change **(confirm)** | Two meanings of "deck" in one booth UI would be a constant trip hazard |
-| S11 | **Chat stays a Claude Code terminal** for this sprint (gig D11). The in-app chat comes later, in the Studio room. How is [vj-toolbox.md](vj-toolbox.md) phase 7: either through Foreman's daemon, or by reusing its *pattern* (the real `claude` CLI in a PTY, shown with xterm.js). Foreman itself can't be embedded: it's a browser app with no public API (checked 2026-10-12) | The disk-bus design makes the chat's location irrelevant to everything in this plan |
-| S12 | **Studio is project-independent but project-aware**: it works with any show open, shows a "made for `<project>` · `<region>`" chip on each render, and "Add to deck" targets the open show | Content is made against a venue's regions, but browsing and rating isn't |
-| S13 | **Local media in the webview through one helper** (`mediaUrl(path)`): Tauri's asset protocol scoped to the library root, style roots and projects root; in the browser bridge a devport route serves the same files. Previews play the **mp4** (WebKit can't play HAP); one player at a time, never autoplay a grid, paused when the room is hidden | Today the webview can't show local video at all (thumbs are base64 over IPC, which won't scale to a 500-image style folder). Video decode competes with the engine on show night |
+| S1 | **Library home `~/WZRD/media/`**, override `WZRD_MEDIA_ROOT`. New renders land in the folder open in Studio (the *target folder*), else `inbox/` | A Finder-launched app sees no env vars, so the default is what runs |
+| S2 | **Extra roots indexed in place.** Nothing is ever moved into the library; Xander's Resolume compositions keep working. WZRD may *add* files to a root (a HAP conversion beside its source) but never moves or rewrites existing ones unless he asks (move/rename/delete in Studio) | Moving `~/Visuals` would break his Resolume projects |
+| S3 | **Index on open.** A folder is indexed (fingerprint + probe + thumbnail) the first time Studio opens it; an **"Index this folder"** button indexes a whole tree for search. No always-on background scanner | 199 GB of DXV; pay only for what's looked at |
+| S4 | **Identity in the file, labels in the database** (contracts L2, L3). The hub writes the `wzrd` tag once at creation and never rewrites media for a label change. **`.meta.json` sidecars are retired** for new renders; old sidecars are absorbed on first index and left on disk | Rewriting a 30 MB HAP per keypress is slow and races the engine reading it; Xander wants fewer files |
+| S5 | **Labels are opt-in**: score `0–9` (higher is better, digit keys; absent = unrated), free **tags** with autocomplete from existing tags, **notes**. Bulk **"delete media scored ≤ N in this folder"**: the records stay | Fast enough to use mid-gig; never a chore |
+| S6 | **Implicit signals logged separately** and never overwriting the score: added to a deck, played live, seconds on live | Free extra data for hill-climbing |
+| S7 | **Delete = media gone, record kept** (`purged` set, thumbnail kept in the cache). Never refused, even when a show uses the file | Xander's call, as in Resolume |
+| S8 | **Make playable = HAP beside the source** (`<stem>.mov` next to `<stem>.mp4`, or next to a DXV original). The mp4 stays as the master; the HAP is a disposable cache ("free space" drops HAP that no deck uses). The HAP carries the same render id (`variant: "hap"`), so labels are shared | No duplicate *masters*; HAP is 2–10× the mp4 and regenerates in seconds |
+| S9 | **DXV plays via conversion only** for now: make it playable → HAP beside it. Native DXV decode in the engine is post-gig ([backlog.md](backlog.md)). The engine stays HAP-only (gig D2) | Xander mostly makes new content for the first gig |
+| S10 | **Preview monitor in Studio, Resolume-style**: static thumbnails in the grid (no animated thumbs, no autoplay); the selected item plays in one **preview monitor**. HAP plays **natively** in a native slot (the engine decodes it, the same underlay mechanism as Perform's monitor); mp4 plays in the webview's `<video>` in the same frame (WebKit decodes H.264 in hardware); DXV and other codecs show their thumbnail plus "Make playable to preview" | Resolume plays everything through its own engine. Ours decodes HAP only, so mp4 needs the webview |
+| S11 | **The MCP server is the hub**: a single instance, streamable HTTP on `127.0.0.1:8787` (not `0.0.0.0` when spawned by the app), standalone from the engine so they can't crash together | The app and the agents need one owner of jobs and the database |
+| S12 | **The app spawns the hub** if `GET /api/hello` doesn't answer as a WZRD hub; a lock file prevents a second copy. The hub **outlives the app** (in-flight renders finish) and **shuts itself down after 1 h idle** (no running job, no request). Claude Code sessions need the app opened first; no stdio bridge for now | Xander renders from the app; simplest correct lifecycle |
+| S13 | **App ↔ hub over a small JSON API** (`/api/*` Starlette routes beside `/mcp` on the same server, sharing the Python implementations). Agents use MCP tools. Destructive operations (delete, purge) exist **only on `/api`** | Simpler than an MCP-client crate in Rust, and the agent can't delete by construction |
+| S14 | **Generators are project-free**: `nano_banana`, `texture_flow`, `kling_*`, `to_hap`, `extract_frames`, `concat_videos` write to the library. Venue tools (`import_photos`, `prepare_surface`, `extract_color_regions`, `build_layerpack`) keep writing into the project. The **active project is per MCP session**, plus a per-call `project=` override; `region=` resolves against it. A `dest="project"` arg covers the in-between cases (a segmentation map) | Several parallel Claude sessions share one hub; today's module-global `_active_project` would let them redirect each other |
+| S15 | **Spend cap is daily and global**: default $20/day, warn at 80 %, the app asks before exceeding (agents get today's refusal + `allow_over_cap`). Summed from the jobs table. "$ today" sits in the jobs pill | Renders no longer belong to a project; a runaway batch is a same-day risk |
+| S16 | **Rendering from the app = a Render panel** in Studio: recipe picker, style tray, target region, key knobs (strength, length, seed), count, cost estimate, Go. Plus **More like this** (same args, new seeds), **Make playable** and **Cancel** for running jobs. Chat for creative work stays a Claude Code terminal; in-app chat is post-gig ([vj-toolbox.md](vj-toolbox.md) phase 7) | Covers the repetitive "4 more like this" loop without typing |
+| S17 | **Render tools can return immediately** (`wait=false` → job id); `jobs()` reports status; jobs can be **cancelled** (Modal `FunctionCall.cancel`, FAL cancel). Default for agents stays blocking | A full TextureFlow is 5–6 min; blocking freezes the chat |
+| S18 | **Agent permissions**: it may label (its tags are stored as **agent tags**, and it never sets or overwrites Xander's score), move and rename library files, fill decks, and bind on design. It may **not** delete, and never takes anything live | Taking live stays a human act (gig D10) |
+| S19 | **Decks = Resolume's**: named stacks of clips per show; rows = the show's regions (+ `_unassigned`), columns = slots; one deck shown at a time; switching decks never changes what plays. **No extras for the MVP**: no persistent clips, hidden decks, deck import or colours; clips only (no effect slots) | Xander: "none of these are needed for MVP" |
+| S20 | **Naming**: **Studio** = the room where clips are made. **Deck** = a clip stack only. The engine area keeps its **design / live** panels, so UI copy and docs stop calling that area "deck". Wire names (`deck.*` RPC fields, `DeckPanel.tsx`) don't change | Two meanings of "deck" in one booth UI would trip him up |
+| S21 | **Save = autosave + "Save as…"** (fork the show: scene, effects, decks, looks, session, alignment, pack; clips stay referenced, not copied). No dirty/revert model | A forgotten Save is a live-rig failure |
+| S22 | **Style images are just images in library roots.** The **style tray** is part of the Studio selection; "used n×, average score" comes from the database (records list their inputs by fingerprint) | One browser, no second "styles" concept |
 
-## Contracts (pinned so lanes can run in parallel)
+## Contracts (pinned so the lanes can run in parallel)
 
-Same rule as the gig plan: build against these, not against another lane's
-code; changing one means editing this section in the same commit.
+Build against these, not against another lane's code. Changing one means
+editing this section in the same commit. On landing, each moves into
+[../reference/mcp-server.md](../reference/mcp-server.md) (L1–L5) or
+[../reference/operator-ui.md](../reference/operator-ui.md) (L6) and
+leaves a pointer here.
 
-**L1 — library layout**
+**L1 — library home + roots**
 
 ```
-<media root>/                  ~/WZRD/media or $WZRD_MEDIA_ROOT
-  inbox/                       default landing folder
-  <Xander's folders>/…         free-form, any depth
+~/WZRD/media/  ($WZRD_MEDIA_ROOT)
+  inbox/                    default landing folder
+  <Xander's folders>/…      free-form, any depth
   .wzrd/
-    jobs.jsonl                 L3
-    selection.json             L4
-    thumbs/                    style-image thumbnail cache (app-owned, disposable)
+    library.db              L3 (SQLite, WAL mode)
+    thumbs/<key>.jpg        thumbnail cache, key = render id or fingerprint
+    hub.lock                L4
 ```
 
-An **item** = files sharing a stem in one folder: `<stem>.mp4`, `<stem>.mov`
-(HAP), `<stem>.png`, `<stem>.thumb.jpg`, and each media file's
-`.meta.json`. Moving or renaming an item moves the whole bundle. Folder
-names are free; nothing in the library is addressed by folder meaning.
+Extra roots are rows in the database's `roots` table, added from Studio.
+An **item** is one media file. A render's mp4 and its HAP `.mov` are two
+files of one render and share its id. No files are written beside media
+except a HAP conversion (S8). Thumbnails live only in the cache, and folder
+names carry no meaning.
 
-**L2 — render record (sidecar schema 1, extended)**: today's C2 keys
-(`tool, args, inputs, parent, created, est_usd, region, source_box`) plus
+**L2 — the embedded `wzrd` tag** (written once by the hub at creation, never
+rewritten)
 
-| Key | Written by | Meaning |
+- mp4/mov: format-level metadata key `wzrd`, written with
+  `ffmpeg -c copy -movflags use_metadata_tags -metadata wzrd='<json>'` into a
+  temp file + rename (verified 2026-10-15 on an mp4 and a HAP `.mov`: +345
+  bytes, no re-encode, `ffprobe` reads it back). `to_hap` copies the tag
+  with `variant: "hap"`. **Verify in H1** that render-core's MOV reader
+  (`video.rs`, which walks `moov/trak`) still opens a tagged `.mov`.
+- png: an iTXt chunk `wzrd` (PIL `PngInfo`); jpg: the COM segment.
+- JSON: `{schema: 1, id: "r_<ulid>", variant: "master"|"hap", tool, args,
+  inputs: [{name, fp}], parent: <render id>|null, created, est_usd,
+  duration_s, job, project, canvas, region, source_box}`. These are today's C2
+  keys, plus identity, plus input fingerprints so a style image is
+  recognised after its folder moves.
+
+**L3 — `library.db`** (single writer: the hub; the app opens it
+**read-only** so Studio can browse while the hub is down)
+
+| Table | Key | Holds |
 |---|---|---|
-| `job` | MCP, at creation | id linking to L3 |
-| `duration_s` | MCP | wall time of the call |
-| `project`, `canvas` | MCP | which show's pack/canvas it was made against (`null` if none) |
-| `input_hashes` | MCP | `{path: sha1}` of every local input, so a style image is still recognised after its folder moves |
-| `rating` | app / `rate_render` | `-1` reject, `1` keep, `2` favourite; absent = unrated |
-| `notes`, `tags` | app / `rate_render` | free text; list of strings |
-| `purged` | app | ISO time the media was deleted; record + thumb stay |
+| `renders` | `id` (`r_…` from the tag, or `fp_<fingerprint>` for a foreign file) | the L2 record (JSON), `score`, `tags`, `agent_tags`, `notes`, `signals` (S6), `purged` |
+| `files` | `path` | `render_id`, `fp`, `size`, `mtime`, `codec`, `w`, `h`, `frames`, `fps`, `last_seen`, `missing` |
+| `jobs` | `id` | `tool`, `args`, `by` (`agent`/`app`), `session`, `started`, `ended`, `ok`, `error`, `outputs`, `est_usd`, `duration_s`, `cancelled` |
+| `roots` | `path` | `home` flag, `added` |
+| `selection` | singleton | L5 |
 
-The MCP writes a sidecar once, at creation, and never rewrites it. Only the
-last four keys change afterwards, by an atomic read-modify-write (temp +
-rename). Readers ignore unknown keys.
+**Fingerprint** = `size` + sha1 of the first and last 1 MiB. A **path is
+never an identity**, only "last seen here": opening a folder refreshes its
+rows, and a vanished file gets `missing = 1`. Schema version in
+`PRAGMA user_version`; migrations live in the hub.
 
-**L3 — job journal** (`jobs.jsonl`, append-only, one JSON object per line,
-written under an exclusive lock)
+**L4 — the hub** (`python -m wzrd_mcp`, streamable HTTP)
 
+- `/mcp`: the MCP tools (agents).
+- `/api/*`: JSON for the app: `hello` (`{app: "wzrd-hub", version, pid,
+  media_root}`), library list/index/move/rename/delete/purge/label,
+  roots, selection, render/cancel/jobs (an SSE or long-poll job feed), spend.
+- Singleton: `hub.lock` holds `{pid, port}`. The app calls `hello`: a
+  WZRD answer means attach; a foreign answer means a red health lamp
+  ("port 8787 taken"); no answer plus a stale lock means spawn. The spawn is
+  **detached**, so it survives the app quitting, and uses the absolute `uv`
+  path (a Finder-launched app has no shell `PATH`). The hub exits after 1 h
+  with no running job and no request.
+- Claude Code connects with
+  `claude mcp add --transport http wzrd http://127.0.0.1:8787/mcp`. `--stdio`
+  stays for Claude Desktop as its own process: it shares the database (WAL)
+  but its jobs die with it.
+
+**L5 — Studio selection** (hub state, persisted in the `selection` table):
+`{styles: [paths], items: [paths], target: dir|null, project: name|null}`.
+The app writes it on every change; the agent reads it with
+`studio_selection()`.
+
+**L6 — decks** (`<project>/decks.json`, replaces `clipgrid.json`)
+
+```json
+{"schema": 1, "active": "Intro",
+ "decks": [{"name": "Intro",
+            "rows": {"<region id>": [{"path": "/abs/clip.mov", "id": "r_…", "fp": "…"}, null],
+                     "_unassigned": []}}]}
 ```
-{"ev":"start","job":"j_…","t":ISO,"tool":"texture_flow","args":{…},"project":"…","dest":"<abs dir>","est_usd":0.2,"pid":123,"by":"agent"|"app"}
-{"ev":"end","job":"j_…","t":ISO,"ok":true,"outputs":[abs paths],"est_usd":0.19,"duration_s":301}
-{"ev":"end","job":"j_…","t":ISO,"ok":false,"error":"…"}
-```
 
-A `start` with no `end` whose `pid` is dead is shown as **lost**. The ETA
-is the median `duration_s` of the last 20 ok jobs of the same tool with
-the same size args. `by` is set from the MCP caller (the app passes `by:
-"app"` through its client).
-
-**L4 — Studio selection** (`selection.json`, written by the app on every
-change, read by the `studio_selection` tool):
-`{"schema":1,"updated":ISO,"styles":[abs paths],"items":[abs paths],"target":abs dir|null,"project":name|null}`.
-
-**L5 — decks** (`<project>/decks.json`, replaces `clipgrid.json`):
-`{"schema":1,"active":"Intro","decks":[{"name":"Intro","rows":{"<region id>":["clips/a.mov",null,"clips/b.mov"],"_unassigned":[…]}}]}`.
-Paths are scene-dir-relative, so C5 clip bindings are unchanged. Deck
+Slot paths are **absolute** (library files). `id`/`fp` are what Relink
+matches on. C5 clip bindings in `scene.json` may now be absolute too: the
+engine already accepts them (`compositor.rs` does `scene_dir.join(clip)`,
+which keeps an absolute path), but `engine_tools.py`'s binding docs and
+validation still say "relative to the scene dir", so update them. Deck
 names are unique per show; order = array order.
-
-**L6 — show clips**: `<project>/clips/<stem>.mov` + its sidecar + thumb,
-cloned from the library at import (macOS `clonefile`, plain-copy fallback).
-The sidecar keeps the library path it came from (`imported_from`) for
-"show in library". `generated/` stays readable for old projects (migration
-in D1).
 
 ## Work packages
 
 Lanes: **PY** (`wzrd_mcp/`, `wzrd/`), **SHELL** (`wzrd-app/src-tauri/`),
-**UI** (`wzrd-app/src/`). Packages in different lanes run in parallel;
-SHELL and UI pair up per feature. Collision hot spots: `tools_config.json`
-(append), `src-tauri/src/{lib,rpc}.rs` (serialise A1/A3/D1). The perf gate
-rule (CLAUDE.md) applies to every SHELL package.
+**UI** (`wzrd-app/src/`), **ENG** (`render-core/`). Collision hot spots:
+`tools_config.json` (append only) and `src-tauri/src/{lib,rpc}.rs`
+(serialise A1, R1, D1). The perf-gate rule (CLAUDE.md) applies to every
+SHELL/ENG package.
 
-| Order | PY | SHELL + UI | Needs |
-|---|---|---|---|
-| 1 | **M1** library routing + records + journal | **A1** library backend + media URLs | contracts only |
-| 2 | **M2** selection + learning tools + skills; **M3** non-blocking jobs | **A2** Studio room | A2 needs A1 |
-| 3 | — | **A3** MCP client + buttons | M1, A2 |
-| 4 | — | **D1** decks + import | A1 (A2 for the Studio button) |
-| 5 | — | **D2** Save as | D1 |
+| Order | PY | SHELL + UI | ENG | Needs |
+|---|---|---|---|---|
+| 1 (**by ≈ 24 Oct**) | **H1** hub + library + identity | — | — | — |
+| 2 | **H2** jobs: non-blocking + cancel | **A1** hub client + library backend | **P1** file preview source | H1 (A1, P1 need only L1–L4) |
+| 3 | **H3** agent tools + skills | **A2** Studio room | — | A1; A2 uses P1 |
+| 4 | — | **R1** Render panel | — | H2, A2 |
+| 5 | (deck tool in D1) | **D1** decks | — | A1 |
+| 6 | — | **D2** Save as, **D3** Relink | — | D1 |
 
-### M1 — library routing, extended records, job journal (PY)
+Rough agent time with review loops: H1 ≈ 2 d, H2 ≈ 1 d, H3 ≈ 0.5 d, A1 ≈ 2 d,
+P1 ≈ 1 d, A2 ≈ 2 d, R1 ≈ 1.5 d, D1 ≈ 2 d, D2 + D3 ≈ 1 d. That's ≈ 13 days of
+agent time, parallel across lanes.
 
-`project.py`: `media_root()` (S1), `library_output_path/dir(tool, ext,
-dest)` resolving target folder (from L4) → `inbox/`; S6 routing in the
-listed tools plus `dest=`. `provenance.py`: L2 keys at creation;
-`check_spend` sums L3 (S7). `_log.py` `logged_tool`: L3 `start`/`end` for
-tools tagged `render` in `tools_config.json`. Fix the fixture script's fake
-`prompt` arg on `texture_flow` (the real tool has none) while there.
-**Gate:** a `texture_flow` and a `nano_banana` from a Claude session land in
-`inbox/` with L2 records and a start/end pair; a forced failure writes
-`ok:false` + error; the spend cap still refuses at the cap for that
-project; `build_layerpack` still writes into the project.
+### H1 — the hub, the library database, identity in the file (PY)
 
-### M2 — selection + learning tools, skills (PY)
+- `__main__.py`: HTTP binds `127.0.0.1` by default; `hub.lock`; idle exit
+  after 1 h; `/api/hello`. `media_root()` and `roots`; the `library.db`
+  schema (L3) plus migrations.
+- Identity: a render id per call in `logged_tool` (`_log.py`); the L2 tag
+  written by `provenance.py` (replacing `write_sidecars`) on every media
+  output; `to_hap` (`wzrd/clips.py`, `media_tools.py`) copies the tag; `renders`
+  and `files` rows inserted at creation.
+- S14 routing: generators → the target folder (L5) else `inbox/`; venue tools
+  unchanged; `dest="project"`. The active project moves from the module
+  global in `project.py` to per MCP session state, plus `project=` on tools
+  that resolve a project.
+- Switch the three sidecar readers to the database, falling back to the tag
+  and then to the legacy sidecar:
+  - `recipe_tools.py` `_render_sidecar` (walks `parent` to the
+    `texture_flow` call);
+  - `engine_tools.py` (`get_scene_context` lists clips with their region);
+  - the app's `clips.rs` grid (it is replaced by D1 anyway; keep it working
+    until then).
+- Indexing (`index_folder(path, deep=False)`): fingerprint, `ffprobe`
+  (codec, size, frames), thumbnail into the cache, absorb a legacy
+  `.meta.json`.
+- S15: `check_spend` sums today's `jobs` rows. `jobs` start/end rows for
+  every tool tagged `render` in `tools_config.json`.
+- Update `wzrd-app/scripts/fixture_projects.py` to write tagged files (and
+  drop the fake `prompt` arg it passes to `texture_flow`).
 
-Tools: `studio_selection()`; `find_renders(tool?, rating?, tag?, style?,
-recipe?, project?, text?, limit)` → compact rows (path, rating, notes, the
-args that differ from the tool's defaults, style image names); `rate_render(path,
-rating?, note?, tags?)` for triage in chat. Skills: `textureflow` and
-`run-sheet` learn "these styles" → `studio_selection`, "check the archive
-before a batch" → `find_renders` (kept vs rejected settings for these
-styles/recipe), and S6's `dest`. **Gate (no UI needed — hand-write
-`selection.json`):** a cold Claude session told "two renders with these
-styles" uses the selected paths and the target folder; asked "what worked
-with style X" it cites kept and rejected records.
+**Gate:**
+- a `texture_flow` and a `nano_banana` from a Claude session over HTTP land
+  in `inbox/` with an embedded tag (`ffprobe`), a `renders` row and a jobs
+  start/end pair;
+- `to_hap` on it gives a `.mov` with the same id that the HEAD engine opens;
+- rename + move the mp4 in Finder, re-open the folder → same record, new path;
+- delete it → record kept, `missing = 1`;
+- two parallel sessions with different `set_project`s don't cross;
+- the daily cap refuses at the cap;
+- `build_layerpack` still writes into the project.
 
-### M3 — non-blocking render jobs (PY) (S5)
+### H2 — non-blocking jobs + cancel (PY)
 
-`wait=false` on `texture_flow`, `kling_*`, `nano_banana`: register an
-asyncio task in the server process, return `{job, dest, eta_s}` at once;
-`jobs(job?)` → status/outputs from L3. Add `with_keepalive` to the blocking
-`texture_flow` path (it has none; a 6-min silent call risks a client
-timeout). Trap: under stdio the server dies with the Claude session, which
-takes its running jobs with it → those show as **lost** (L3), not as
-success. **Gate:** queue 4 TextureFlows, keep chatting, all 4 land; kill the
-session mid-render → the app shows them lost.
+- `wait=false` on `texture_flow`, `kling_*` and `nano_banana` registers an
+  asyncio task in the hub and returns `{job, dest, eta_s}`.
+- `jobs(job?)` reads the `jobs` table; `cancel_job(job)` cancels the remote
+  call (Modal `FunctionCall.cancel`, FAL cancel) and marks the job
+  `cancelled`.
+- A job whose hub died mid-render shows as **lost** (no `ended`, `pid`
+  dead).
+- ETA = median `duration_s` of the last 20 successful jobs of the same tool
+  and size args.
+- Add `with_keepalive` (`_keepalive.py`) to the blocking `texture_flow`
+  path, which has none; a 6-min silent call risks a client timeout.
 
-### A1 — library backend (SHELL)
+**Gate:**
+- queue 4 TextureFlows from chat, keep chatting, all 4 land;
+- cancel one mid-render → no output, Modal shows it cancelled;
+- kill the hub mid-render → the job reads lost.
 
-Commands: `library_tree`, `library_list(folder)` (items per L1 + their L2
-records + running jobs targeting the folder), `library_move/rename/mkdir`
-(whole bundles), `render_rate` (L2 key write), `render_purge`,
-`selection_set` (L4), `styles_list(root, folder)` with a background thumb
-cache (`.wzrd/thumbs/`, keyed by path + mtime), a journal tail (read from
-the last offset, emit `library:jobs`). Asset protocol + capability scope
-(S13) and the devport media route for the browser bridge. Poll the open
-folder every 2 s like the clip grid, only while Studio is mounted.
-**Gate:** a 500-image style folder lists in < 1 s cold-cache-excluded and
-thumbs fill in without blocking; moving an item moves all its files; a
-browser-bridge page shows the same thumbs and plays an mp4.
+### H3 — agent tools + skills (PY)
+
+- Tools:
+  - `studio_selection()`;
+  - `find_renders(tool?, min_score?, tag?, style?, recipe?, project?, text?,
+    limit)` → compact rows (path, score, tags, notes, the args that differ
+    from defaults, style names);
+  - `label_render(path|id, tags?, note?)`, whose tags go to `agent_tags`
+    (S18);
+  - `move_render` / `rename_render` (no delete).
+- Skills:
+  - `textureflow` and `run-sheet` learn: "these styles" →
+    `studio_selection`; check `find_renders` before a batch; `wait=false` for
+    batches; S14's `dest`;
+  - skills name tools, so grep `skills/` on any rename.
+
+**Gate (no UI; seed the `selection` row by hand):**
+- a cold Claude session told "two renders with these styles" uses the
+  selected paths and the target folder;
+- asked "what worked with style X", it cites high- and low-scored records.
+
+### A1 — hub client + library backend (SHELL)
+
+- Spawn/attach per L4.
+- A health lamp in the TopBar (hub up / down / foreign), with "Restart hub".
+- A thin Rust `/api` client (commands proxy to it).
+- Read-only `library.db` access for browsing while the hub is down.
+- Thumbnails served to the webview through Tauri's asset protocol, scoped to
+  the cache, the roots and the projects root, plus a devport route for the
+  browser bridge. Today thumbs are base64 over IPC, which won't scale to a
+  500-image folder.
+- Poll the open folder every 2 s, only while Studio is mounted.
+
+**Gate:**
+- the app cold-starts with no hub → hub spawned once; a second app launch
+  attaches instead of spawning;
+- quit the app mid-render → the render finishes; 1 h idle → the hub exits;
+- a 500-image folder lists in < 1 s once indexed and thumbs fill in without
+  blocking;
+- the browser bridge shows the same thumbs.
+
+### P1 — file preview source (ENG + SHELL)
+
+- An engine source that plays one HAP file **outside any scene** into a
+  native preview slot (a new slot id beside `"main"`). It uses the
+  underlay's `PreviewTarget`/slot mechanism
+  ([../reference/render-engine.md](../reference/render-engine.md) §1b) and
+  `video.rs`'s decoder.
+- It never touches the design or live legs.
+- Command: `preview.file {path | null}`.
+
+**Gate:**
+- a HAP clip plays in the Studio slot while LIVE holds 60 fps (perf-gate
+  table plus a bench scenario covering it);
+- closing the slot releases its decode thread.
 
 ### A2 — the Studio room (UI)
 
-A fifth room, first in the order (**Studio** · Prepare · Align · Perform,
-Debug stays last). The name is open **(confirm)**. Layout:
+- A room first in the order: **Studio** · Prepare · Align · Perform (Debug
+  stays last).
+- Layout:
 
 ```
-┌ TopBar: rooms · TAKE + health (unchanged) · jobs pill (running n / $ today) ┐
-│ Library tree  │  folder grid: thumbs, rating badge, NEW,   │  Inspector:      │
-│ ─────────     │  running-job tiles (elapsed / ETA),        │  player (mp4)    │
-│ Style roots   │  "show rejects" toggle                     │  tool, args,     │
-│               │  [Renders | Styles] tabs                   │  style images,   │
-│               │                                            │  rating, notes,  │
-│               │                                            │  made for … chip │
-├───────────────┴── style tray (selected styles) · target folder ─────────────┤
+┌ TopBar: rooms · design/live + health (+ hub lamp) · jobs pill (running n · $ today) ┐
+│ Roots + folder tree │ folder grid: static thumbs, score/tag badges,   │ Preview monitor │
+│ ("Index this        │ running-job tiles (elapsed / ETA), "show ≤ N"   │ (S10), record:  │
+│  folder")           │ filter, multi-select                            │ tool, args,     │
+│                     │                                                 │ styles, score,  │
+│                     │                                                 │ tags, notes,    │
+│                     │                                                 │ "made for" chip │
+├─────────────────────┴── style tray (selection) · target folder ───────────────────┤
 ```
 
-Keys (only while no input is focused): arrows, space = play, `X`/`K`/`F`
-rate, `N` note, `M` move to a folder, `T` set target folder. Jobs pill
-opens a tray of running/finished/failed/lost jobs with their args. No
-telemetry subscriptions; the native preview underlay is hidden in this
-room. **Gate:** cull 20 renders by keyboard in < 1 min; an agent render
-appears as a running tile within one poll and is replaced by its result;
-the style tray round-trips into `selection.json`; LIVE keeps 60 fps
-while the room is open with a clip previewing (perf gate table + an AFK
-block in [afk-test-session.md](afk-test-session.md) for the on-screen part).
+- Keys (only while no input has focus):
+  - arrows: move; space: play in the monitor;
+  - `0–9`: score; `T`: tag (autocomplete); `N`: note; `M`: move;
+  - `⌫`: delete media (record kept; two-step confirm for multi-select);
+  - "delete ≤ N in this folder".
+- The jobs pill opens running / finished / failed / lost / cancelled jobs
+  with their args and a Cancel button.
+- No telemetry subscriptions in this room.
 
-### A3 — the app as an MCP client: buttons (SHELL + UI)
+**Gate:**
+- label 20 renders by keyboard in < 1 min;
+- an agent render appears as a running tile within one poll and is
+  replaced by its result;
+- the style tray round-trips to `studio_selection()`;
+- LIVE keeps 60 fps with the monitor playing (perf gate plus an AFK block in
+  [afk-test-session.md](afk-test-session.md)).
 
-Folds in toolbox T4a. The shell attaches to a running `python -m
-wzrd_mcp` on `:8787` or spawns one (the `WZRD_AUDIO` spawn pattern in
-`src-tauri/src/lib.rs`); calls go through the Rust side (an MCP client
-crate, e.g. `rmcp`), never from the webview. Buttons: **Make playable**
-(`to_hap`), **More like this** (same args, new seeds, count, with
-`wait=false`), **Render with tray** (recipe picker + count + cost estimate
-→ `texture_flow` with the tray's styles and the target folder). Their jobs
-show through L3 like the agent's. **Gate:** two clips made playable and four
-variations of a favourite, no chat and no terminal.
+### R1 — Render panel + buttons (SHELL + UI)
 
-### D1 — decks + import (SHELL + UI)
+- The S16 Render panel in Studio. Recipes come from `list_recipes`, with
+  their args as defaults; the cost estimate comes from the hub before Go.
+- **More like this** on any WZRD render (same args, new seeds, count).
+- **Make playable** on mp4 and DXV, for a single item or a whole folder.
+- All of these run as `wait=false` jobs, visible in the jobs pill like
+  agent jobs.
 
-`decks.json` (L5) replaces `clipgrid.json`; the grid shows the active
-deck's rows instead of scanning `generated/`. Deck tabs: create, rename,
-reorder, delete (two-click), in Prepare's drawer and Perform's compact
-grid. **Import** (L6): from Studio's "Add to deck" or by dragging a render
-onto a slot; non-HAP → `to_hap` first via A3 (until A3 lands: refuse with
-"make playable first"). Row = the render's `region` if that region exists
-in this show, else `_unassigned`. The gig's **"new from agent" lane**
-becomes an **incoming strip**: new playable library renders whose
-`project` is this show, newest first; click = import into the active
-deck + bind on design. Migration (once, on open): `generated/*.mov` +
-`clipgrid.json` → clips stay where they are, one deck **"Main"** lists them;
-`fixture_projects.py` writes the new shape. **Gate:** six clips into
-"Intro", six into "Drop"; in Perform switch decks, click + T; reopen the
-show → decks intact; rename the library folder they came from → the show
-still plays.
+**Gate:** with no chat and no terminal:
+- render 4 clips from a recipe plus 2 tray styles for a region;
+- cancel one;
+- make 2 playable;
+- 4 variations of a favourite.
 
-### D2 — Save as (UI + SHELL) (S8)
+### D1 — decks (SHELL + UI + PY tool)
 
-Project menu → "Save as…" → name → fork per S8 (clips cloned) → open the
-fork. **Gate:** the fork opens with the same wall, decks and looks, and
+- `decks.json` (L6) replaces `clipgrid.json`.
+- Deck tabs (create, rename, reorder, two-click delete) in Prepare's drawer
+  and Perform's compact grid.
+- Click a slot = bind on design via `sceneCommit` (C5, absolute path); T
+  takes it live, as today.
+- **Add to deck** from Studio, or drag a render onto a slot. A non-HAP file
+  gets "Make playable" first (R1). The row = the render's `region` if this
+  show has it, else `_unassigned`.
+- The gig's "new from agent" lane becomes an **incoming strip**: the newest
+  playable renders whose `project` is this show; click = add to the active
+  deck and bind on design.
+- Log S6 signals: added to a deck; played live (seconds, from TAKE
+  telemetry).
+- MCP tool `add_to_deck(path, deck?, region?)` for the agent (S18).
+- Update `engine_tools.py`'s C5 docs and validation for absolute clip paths.
+- Migration, once on open: `clipgrid.json` + `generated/*.mov` → one deck
+  "Main" with absolute paths; `fixture_projects.py` writes the new shape.
+
+**Gate:**
+- six clips into "Intro", six into "Drop";
+- in Perform, switch decks, click + T;
+- reopen the show → decks intact;
+- a clip from `projects/fixture-b` plays in fixture-a's deck with no copy
+  made.
+
+### D2 — Save as (S21)
+
+Project menu → "Save as…" → name → fork (clips referenced, not copied) →
+open the fork. **Gate:** the fork opens with the same wall, decks and looks;
 editing it leaves the original untouched.
 
-## Fit with the gig (≈ 21 Nov)
+### D3 — Relink missing
 
-M1–M3, A1–A3 are additive: they don't touch Perform or the engine. **D1
-changes the clip grid the gig plays from**, so it lands and is rehearsed by
-**≈ 7 Nov** (before the dress rehearsal week), or it waits until after the
-gig and the gig plays on today's grid. Rough size, agent time with review
-loops: M1+M2 ≈ 1.5 days, M3 ≈ 1 day, A1+A2 ≈ 3–4 days, A3 ≈ 1.5 days, D1 ≈
-2 days, D2 ≈ 0.5 day.
+- A button in the project menu (and on a missing slot's warning).
+- For every missing path in `decks.json` and `scene.json`, search in order:
+  1. a `files` row with the same render id;
+  2. the same fingerprint among indexed files;
+  3. walk the roots for files of the same **size** (a cheap `stat`), then
+     fingerprint only those.
+- Rewrite the paths and report found / not found.
+- On demand only, never a background process.
+
+**Gate:** move a show's clip folder in Finder → the slots warn → Relink fixes
+every one in one click.
 
 ## Not in this sprint
 
-- In-app chat (S11) — sketch in [vj-toolbox.md](vj-toolbox.md) phase 7.
-- Cancelling a running job (Modal and FAL support it; add once M3 is used).
-- Statistics beyond `find_renders` (which args correlate with keeps).
-  Do it once there are a few hundred rated records.
-- Effects in deck slots (Resolume mixes generators and clips). The open
-  question already in vj-toolbox.
-- Importing Xander's existing loose renders (`projects/tf-phase2-test`,
-  the shootout folders): drop them into the library by hand. They have no
-  records, and that's fine.
+- In-app chat ([vj-toolbox.md](vj-toolbox.md) phase 7). Its home is the
+  Studio room.
+- A stdio bridge so a Claude session can start the hub without the app.
+- Native DXV decode in the engine ([backlog.md](backlog.md)).
+- Deck extras: persistent clips, hidden decks, importing a deck from another
+  show, colours ([vj-tool-feature-survey.md](vj-tool-feature-survey.md)
+  top pick 8). Effect slots in decks.
+- Statistics beyond `find_renders` (which args correlate with high scores).
+  Build them once a few hundred records are labelled.
+- "Pack show" (copy a show's clips next to it to take it to another
+  machine).

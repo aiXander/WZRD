@@ -48,12 +48,12 @@ that is done when its gate passes headlessly, then a UI one built on it.
 | 2 Chains / feedback / post | T2a (ENG), T2b (ENG), T2c (APP) | T0; T2c needs T1b | 4, 6 |
 | 3 TAKE transitions | T3a (ENG), T3b (APP) | T2a (`kind` field) | 4, 6 |
 | 4 In-app generation | moved to [studio-content-library.md](studio-content-library.md) | — | 0–3 |
-| 5 Site room | T5 (APP) | studio A3 | 0–3 |
+| 5 Site room | T5 (APP) | studio hub `/api` (H1/A1) | 0–3 |
 | 6 Booth hardening | MIDI (APP), T6 (ENG) | — | anything |
 | 7 Agent chat (sketch) | T7 (APP) | Foreman's dogfood checkpoint | anything |
 
 The ENG lane (0 → 1 → 2 → 3) is serial; the APP-only work of phases 4–6
-runs alongside it. Watch `src-tauri/src/{lib,rpc}.rs` — T1b, studio A3 and MIDI
+runs alongside it. Watch `src-tauri/src/{lib,rpc}.rs` — T1b, the Studio plan's A1/R1/D1 and MIDI
 all add commands there; serialize them.
 
 ## Phase 0 — shared WGSL helpers (`#import`)
@@ -121,15 +121,16 @@ different transition, no black frame.
 ## Phase 4 — in-app generation — moved
 
 Folded into [studio-content-library.md](studio-content-library.md)
-(2026-10-12): the app's MCP client (was T4a) is its package A3, the job
-tray and ratings (was T4b, `mark_asset`) are its Studio room + render
-records. "Render more for this region" is its "More like this" / "Render
-with tray" buttons.
+(agreed 2026-10-15, building before the gig): the app talks to the MCP
+server as a hub over a JSON `/api` (was T4a's MCP client), the job tray and
+ratings (was T4b, `mark_asset`) are its Studio room + library database, and
+"render more for this region" is its Render panel / "More like this".
 
 ## Phase 5 — the Site room (daylight setup in the app)
 
-**T5 (APP), needs the MCP client** (package A3 of
-[studio-content-library.md](studio-content-library.md)). A fifth room (before Prepare in the room order)
+**T5 (APP), needs the app ↔ hub link** (packages H1 + A1 of
+[studio-content-library.md](studio-content-library.md)): each step below
+becomes a hub `/api` call. A fifth room (before Prepare in the room order)
 that walks the setup chain, each step one MCP call through that client,
 each output a plain file in the project so the agent can run the same steps
 headlessly (the gig's on-site run sheet skill is the script this room
@@ -217,7 +218,8 @@ accepts page clicks (`pin_id`) — planned in Foreman, not here.
 **Preconditions:** Foreman past its own one-week dogfood checkpoint (its
 API still moves); unchanged rules — agent works on design only, never
 `promote`, ADOPT stays the operator's. Agent-started renders already show
-in the Studio's job view through its job journal (studio contract L3).
+in the Studio's jobs pill through the hub's `jobs` table (studio contract L3),
+and the hub is where the chat's view of the app should hang.
 
 **Gate:** from the app, ask for "4 more clips for the left fabric, colder",
 answer the agent's one clarifying question by click, watch progress, and the
@@ -225,5 +227,6 @@ clips land NEW in the grid — no terminal window opened.
 
 ## Open questions
 
-- Should the clip grid also hold *effect* slots (Resolume puts generators and
-  clips in the same grid)? Decide after the gig, from how the grid felt live.
+- Should decks also hold *effect* slots (Resolume puts generators and
+  clips in the same grid)? Out of the Studio MVP (2026-10-15); decide after
+  the gig, from how the decks felt live.

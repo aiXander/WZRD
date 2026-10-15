@@ -1,6 +1,9 @@
 # Gig build plan — live region video + agent content tools (≈ 21 Nov 2026)
 
 > **Status: in progress** — A1 done, A2 built (end-to-end gate open), E1 done (a–d), P1–P6 done, F1 done, P7 + S1 built 2026-10-12 (their real gates open — need venue photos + paid renders). Left: the open gates.
+> **Also before the gig (agreed 2026-10-15):** the whole [studio-content-library.md](studio-content-library.md)
+> sprint (media library + hub MCP server + Studio room + Render panel + decks), by 7 Nov; its H1 lands before
+> the venue photos (≈ 24 Oct). It replaces C2, C3, the per-project cap in D10 and D12's grid file.
 > **On hold (Xander, 2026-10-12): E2 (post-swap probation window) and the
 > optional MIDI package** — still to be built, not now; don't start either
 > until Xander lifts the hold. Settled with Xander in a
@@ -44,9 +47,9 @@ offline reaches the projector.
 | D7 | **Locked per-project canvas** chosen once from Nano Banana's native sizes (e.g. 1376×768); new projects only. Surface photos conformed at import; the pack is authored at canvas resolution; the engine scales canvas → projector and the 4-corner alignment absorbs the 1.792 vs 1.778 gap | "No drift by construction" (measurement below) |
 | D8 | **Fix the aspect stretch** in `wzrd/utils.py`: stop treating < 2 % aspect mismatch as a match and stretching (`ASPECT_RATIO_TOLERANCE`); undo Nano Banana's crop exactly instead | Measured, below. Directly shifts fabric masks today |
 | D9 | Regions come from **prompted Nano Banana segmentation maps** → `extract_color_regions` (Xander tested: works). Drawing regions on the projector output is a later add-on only if needed | — |
-| D10 | Fresh agent clips land in the **clip grid** flagged NEW; the agent binds a clip only on **design**, and only when asked. **Taking live stays a human act** (existing rule). Agent is semi-autonomous for library building, with a **soft per-project spend cap** (default $20, in `project.json`; warn at 80 %, ask before exceeding) | First live show; autonomy later |
+| D10 | Fresh agent clips land in the **clip grid** flagged NEW; the agent binds a clip only on **design**, and only when asked. **Taking live stays a human act** (existing rule). Agent is semi-autonomous for library building, with a **soft per-project spend cap** (default $20, in `project.json`; warn at 80 %, ask before exceeding). **Changing (2026-10-15):** the cap becomes daily and global ($20/day) with the Studio plan's H1, since renders no longer belong to a project | First live show; autonomy later |
 | D11 | Chat stays an **external Claude session** over MCP for the gig; in-app chat is later | — |
-| D12 | The clip bin is a **region × clip-slot grid** (Resolume's layer rows, but rows are named regions). Each row is auto-filled from provenance sidecars (the region a clip was made for); clips without a region sit in an "unassigned" row; any clip can be dragged onto any row. Click a slot = bind that clip on that region in **design**; TAKE as usual. Compact copy of the grid in Perform | "Pick from the rendered assets for this region" is the core operator move |
+| D12 | The clip bin is a **region × clip-slot grid** (Resolume's layer rows, but rows are named regions). Each row is auto-filled from provenance sidecars (the region a clip was made for); clips without a region sit in an "unassigned" row; any clip can be dragged onto any row. Click a slot = bind that clip on that region in **design**; TAKE as usual. Compact copy of the grid in Perform. **Changing (2026-10-15):** the grid becomes named Resolume-style **decks** of library clips (Studio plan package D1, by 7 Nov); rows stay regions | "Pick from the rendered assets for this region" is the core operator move |
 | D13 | **In-app project switcher**: recent projects in the TopBar. The engine's scene dir (watcher, `effects/`, pack, `session.json`, `alignment.json`) is fixed at boot and `scene.load` only takes JSON, so switching = **re-root by restarting the in-process engine on the new scene path** (relaunch-with-restore measured ~160–290 ms, reference §1b), not a new RPC. Same mechanism as roadmap §5.11's "restart engine" button | Today a venue switch means relaunching from a terminal with `WZRD_SCENE` |
 | D14 | **Seed ~10 clip effects** as soon as the video input works — kaleido, mirror, RGB split, pixelate, posterize, edge glow, noise displace, strobe gate, hue shift, luma key, each with declared dials. Authored into the **global effects library** (C6) and **copied** into the gig project's `effects/` (projects stay self-contained). Library *browser/tools* are post-gig ([vj-toolbox.md](vj-toolbox.md) phase 1) | A clip alone isn't playable live; these make the clips respond to the guitar |
 | D15 | **Post-swap probation window** (roadmap §5.11) comes **into the gig** as package E2 — it was post-gig. **On hold since 2026-10-12** (Xander): still wanted, not being built now | The agent writes shaders live on show night; nothing else catches a shader that compiles but tanks the frame rate on live |
@@ -80,16 +83,21 @@ locked canvas".
 every media file a tool writes (`tool`, `args`, `inputs`, `parent`,
 `created`, `est_usd`, `region`, `source_box`; `rating` reserved). Contract now
 in [mcp-server.md](../reference/mcp-server.md) "Provenance sidecars and the
-spend cap".
+spend cap". **Being replaced (agreed 2026-10-15):** the
+[studio-content-library.md](studio-content-library.md) plan embeds the record
+inside the media file (a `wzrd` metadata tag) and keeps labels in a library
+database; sidecars stop being written for new renders (its package H1, by
+≈ 24 Oct).
 
 **C3 — clip files** — landed with P5: `generated/<stem>.mp4` → `<stem>.mov`
 (HAP) + `<stem>.mov.meta.json` (`parent` = the mp4) + `<stem>.thumb.jpg`
 (written by the MCP). Contract now in [mcp-server.md](../reference/mcp-server.md)
-"Playable clips". Proposed change (2026-10-12, not built):
-[studio-content-library.md](studio-content-library.md) moves renders out of
-the project into a media library and has shows hold imported copies in
-`<project>/clips/` behind named **decks** (`decks.json` replacing
-`clipgrid.json`). That plan's package D1 lands by ≈ 7 Nov or after the gig.
+"Playable clips". **Being replaced (agreed 2026-10-15):**
+[studio-content-library.md](studio-content-library.md) moves renders into a
+media library (`~/WZRD/media/`); "make playable" writes the HAP beside its
+source; shows reference library files **in place** (no copies) from named
+**decks** (`decks.json` replacing `clipgrid.json`); thumbnails move to a
+cache. All of it lands by **7 Nov**, before the dress rehearsal.
 
 **C4 — `source_box` in `pack.json`** — landed with P4: optional per-layer
 `[x0, y0, x1, y1]`, pack pixels, max-exclusive like `bbox`, may extend past

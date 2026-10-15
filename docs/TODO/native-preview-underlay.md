@@ -50,6 +50,13 @@ JPEG (the last in-app JPEG consumer — today it keeps the design leg and the
 readback running in Perform whenever the deck sits on LIVE). Cost: design
 composite renders whenever Perform is open. Xander's call after U7.
 
+### Another slot is coming
+
+The Studio plan's package P1 ([studio-content-library.md](studio-content-library.md))
+adds a Studio **preview monitor** slot that plays one HAP file outside any
+scene. It's additive on the slot id, like the stretch above. Keep that in
+mind when deleting the fallback.
+
 ### Open questions
 
 1. **Should MCP `get_preview` grow a size parameter** (e.g. 768 px) now that

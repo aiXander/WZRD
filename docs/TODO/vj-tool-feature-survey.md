@@ -17,7 +17,7 @@
 | ✅ | have it today |
 | 🟡 | partly there |
 | 📋 | already planned (the plan is named in words) |
-| 🟦 | already proposed in the **Studio plan** (media library + Studio room + named clip decks, 2026-10-12, unreviewed) |
+| 🟦 | in the **Studio plan** (media library + Studio room + named clip decks; agreed 2026-10-15, building before the gig) |
 | ❌ | gap: nobody has planned it |
 | ⛔ | conflicts with something the engine docs list as **rejected** (re-open only deliberately) |
 | (?) | I'm not sure of WZRD's current state |
@@ -44,7 +44,7 @@
 
 7. **Random within ranges, plus Undo** (Synesthesia bank/group buttons ([doc](https://app.synesthesia.live/docs/manual/controls.html))). One button randomises every dial of a layer inside its declared range, and Undo reverts it. **Why:** this is the cheapest "surprise me" (design spec: "surprise me, sometimes"), and the descriptor ranges already make it safe. **WZRD:** ❌.
 
-8. **Studio-plan decks: four refinements from Resolume** ([decks](https://resolume.com/support/en/decks), [clips](https://resolume.com/support/en/clips)). The Studio plan's "decks = named pages of the clip grid, switching never changes what's playing" is exactly Resolume's model. Add: **(a) persistent clips**, which show on every deck (e.g. a base wash for one region); **(b) closed/hidden decks + a jump-to-deck menu** (Resolume added this in 7.18 because decks overflow); **(c) import a deck from another show** (Resolume's "master composition" workflow: keep a library show of pre-built decks and pull one in mid-show); **(d) colour per deck/slot** for low-light reading.
+8. **Studio-plan decks: four refinements from Resolume** (Xander 2026-10-15: none of the four in the Studio MVP; revisit after the gig) ([decks](https://resolume.com/support/en/decks), [clips](https://resolume.com/support/en/clips)). The Studio plan's "decks = named pages of the clip grid, switching never changes what's playing" is exactly Resolume's model. Add: **(a) persistent clips**, which show on every deck (e.g. a base wash for one region); **(b) closed/hidden decks + a jump-to-deck menu** (Resolume added this in 7.18 because decks overflow); **(c) import a deck from another show** (Resolume's "master composition" workflow: keep a library show of pre-built decks and pull one in mid-show); **(d) colour per deck/slot** for low-light reading.
 
 9. **Effects in clip-grid slots, and a mix fader per effect** (Resolume "effect clips" + per-effect opacity/blend ([doc](https://resolume.com/support/en/effects)), SonomikaTD effect stacks per cell ([asset](https://derivative.ca/community-post/asset/sonomikatd-touchdesigner-vj-system/75106))). The toolbox plan's open question, "should the clip grid also hold effect slots?", gets a clear *yes* from Resolume and SonomikaTD. When the planned effect chains land, give every stage a **mix** (dry/wet) fader the compositor applies, so no shader has to implement its own mix.
 

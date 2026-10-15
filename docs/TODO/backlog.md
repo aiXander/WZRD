@@ -14,9 +14,6 @@ Promote an item into a real plan if it grows past a few hours.
 
 ## MCP server (`wzrd_mcp/`)
 
-- **Per-call `project=` override on tools.** Today the target project is
-  session-level only (`set_project`, or the `WZRD_PROJECT` env var) —
-  `project.py`'s `_active_project`.
 - **Image draft tier.** Muse Image (`meta/muse-image/edit` on FAL, ~$0.01/img,
   #7 on the Artificial Analysis edit board) as a cheap draft next to
   `nano_banana` — a separate tool or a `quality` arg on the main one. Current
@@ -26,6 +23,15 @@ Promote an item into a real plan if it grows past a few hours.
   durable sink — a Modal Volume mounted as `WZRD_PROJECTS_ROOT`, or
   `file_io.upload` against a self-owned bucket. Its secret is
   `WZRD_MODAL_SECRET` (default `wzrd-secrets`).
+
+## Engine (`render-core/`)
+
+- **Native DXV playback (post-gig).** Xander's existing library (`~/Visuals`,
+  ≈ 199 GB) is almost all Resolume **DXV** (`DXD3`); the engine plays HAP only
+  (gig plan D2), so the Studio plan converts a DXV clip to HAP beside it on
+  "make playable". DXV3 is DXT1/DXT5 under Resolume's own compression;
+  ffmpeg's `dxv.c` (~1,200 lines) is the reference to port, and after
+  decompression it reuses HAP's BC upload path. Reverses D2 deliberately.
 
 ## TextureFlow endpoint (`deploy/textureflow/`)
 
