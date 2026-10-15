@@ -253,13 +253,16 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
                     log_error(fn.__name__, exc, t0, tb=False)
                     raise ToolError(str(exc))
                 tokens.append((library.current_dest, library.current_dest.set(scope.get("dest"))))
+                # Pin the folder now (S1): a wait=false job finishing after the
+                # Studio target changed still lands where it was started.
+                library.current_dest.set(str(library.dest_dir()))
             if render:
                 job = jobs.start(fn.__name__, {k: v for k, v in client_args.items() if v is not None},
                                  by=jobs.current_by.get(), session=_session(),
-                                 project=project.active_project(), dest=str(library.dest_dir()))
+                                 project=project.active_project(), dest=library.current_dest.get())
                 tokens.append((jobs.current_job, jobs.current_job.set(job)))
                 if scope.get("wait") is False:
-                    return await jobs.detach(job, body, str(library.dest_dir()))
+                    return await jobs.detach(job, body, library.current_dest.get())
             return await body()
         finally:
             for var, token in reversed(tokens):

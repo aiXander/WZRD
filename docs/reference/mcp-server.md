@@ -223,6 +223,10 @@ new renders in the Studio *target folder* (selection `target`) else
 (TextureFlow's preview videos — scratch, not library items). Generators
 reserve paths with `library.output_path`; `dest="project"` sends one call's
 outputs to the project's `generated/`, an absolute folder sends them there.
+`logged_tool` resolves the folder **once, at call start** and pins it as an
+absolute path (`library.current_dest`): a `wait=false` render that finishes
+after the operator opened another Studio folder still lands where it was
+started (S1).
 
 **`library.db`** (SQLite, WAL; the v1 migration at the top of `library.py`
 is the schema; version in `PRAGMA user_version`, migrations run on open).
