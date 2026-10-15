@@ -1,6 +1,6 @@
 # Studio: content generation, the media library and clip decks (sprint plan)
 
-> **Status: agreed with Xander 2026-10-15 (grilling session); building. H1, H2 and P1 done.**
+> **Status: agreed with Xander 2026-10-15 (grilling session); building. H1, H2, H3 and P1 done.**
 > Every decision below is settled. Don't re-litigate them; ask Xander if
 > a build finding contradicts one. **Deadline:** everything lands by
 > **7 Nov 2026**, decks included, before the gig's dress-rehearsal week
@@ -179,26 +179,18 @@ Gate passed: a Claude Code session queued 4 TextureFlows with
 mid-render left its job `lost`, and cancelling it stopped the Modal call.
 Done — see [../reference/mcp-server.md](../reference/mcp-server.md) "Jobs".
 
-### H3 — agent tools + skills (PY)
+### H3 — agent tools + skills (PY) — **done 2026-10-15**
 
-- Tools:
-  - `studio_selection()`;
-  - `find_renders(tool?, min_score?, tag?, style?, recipe?, project?, text?,
-    limit)` → compact rows (path, score, tags, notes, the args that differ
-    from defaults, style names);
-  - `label_render(path|id, tags?, note?)`, whose tags go to `agent_tags`
-    (S18);
-  - `move_render` / `rename_render` (no delete).
-- Skills:
-  - `textureflow` and `run-sheet` learn: "these styles" →
-    `studio_selection`; check `find_renders` before a batch; `wait=false` for
-    batches; S14's `dest`;
-  - skills name tools, so grep `skills/` on any rename.
-
-**Gate (no UI; seed the `selection` row by hand):**
-- a cold Claude session told "two renders with these styles" uses the
-  selected paths and the target folder;
-- asked "what worked with style X", it cites high- and low-scored records.
+Shipped: `studio_selection`, `find_renders`, `label_render` (agent tags,
+never the score), `move_render`, `rename_render` in `studio_tools.py`;
+skills `textureflow` (new "Working with the Studio" section) and
+`run-sheet` (selection, `find_renders` before a batch, `wait=false`,
+`project=`). Gate passed with cold Claude Code sessions and a hand-seeded
+selection: "make two renders with these styles" rendered the two selected
+style images into the target folder with `wait=false`; "what worked with
+style_3?" cited the 8 and 7 (slow-bloom) against the 3 (muddy) and 2
+(flicker). Done — see [../reference/mcp-server.md](../reference/mcp-server.md)
+"The agent's Studio tools".
 
 ### A1 — hub client + library backend (SHELL) — **done 2026-10-15**
 

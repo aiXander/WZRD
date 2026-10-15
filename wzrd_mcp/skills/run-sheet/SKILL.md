@@ -74,14 +74,17 @@ is in `set_project`'s reply). No shell → ask the operator to run it.
 
 Load skill `textureflow` (settings, and the style recipe library).
 
-1. `list_recipes()`; `view_media` the previews of the likely ones. Agree
-   with the operator which recipes go on which regions — one recipe set
-   across regions reads as one show; a contrasting recipe marks a region out.
+1. `list_recipes()`; `view_media` the previews of the likely ones. If the
+   operator has styles in the Studio tray, `studio_selection()` gives them.
+   `find_renders(recipe=<name>)` / `find_renders(style=<path>)` shows what
+   scored well (and badly) with them before. Agree with the operator which
+   recipes go on which regions — one recipe set across regions reads as one
+   show; a contrasting recipe marks a region out.
 2. **Drafts first**, one per region × recipe:
-   `texture_flow(recipe=<name>, region=<id>, width=…, height=…,
-   use_upscale=false, upscale_esrgan=false)` with width/height at the
-   region's `aspect_ratio` (from step 3), snapped to multiples of 32, short
-   side ≥ 384. ≤ 6 calls in flight.
+   `texture_flow(recipe=<name>, region=<id>, project=<show>, width=…,
+   height=…, use_upscale=false, upscale_esrgan=false, wait=false)` with
+   width/height at the region's `aspect_ratio` (from step 3), snapped to
+   multiples of 32, short side ≥ 384. ≤ 6 jobs in flight; poll `jobs()`.
 3. `check_frames(<clip mp4>)` on every result, and `view_media`. A `flash`
    fail never goes on the wall — drop it. `haze` warns: re-render darker, or
    plan a `lumaKey` effect on that region.

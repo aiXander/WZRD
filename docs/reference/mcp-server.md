@@ -277,6 +277,20 @@ Pre-call estimates live in `jobs.ESTIMATORS` (registered by the tool
 modules; shared by `check_spend` and `/api/estimate`). A job's `dest` is
 the folder its outputs land in — `to_hap` records its source's folder.
 
+**The agent's Studio tools** (`studio_tools.py`, S18 permissions): it may
+read the selection (`studio_selection` — "these styles" = its `styles`,
+renders land in its `target`), search the render database
+(`find_renders`: filters tool / min_score / tag / style — a path matches by
+fingerprint wherever the image moved, a word by file name — / recipe /
+project / text; best-scored first; `args` shows only what differs from the
+tool's published defaults; purged records stay as evidence), tag
+(`label_render` → `agent_tags`, notes appended `[agent] …`; the score is
+Xander's alone — `library.label(agent=True)` refuses one), and move/rename
+(`move_render` / `rename_render`, a render's mp4 + HAP together). It
+cannot delete: deletion exists only on `/api`. Skills `textureflow` and
+`run-sheet` teach the loop: selection → `find_renders` before a batch →
+`wait=false` + `jobs` → `check_frames`.
+
 **Spend cap** (`jobs.py`): daily and global, default $20/day
 (`settings.daily_cap_usd`; `/api/spend` or `set_project(daily_cap_usd=…)`
 on Xander's word). Today = local midnight on, the sum of `est_usd` over
@@ -371,7 +385,7 @@ D16: the default is what a Finder-launched app sees). Code:
 | `library.py` | media root + roots + selection, `library.db` schema/migrations, indexing, labels, move/rename/delete, generator output routing |
 | `identity.py` | fingerprint, the embedded `wzrd` tag (read/write), probe, thumbnails, ULIDs |
 | `jobs.py` | job rows, status (lost = no `ended` + dead pid), ETA, estimators, `wait=false` detach + cancel, the daily spend cap |
-| `studio_tools.py` | agent tools for the Studio side: `jobs`, `cancel_job` |
+| `studio_tools.py` | the agent's view of the Studio: `jobs`, `cancel_job`, `studio_selection`, `find_renders`, `label_render`, `move_render`, `rename_render` |
 | `provenance.py` | render records for every output (`record_outputs`), legacy sidecar reads, `region=` → pack layer box |
 | `recipe_tools.py` | style recipe library: `list_recipes`, `save_recipe`, `apply_recipe` (the `texture_flow(recipe=)` merge) |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |

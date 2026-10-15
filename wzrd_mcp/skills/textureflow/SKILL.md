@@ -13,6 +13,29 @@ no story and takes no keyframes — for characters and narrative use skill
 `projection-story`. Reach for it for ambient motion, VJ loops, abstract fills,
 logos.
 
+## Working with the Studio (the operator's selection and history)
+
+The operator browses and scores renders in the app's Studio room; the hub
+remembers every render's settings and their 0-9 score.
+
+- **"These styles" / "these clips" / "put them there"** → `studio_selection()`:
+  its `styles` are the style images to pass as `images=`, `items` the
+  selected renders, `target` the folder renders land in by default, and
+  `project` the open show (pass it as `project=`).
+- **Before a batch, check what worked:** `find_renders(style=<a style
+  path>, tool="texture_flow")` (or `recipe=`, `tag=`, `min_score=7`).
+  Reuse the `args` of the ≥ 7s, vary seeds around them; avoid what scored
+  ≤ 3. Unrated = unjudged, not bad. Say what you're reusing.
+- **Batches run in the background:** `wait=false` on every render of a
+  batch returns a job id at once; keep talking, poll `jobs()` until done,
+  then `check_frames` + `view_media` the outputs. A render that's clearly
+  wrong mid-way (wrong region, wrong styles) → `cancel_job(job)`.
+- Renders land in the Studio target folder, else the library's `inbox/`;
+  `dest=` sends them elsewhere (`"project"` = the show's `generated/`).
+- `label_render(path, tags=[…])` tags what you see (content, motion, mood);
+  the score is the operator's alone. `move_render` / `rename_render` file
+  them when asked. You can't delete media — the operator does that in Studio.
+
 ## Style recipes (the look library)
 
 A recipe is a saved look: style images + settings that rendered well,
