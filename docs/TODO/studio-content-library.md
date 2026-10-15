@@ -1,6 +1,6 @@
 # Studio: content generation, the media library and clip decks (sprint plan)
 
-> **Status: agreed with Xander 2026-10-15 (grilling session); building. H1, H2, H3 and P1 done.**
+> **Status: agreed with Xander 2026-10-15 (grilling session). All packages landed 2026-10-15 (H1–H3, P1, A1, A2, R1, D1–D3).** Open: A2's on-screen check (native HAP monitor + LIVE 60 fps, [afk-test-session.md](afk-test-session.md) block B9). Once that runs, promote the decisions S1–S22 that still constrain work into the reference docs and retire this plan.
 > Every decision below is settled. Don't re-litigate them; ask Xander if
 > a build finding contradicts one. **Deadline:** everything lands by
 > **7 Nov 2026**, decks included, before the gig's dress-rehearsal week
@@ -248,25 +248,26 @@ Left tower with no copy; switching to fixture-b (migrated on open) and
 back left all three decks intact. Done — see
 [../reference/operator-ui.md](../reference/operator-ui.md) "Clip decks".
 
-### D2 — Save as (S21)
+### D2 — Save as (S21) — **done 2026-10-15**
 
-Project menu → "Save as…" → name → fork (clips referenced, not copied) →
-open the fork. **Gate:** the fork opens with the same wall, decks and looks;
-editing it leaves the original untouched.
+Project menu → "Save as…" → `fork.rs` copies scene files, session,
+alignment, decks, looks, effects, pack and the design draft into a sibling
+folder (clips referenced: relative `clip`s made absolute), then opens it.
+Gate evidence: `fixture-a` → `fixture-a-fork` opened with the same wall,
+three decks and Look 1 (2.8 MB vs 29 MB — no media copied); in the fork a
+new look, a played clip and two deck renames; the original's files stayed
+byte-identical. Done — see
+[../reference/operator-ui.md](../reference/operator-ui.md) "Projects".
 
-### D3 — Relink missing
+### D3 — Relink missing — **done 2026-10-15**
 
-- A button in the project menu (and on a missing slot's warning).
-- For every missing path in `decks.json` and `scene.json`, search in order:
-  1. a `files` row with the same render id;
-  2. the same fingerprint among indexed files;
-  3. walk the roots for files of the same **size** (a cheap `stat`), then
-     fingerprint only those.
-- Rewrite the paths and report found / not found.
-- On demand only, never a background process.
-
-**Gate:** move a show's clip folder in Finder → the slots warn → Relink fixes
-every one in one click.
+`relink.rs`: render id → fingerprint → size walk of the roots (+ a
+file-name fallback for clips the library never indexed); rewrites decks +
+looks, the UI applies the scene part through `sceneCommit`; project-menu
+button + click on a ⚠ slot. Gate evidence: moving `lib/clips` (6 deck
+slots, a look and the scene referenced it) → slots warned → one click
+relinked all 7 in 72 ms. Done — see
+[../reference/operator-ui.md](../reference/operator-ui.md) "Projects".
 
 ## Not in this sprint
 

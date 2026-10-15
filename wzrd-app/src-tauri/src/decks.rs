@@ -66,11 +66,21 @@ fn read_json(p: &Path) -> Option<Value> {
         .and_then(|t| serde_json::from_str(&t).ok())
 }
 
+/// Serialises this app's writes: the CAS check + write must be one step
+/// (two quick edits — a double-click is "show deck" + "rename" — race
+/// otherwise), and each write gets its own temp file.
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn write_atomic(target: &Path, doc: &Value) -> Result<(), String> {
-    let tmp = target.with_extension("json.tmp");
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = target.with_extension(format!("json.{}-{seq}.tmp", std::process::id()));
     let text = serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, text).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, target).map_err(|e| format!("replacing {}: {e}", target.display()))
+    std::fs::rename(&tmp, target).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("replacing {}: {e}", target.display())
+    })
 }
 
 /// A slot for `path`: its render id + fingerprint from library.db when
@@ -170,6 +180,7 @@ pub fn read_in(scene_dir: &Path) -> Result<Value, String> {
 pub fn write_in(scene_dir: &Path, doc: &Value, base_mtime_ms: Option<u64>) -> Result<Value, String> {
     validate(doc)?;
     let path = scene_dir.join(DECKS_FILE);
+    let _one_writer = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     if base_mtime_ms.is_some() && mtime_ms(&path) != base_mtime_ms {
         return Err("changed".into());
     }

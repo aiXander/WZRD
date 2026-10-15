@@ -27,6 +27,8 @@ import {
   transportSet,
   engineRestart,
   projectOpen,
+  projectSaveAs,
+  sessionSave,
   type LegName,
 } from '../api/ipc';
 import { commitSceneMutation, commitSceneNow, commitSceneText, settleCommits } from './sceneCommit';
@@ -81,6 +83,22 @@ export async function openProject(scenePath: string) {
     st.toast(`Opened ${info.name} · ${info.elapsed_ms ?? '?'} ms`, 'ok');
   } catch (e) {
     st.toast(String(e), 'bad');
+  }
+}
+
+/** "Save as…" (studio D2): settle the scene, save the session, fork the
+ *  show into a sibling folder and open the fork. True on success. */
+export async function saveProjectAs(name: string): Promise<boolean> {
+  const st = useStore.getState();
+  await settleCommits();
+  try {
+    await sessionSave().catch(() => {}); // no engine → the file on disk is current
+    const info = await projectSaveAs(name);
+    st.toast(`Saved as ${info.name} — now editing the copy · ${info.elapsed_ms ?? '?'} ms`, 'ok');
+    return true;
+  } catch (e) {
+    st.toast(String(e), 'bad');
+    return false;
   }
 }
 

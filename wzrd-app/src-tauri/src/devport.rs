@@ -139,6 +139,11 @@ fn off_main(app: &AppHandle, cmd: &str, a: &Value) -> Option<Result<Value, Strin
     let hub_state = || app.state::<std::sync::Arc<hub::Hub>>().inner().clone();
     Some(match cmd {
         "hub_status" => ok(Ok(hub_state().status())),
+        "relink_missing" => crate::relink::run(
+            &app.state::<AppState>().session().scene_dir(),
+            &crate::relink::search_roots(app),
+            a.get("scene").and_then(Value::as_str),
+        ),
         "hub_ensure" => {
             let h = hub_state();
             h.ensure(app);
@@ -273,6 +278,7 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "project_current" => Ok(projects::project_current(st())),
         "project_open" => projects::project_open(app.clone(), st(), s("scenePath")?),
         "engine_restart" => projects::engine_restart(app.clone(), st()),
+        "project_save_as" => crate::fork::project_save_as(app.clone(), st(), s("name")?),
         "ui_layout_read" => layout::ui_layout_read(s("scenePath")?),
         "ui_layout_write" => ok(layout::ui_layout_write(
             s("scenePath")?,

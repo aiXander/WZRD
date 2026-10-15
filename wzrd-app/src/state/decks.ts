@@ -18,9 +18,10 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
 import { call } from '../api/transport';
-import { hubCall, type LibraryItem } from '../api/hub';
+import { hubCall, listFolder, type LibraryItem } from '../api/hub';
 import { hubUp } from './hub';
 import { clipsByRegion } from './clips';
+import { commitSceneMutation, settleCommits } from './sceneCommit';
 import { useStore } from './store';
 
 export const UNASSIGNED = '_unassigned';
@@ -37,6 +38,8 @@ type DecksState = {
   /** Slot paths whose file is gone (D3's Relink fixes them). */
   missing: Set<string>;
   error: string | null;
+  /** Bumped when files were (re)indexed — slot thumbnails refetch. */
+  indexed: number;
 };
 
 export const useDecks = create<DecksState>(() => ({
@@ -45,6 +48,7 @@ export const useDecks = create<DecksState>(() => ({
   mtime: null,
   missing: new Set(),
   error: null,
+  indexed: 0,
 }));
 
 type ReadReply = { doc: DecksDoc; mtime_ms: number | null; missing: string[] };
@@ -285,6 +289,62 @@ export function removeSlot(path: string) {
       while (deck.rows[r].length && deck.rows[r][deck.rows[r].length - 1] == null) deck.rows[r].pop();
     }
   });
+}
+
+// ---------- D3: Relink missing ----------
+
+type RelinkReply = {
+  missing: number;
+  found: number;
+  not_found: string[];
+  /** Old `image.clip` string → new absolute path, for the design scene. */
+  scene: Record<string, string>;
+  decks: number;
+  looks: number;
+  /** Folders the files were found in (indexed by the hub afterwards). */
+  dirs: string[];
+};
+
+/** Find moved clips (render id → fingerprint → a size walk of the roots;
+ *  `relink.rs`), rewrite decks + looks in the shell, and the design scene
+ *  here through sceneCommit. The wall's LIVE leg picks the new paths up
+ *  on the next TAKE. */
+export async function relinkMissing(): Promise<void> {
+  await settleCommits();
+  toast('Looking for missing clips…', 'info');
+  let r: RelinkReply;
+  try {
+    r = await call<RelinkReply>('relink_missing', { scene: useStore.getState().sceneJson || null });
+  } catch (e) {
+    toast(`Relink failed: ${e}`, 'bad');
+    return;
+  }
+  const remap = r.scene;
+  if (Object.keys(remap).length) {
+    commitSceneMutation((s) => {
+      const walk = (v: any): void => {
+        if (Array.isArray(v)) v.forEach(walk);
+        else if (v && typeof v === 'object')
+          for (const [k, x] of Object.entries(v)) {
+            if (k === 'clip' && typeof x === 'string' && remap[x]) v[k] = remap[x];
+            else walk(x);
+          }
+      };
+      walk(s);
+      return s;
+    });
+  }
+  // Index where they turned up, so the slots get thumbnails + labels back.
+  if (hubUp()) await Promise.all(r.dirs.map((d) => listFolder(d, true).catch(() => {})));
+  await loadDecks();
+  useDecks.setState((s) => ({ indexed: s.indexed + 1 }));
+  if (!r.missing) toast('Nothing is missing', 'ok');
+  else if (!r.not_found.length) toast(r.found === 1 ? 'Relinked the missing clip' : `Relinked all ${r.found} missing clips`, 'ok');
+  else
+    toast(
+      `Relinked ${r.found} of ${r.missing} — not found: ${r.not_found.map((p) => p.split('/').pop()).join(', ')}`,
+      r.found ? 'warn' : 'bad'
+    );
 }
 
 // ---------- S6 implicit signals ----------

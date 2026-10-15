@@ -16,10 +16,12 @@ mod decks;
 #[cfg(debug_assertions)]
 mod devport;
 mod engine;
+mod fork;
 mod hub;
 mod layout;
 mod library;
 mod projects;
+mod relink;
 mod rpc;
 #[cfg(target_os = "macos")]
 mod underlay;
@@ -394,6 +396,8 @@ pub fn run() {
             projects::project_current,
             projects::project_open,
             projects::engine_restart,
+            fork::project_save_as,
+            relink::relink_missing,
             layout::ui_layout_read,
             layout::ui_layout_write,
             hub::hub_status,

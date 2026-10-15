@@ -34,7 +34,7 @@ pub fn is_media(p: &Path) -> bool {
 }
 
 /// Open `library.db` read-only. `None` when the hub has never created it.
-fn open_db() -> Result<Option<Connection>, String> {
+pub(crate) fn open_db() -> Result<Option<Connection>, String> {
     let path = hub::db_path();
     if !path.is_file() {
         return Ok(None);

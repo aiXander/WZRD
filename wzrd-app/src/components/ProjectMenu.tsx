@@ -8,7 +8,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { projectsList, type ProjectEntry } from '../api/ipc';
-import { openProject, restartEngine } from '../state/actions';
+import { openProject, restartEngine, saveProjectAs } from '../state/actions';
+import { relinkMissing, useDecks } from '../state/decks';
 import { useStore } from '../state/store';
 import { Popover } from '../ui/Popover';
 import { Btn, Dot } from '../ui/primitives';
@@ -128,10 +129,12 @@ function ProjectList({ anchor, onClose }: { anchor: HTMLElement | null; onClose:
           );
         })}
       </div>
+      <SaveAs busy={busy} setBusy={setBusy} onDone={onClose} />
       <div className="flex items-center gap-2 mt-2 pt-2 border-t border-line">
         <Btn size="sm" tone={running ? 'solid' : 'danger'} active={!running} onClick={restart} title="Re-boot the engine on this project (session + alignment are saved first)">
           {busy ? 'Working…' : '↻ Restart engine'}
         </Btn>
+        <RelinkButton />
         {!running && engineError && (
           <span className="text-[10px] text-bad truncate" title={engineError}>
             {engineError}
@@ -139,6 +142,71 @@ function ProjectList({ anchor, onClose }: { anchor: HTMLElement | null; onClose:
         )}
       </div>
     </Popover>
+  );
+}
+
+/** D3: find clips that moved and point the show at them. Shows the count
+ *  of missing deck slots when there are any. */
+function RelinkButton() {
+  const n = useDecks((s) => s.missing.size);
+  const [busy, setBusy] = useState(false);
+  return (
+    <Btn
+      size="sm"
+      tone={n ? 'danger' : 'solid'}
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        await relinkMissing();
+        setBusy(false);
+      }}
+      title="Find clips whose file moved (same render id, same fingerprint, then a walk of the library roots) and fix the decks, looks and scene"
+    >
+      {busy ? 'Searching…' : `Relink missing${n ? ` (${n})` : ''}`}
+    </Btn>
+  );
+}
+
+/** "Save as…" (S21): everything autosaves; this forks the show into a
+ *  sibling folder (clips referenced, not copied) and opens the fork. */
+function SaveAs({ busy, setBusy, onDone }: { busy: boolean; setBusy: (b: boolean) => void; onDone: () => void }) {
+  const project = useStore((s) => s.project);
+  const [name, setName] = useState<string | null>(null);
+  if (!project) return null;
+  const submit = async () => {
+    if (!name?.trim()) return;
+    setBusy(true);
+    const ok = await saveProjectAs(name.trim());
+    setBusy(false);
+    if (ok) onDone();
+  };
+  return (
+    <div className="flex items-center gap-2 mt-2 pt-2 border-t border-line">
+      {name == null ? (
+        <Btn size="sm" disabled={busy} onClick={() => setName(`${project.dir.split('/').pop()}-copy`)} title="Fork this show (scene, effects, decks, looks, session, alignment, pack — clips stay referenced) and open the copy. Everything else saves itself.">
+          Save as…
+        </Btn>
+      ) : (
+        <>
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') submit();
+              if (e.key === 'Escape') setName(null);
+            }}
+            onFocus={(e) => e.target.select()}
+            className="flex-1 min-w-0 h-7 px-2 text-[12px] rounded-md bg-bg border border-line2 outline-none"
+            placeholder="new show folder name"
+          />
+          <Btn size="sm" tone="solid" disabled={busy || !name.trim()} onClick={submit}>
+            {busy ? 'Saving…' : 'Save'}
+          </Btn>
+        </>
+      )}
+    </div>
   );
 }
 

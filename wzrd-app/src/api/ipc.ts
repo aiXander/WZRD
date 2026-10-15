@@ -426,6 +426,10 @@ export const projectOpen = (scenePath: string) =>
   invoke<ProjectInfo>('project_open', { scenePath });
 /** Re-boot the engine on the current scene — crash recovery. */
 export const engineRestart = () => invoke<ProjectInfo>('engine_restart');
+/** Fork the open show into a sibling folder `name` and open the fork
+ *  (studio D2): scene, effects, decks, looks, session, alignment, pack;
+ *  clips stay referenced. */
+export const projectSaveAs = (name: string) => invoke<ProjectInfo>('project_save_as', { name });
 
 // ---------- operator-UI layout (per project, `<project>/ui_layout.json`) ----------
 

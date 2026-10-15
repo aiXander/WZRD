@@ -10,7 +10,7 @@
 // DESIGN = design-colour ring, LIVE = red top bar. Drag a slot (or an
 // incoming render) onto a row / slot to file it there; ✕ on hover removes
 // it from the deck (the file stays). A slot whose file is gone shows ⚠ —
-// "Relink missing" in the project menu finds it again (D3).
+// click it (or "Relink missing" in the project menu) to find it again (D3).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { libraryIncoming, libraryItems, mediaUrl, type LibraryItem } from '../api/hub';
@@ -24,6 +24,7 @@ import {
   deleteDeck,
   moveDeck,
   moveSlot,
+  relinkMissing,
   removeSlot,
   renameDeck,
   setActive,
@@ -109,6 +110,7 @@ function absMap(m: Record<string, string[]>): Record<string, string[]> {
 /** Thumbnails + labels for every slot of every deck, one batch per change. */
 function useSlotInfo(doc: ReturnType<typeof useDecks.getState>['doc']): Record<string, SlotInfo> {
   const [info, setInfo] = useState<Record<string, SlotInfo>>({});
+  const indexed = useDecks((s) => s.indexed);
   const key = useMemo(() => {
     const paths = new Set<string>();
     doc?.decks.forEach((d) => Object.values(d.rows).forEach((ss) => ss.forEach((s) => s && paths.add(s.path))));
@@ -123,7 +125,7 @@ function useSlotInfo(doc: ReturnType<typeof useDecks.getState>['doc']): Record<s
     return () => {
       live = false;
     };
-  }, [key]);
+  }, [key, indexed]);
   return info;
 }
 
@@ -387,7 +389,7 @@ function SlotTile({
       .filter(Boolean)
       .join(' · ') || null,
     info?.region ? `made for ${regionName(pack, info.region)}` : null,
-    missing ? 'FILE MISSING — project menu → Relink missing' : null,
+    missing ? 'FILE MISSING — click to Relink (searches the library for where it went)' : null,
     onDesign ? 'Playing on DESIGN — TAKE sends it to the wall' : onLive ? 'On the wall (LIVE)' : null,
     !region ? 'drag onto a region row to play it' : onDesign ? 'click: stop on DESIGN · drag: move' : 'click: play on this region in DESIGN · drag: move',
   ]
@@ -407,7 +409,7 @@ function SlotTile({
       onDrop={onDrop}
       onClick={() => {
         if (!region) return toast('Drag this clip onto a region row first', 'warn');
-        if (missing) return toast('This clip’s file is missing — project menu → Relink missing', 'warn');
+        if (missing) return void relinkMissing();
         if (onDesign) stopClip(region, slot.path);
         else bindClip(slot.path, region);
       }}

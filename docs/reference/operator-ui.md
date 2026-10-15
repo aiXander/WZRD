@@ -80,10 +80,35 @@ scene — the crash recovery.
   + `resetActionState()`, so nothing of the previous engine leaks in.
   Hydrate fires on the engine coming back (status edge) and on the
   shell's `engine:project` event, deduped (`App.tsx::rehydrate`).
+- **Save as… (studio D2, S21)** — the only explicit save; everything else
+  autosaves. Project menu → name (default `<show>-copy`) →
+  `actions.ts::saveProjectAs` settles scene commits + `session.save`, then
+  `fork.rs::project_save_as` copies the show into a **sibling folder**:
+  every root `*.json` (scene files, session, alignment, decks, ui_layout,
+  project), `effects/`, `packs/`, `looks/` and the design draft
+  `.wzrd/design.scene.json`; media (`generated/`, …) are **not** copied —
+  every relative `"clip"` in the copied JSON becomes the absolute path
+  into the original, so both shows play the same files. Temp folder +
+  rename (no half fork); an existing name refuses. Then it opens the fork
+  (same scene file name). Like any open, both legs boot from the saved
+  scene, so the fork's wall = the design that was on screen.
+- **Relink missing (studio D3)** — project menu button (shows the missing
+  count) or click a ⚠ deck slot. `relink.rs::relink_missing {scene}` looks
+  at every deck slot, every `"clip"` in the design scene the UI passes and
+  in `looks/*.json`; per missing file: same render id (same extension) in
+  `library.db` → same fingerprint → a walk of the library roots + the
+  projects root (stat everything, fingerprint only size matches) → for a
+  file the library never saw (no id/fp), its file name. It rewrites
+  `decks.json` (under the decks write lock) and the looks itself; the
+  scene map comes back to the UI and goes through `sceneCommit` (the one
+  scene-write path), so LIVE picks it up on the next TAKE. The folders the
+  files turned up in are then listed through the hub (indexing them), so
+  slots get thumbnails back. Measured: a moved 6-clip folder → 7 refs
+  fixed in 72 ms (walk); re-moved → library lookups in 2 ms.
 - Test fixtures: `wzrd-app/scripts/fixture_projects.py` builds
-  `projects/fixture-a` + `fixture-b` (example pack, real HAP clips with
-  C2/C3 sidecars + thumbs); `--add-clip <project> --region <id>` simulates
-  an agent render landing.
+  `projects/fixture-a` + `fixture-b` (example pack, real HAP clips carrying
+  the embedded `wzrd` tag and registered in `library.db`, a "Main" deck);
+  `--add-clip <project> --region <id>` simulates an agent render landing.
 
 ## Clip decks (studio plan D1, 2026-10-15; was the gig's clip grid)
 
