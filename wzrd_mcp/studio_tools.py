@@ -287,3 +287,105 @@ async def rename_render(render: str, name: str, ctx: Optional[Context] = None) -
     except ValueError as exc:
         raise ToolError(str(exc))
     return {"renamed": renamed}
+
+
+# ---------------------------------------------------------------------------
+# D1: decks (contract L6) — the agent may fill a show's decks (S18)
+# ---------------------------------------------------------------------------
+DECKS_FILE = "decks.json"
+UNASSIGNED = "_unassigned"
+
+
+def _playable(path: Path) -> Path:
+    """*path* if it is a HAP clip or a still, else the HAP of the same render beside it."""
+    it = library.index_file(path)
+    if not it:
+        raise ToolError(f"{path} is not a media file")
+    if it["codec"] == "hap" or it["kind"] == "image":
+        return path
+    haps = [Path(f["path"]) for f in library.render(it["render_id"])["files"]
+            if f["codec"] == "hap" and not f["missing"] and Path(f["path"]).is_file()]
+    if haps:  # the one beside the mp4 first
+        return min(haps, key=lambda h: (h.parent != path.parent, h.stem != path.stem))
+    raise ToolError(f"{path.name} isn't playable yet (the engine plays HAP) — run to_hap on it first")
+
+
+def _read_decks(show_dir: Path) -> dict:
+    path = show_dir / DECKS_FILE
+    if path.is_file():
+        data = json.loads(path.read_text())
+        if data.get("schema") != 1:
+            raise ToolError(f"{path} has schema {data.get('schema')!r}; this tool writes schema 1")
+        return data
+    if (show_dir / "clipgrid.json").is_file() or any((show_dir / "generated").glob("*.mov")):
+        raise ToolError(f"show {show_dir.name!r} has no decks.json yet but has old clips — open it in the "
+                        f"WZRD app once (it migrates the old clip grid into a deck), then retry")
+    return {"schema": 1, "active": "Main", "decks": [{"name": "Main", "rows": {}}]}
+
+
+def _write_decks(show_dir: Path, data: dict) -> None:
+    path = show_dir / DECKS_FILE
+    tmp = path.with_name(f".{DECKS_FILE}.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+
+
+@tool(title="Add clip to deck", tags={"studio", "engine"}, project_arg=True)
+async def add_to_deck(
+    path: str,
+    deck: Optional[str] = None,
+    region: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Put a clip into one of the show's decks (Resolume-style clip stacks the operator plays from in the app). It is referenced in place, never copied.
+
+    The clip goes into its region's row — `region` if given, else the
+    region it was rendered for (if this show's pack has it), else the
+    unassigned row — in the first empty slot. An mp4 resolves to its HAP
+    beside it; with none, run to_hap first. Filling decks is yours to do
+    when asked; playing a clip live is the operator's.
+
+    Args:
+        path: The clip's file (HAP .mov, its mp4, or a still).
+        deck: Deck name (created if missing). Default: the deck the operator has open.
+        region: The row (a pack layer id) — overrides the clip's own region.
+    """
+    from . import project, provenance
+
+    src = Path(path).expanduser().resolve()
+    if not src.is_file():
+        raise ToolError(f"{src} is not a file")
+    clip = await asyncio.to_thread(_playable, src)
+    item = library.item(str(clip)) or library.index_file(clip)
+    show_dir = project.project_dir()
+    if not (show_dir / "scene.json").is_file():
+        raise ToolError(f"project {project.active_project()!r} has no scene.json — pass project=<show>")
+    if region:
+        provenance.region_meta(region)  # refuses an id this show's pack doesn't have
+        row = region
+    else:
+        row = UNASSIGNED
+        if item.get("region"):
+            try:
+                provenance.region_meta(item["region"])
+                row = item["region"]
+            except ToolError:
+                pass
+    data = _read_decks(show_dir)
+    name = deck or data.get("active") or "Main"
+    target = next((d for d in data["decks"] if d.get("name") == name), None)
+    if target is None:
+        target = {"name": name, "rows": {}}
+        data["decks"].append(target)
+        data.setdefault("active", name)
+    slots = target.setdefault("rows", {}).setdefault(row, [])
+    entry = {"path": str(clip), "id": item["render_id"], "fp": item["fp"]}
+    index = next((i for i, s in enumerate(slots) if s is None), len(slots))
+    if index == len(slots):
+        slots.append(entry)
+    else:
+        slots[index] = entry
+    _write_decks(show_dir, data)
+    library.add_signal(item["render_id"], "deck_add")
+    return {"show": show_dir.name, "deck": name, "row": row, "slot": index, "path": str(clip),
+            "decks_file": str(show_dir / DECKS_FILE)}

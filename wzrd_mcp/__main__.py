@@ -82,8 +82,21 @@ def main() -> None:
     app = hub.Activity(TimingMiddleware(asgi_app))
 
     import uvicorn
+
+    class HubServer(uvicorn.Server):
+        """Releases hub.lock inside uvicorn's graceful shutdown: uvicorn
+        re-raises the SIGTERM it caught once it's done, so code after
+        `run()` (and atexit) never runs on a signal."""
+
+        async def shutdown(self, sockets=None):
+            hub.STOPPING = True  # open /api/jobs long-polls return now
+            try:
+                await super().shutdown(sockets)
+            finally:
+                hub.release_lock()
+
     try:
-        uvicorn.run(app, host=args.host, port=args.port)
+        HubServer(uvicorn.Config(app, host=args.host, port=args.port)).run()
     finally:
         hub.release_lock()
 

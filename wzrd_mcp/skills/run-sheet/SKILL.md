@@ -100,6 +100,11 @@ and its region (`project=` + `region=`), so the app files it for this show.
 Watch the `spend` line in each reply (today's spend, all shows) and stop at
 the 80 % warning to ask.
 
+When the operator wants clips ready to play, `add_to_deck(path=<clip>,
+project=<show>, deck=<name>)` files each into a deck (its region's row,
+first empty slot; the HAP beside an mp4 is used). Taking a clip live stays
+theirs.
+
 Check: every region's row holds ≥ 3 clips that passed `check_frames`.
 
 ## 6. Show checklist

@@ -260,7 +260,12 @@ hub".
   deck and bind on design.
 - Log S6 signals: added to a deck; played live (seconds, from TAKE
   telemetry).
-- MCP tool `add_to_deck(path, deck?, region?)` for the agent (S18).
+- ~~MCP tool `add_to_deck(path, deck?, region?)` for the agent (S18)~~ —
+  **done 2026-10-15** (`studio_tools.py`): resolves an mp4 to its HAP
+  (the one beside it first), row = `region` > the render's region if the
+  show's pack has it > `_unassigned`, first empty slot, creates a named
+  missing deck, atomic write, logs a `deck_add` signal. It refuses a show
+  with no `decks.json` but old clips (the app's migration must run first).
 - Update `engine_tools.py`'s C5 docs and validation for absolute clip paths.
 - Migration, once on open: `clipgrid.json` + `generated/*.mov` → one deck
   "Main" with absolute paths; `fixture_projects.py` writes the new shape.

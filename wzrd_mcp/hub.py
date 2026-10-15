@@ -38,6 +38,7 @@ from .server import mcp
 APP_NAME = "wzrd-hub"
 API_VERSION = 1
 IDLE_EXIT_S = 3600.0
+STOPPING = False  # set at the start of shutdown (`__main__.HubServer`)
 _started = time.time()
 
 
@@ -283,7 +284,7 @@ async def _jobs(request, body):
     seen = _q(request, "version")
     wait = min(float(_q(request, "wait", 0) or 0), 30.0)
     deadline = time.time() + wait
-    while seen is not None and str(jobs.version()) == seen and time.time() < deadline:
+    while seen is not None and str(jobs.version()) == seen and time.time() < deadline and not STOPPING:
         await asyncio.sleep(0.25)
     rows = await _thread(jobs.recent, int(_q(request, "limit", 50) or 50))
     since = _q(request, "since")

@@ -41,5 +41,6 @@
   "find_renders": {"enabled": true, "timeout": 30},
   "label_render": {"enabled": true, "timeout": 30},
   "move_render": {"enabled": true, "timeout": 120},
-  "rename_render": {"enabled": true, "timeout": 60}
+  "rename_render": {"enabled": true, "timeout": 60},
+  "add_to_deck": {"enabled": true, "timeout": 60}
 }

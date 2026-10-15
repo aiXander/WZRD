@@ -193,7 +193,11 @@ with Xander 2026-10-15 (amends the Studio plan's S14).
 bound to `127.0.0.1:8787`, standalone from the engine. `hub.lock`
 (`{pid, port, started}` in the library's `.wzrd/`) makes it a singleton —
 a second start that finds a hub answering `/api/hello` exits 0, so the
-app's spawn race is harmless; a stale lock is taken over. It exits after
+app's spawn race is harmless; a stale lock is taken over. The lock is
+released inside uvicorn's graceful shutdown (`__main__.HubServer`):
+uvicorn ≥ 0.29 re-raises the SIGTERM it caught once done, so nothing after
+`run()` (nor `atexit`) runs on a signal. Shutdown also ends open
+`/api/jobs` long-polls at once (`hub.STOPPING`), so a restart takes ~1 s. It exits after
 `--idle-exit` s (default 3600) with no request, no in-flight call and no
 running job; the long-lived `GET /mcp` stream a connected client holds open
 doesn't count (`hub.Activity`). The app spawns it detached
@@ -286,8 +290,11 @@ project / text; best-scored first; `args` shows only what differs from the
 tool's published defaults; purged records stay as evidence), tag
 (`label_render` → `agent_tags`, notes appended `[agent] …`; the score is
 Xander's alone — `library.label(agent=True)` refuses one), and move/rename
-(`move_render` / `rename_render`, a render's mp4 + HAP together). It
-cannot delete: deletion exists only on `/api`. Skills `textureflow` and
+(`move_render` / `rename_render`, a render's mp4 + HAP together), and fill
+a show's decks (`add_to_deck` writes `<project>/decks.json`, contract L6 in
+the Studio plan; the app is the other writer and compare-and-swaps on the
+file's mtime, so both write temp + rename). It cannot delete: deletion
+exists only on `/api`. Skills `textureflow` and
 `run-sheet` teach the loop: selection → `find_renders` before a batch →
 `wait=false` + `jobs` → `check_frames`.
 
