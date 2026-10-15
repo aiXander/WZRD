@@ -14,11 +14,14 @@ import { resetLayout, setLayoutLocked, useLayout } from '../ui/layoutStore';
 import { useTelemetryDemand } from '../api/telemetryDemand';
 import { DeckSwitch, TakeButton } from './DeckPanel';
 import { ProjectMenu } from './ProjectMenu';
+import { HubLamp } from './HubLamp';
+import { JobsPill } from './JobsPill';
 import { restartEngine } from '../state/actions';
 
 // The tab bar holds the rooms you live in. Align (once per load-in) and
 // Debug sit one click down in the ⚙ menu, with the panel-layout lock.
 const ROUTES: { id: Route; label: string; key: string; hint: string }[] = [
+  { id: 'studio', label: 'Studio', key: '⌘0', hint: 'Make, browse and label content' },
   { id: 'prepare', label: 'Prepare', key: '⌘1', hint: 'Build the look: regions, effects, code' },
   { id: 'perform', label: 'Perform', key: '⌘2', hint: 'Play the show' },
 ];
@@ -92,6 +95,8 @@ export function TopBar() {
       )}
 
       <Tempo />
+      <JobsPill />
+      <HubLamp />
       <Health />
       <LayoutUnlockedChip />
 
@@ -384,7 +389,7 @@ export function HelpOverlay() {
     ['M / S', 'Mute / solo selected layer'],
     ['[ ]', 'Selected layer opacity down / up'],
     ['⇧1 – ⇧9', 'Cue look N into design'],
-    ['⌘1 ⌘2', 'Prepare · Perform'],
+    ['⌘0 ⌘1 ⌘2', 'Studio · Prepare · Perform'],
     ['⌘3 ⌘4', 'Align · Debug (in the ⚙ menu)'],
     ['⌘S', 'Save design (bakes knob pins into scene.json)'],
   ];

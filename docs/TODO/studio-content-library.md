@@ -205,25 +205,19 @@ app agent). Done — see
   selected paths and the target folder;
 - asked "what worked with style X", it cites high- and low-scored records.
 
-### A1 — hub client + library backend (SHELL)
+### A1 — hub client + library backend (SHELL) — **done 2026-10-15**
 
-- Spawn/attach per L4.
-- A health lamp in the TopBar (hub up / down / foreign), with "Restart hub".
-- A thin Rust `/api` client (commands proxy to it).
-- Read-only `library.db` access for browsing while the hub is down.
-- Thumbnails served to the webview through Tauri's asset protocol, scoped to
-  the cache, the roots and the projects root, plus a devport route for the
-  browser bridge. Today thumbs are base64 over IPC, which won't scale to a
-  500-image folder.
-- Poll the open folder every 2 s, only while Studio is mounted.
-
-**Gate:**
-- the app cold-starts with no hub → hub spawned once; a second app launch
-  attaches instead of spawning;
-- quit the app mid-render → the render finishes; 1 h idle → the hub exits;
-- a 500-image folder lists in < 1 s once indexed and thumbs fill in without
-  blocking;
-- the browser bridge shows the same thumbs.
+The app attaches to or spawns the hub (detached, absolute `uv` + extras,
+own process group), shows a hub lamp with Start/Restart, proxies `/api`
+(`hub_call`), browses `library.db` read-only with the hub's JSON shapes,
+and serves media as asset-protocol URLs (devport `/file` for the browser
+seat). Gate evidence: cold start spawned once, a relaunch attached, the hub
+survived the app process being killed; a 500-image folder lists in
+≈ 13 ms; idle exit verified on a throwaway hub (`--idle-exit 5`). Not yet
+seen: a *render* finishing after an app quit (needs H2's `/api/render`; the
+hub is a separate process group, so nothing in the app can stop it).
+Done — see [../reference/operator-ui.md](../reference/operator-ui.md)
+"Studio + the hub".
 
 ### P1 — file preview source (ENG + SHELL) — **done 2026-10-15**
 
@@ -236,39 +230,18 @@ mounts the slot. Done — see
 [../reference/render-engine.md](../reference/render-engine.md) §1b
 "Studio file preview".
 
-### A2 — the Studio room (UI)
+### A2 — the Studio room (UI) — **done 2026-10-15**, on-screen check owed
 
-- A room first in the order: **Studio** · Prepare · Align · Perform (Debug
-  stays last).
-- Layout:
-
-```
-┌ TopBar: rooms · design/live + health (+ hub lamp) · jobs pill (running n · $ today) ┐
-│ Roots + folder tree │ folder grid: static thumbs, score/tag badges,   │ Preview monitor │
-│ ("Index this        │ running-job tiles (elapsed / ETA), "show ≤ N"   │ (S10), record:  │
-│  folder")           │ filter, multi-select                            │ tool, args,     │
-│                     │                                                 │ styles, score,  │
-│                     │                                                 │ tags, notes,    │
-│                     │                                                 │ "made for" chip │
-├─────────────────────┴── style tray (selection) · target folder ───────────────────┤
-```
-
-- Keys (only while no input has focus):
-  - arrows: move; space: play in the monitor;
-  - `0–9`: score; `T`: tag (autocomplete); `N`: note; `M`: move;
-  - `⌫`: delete media (record kept; two-step confirm for multi-select);
-  - "delete ≤ N in this folder".
-- The jobs pill opens running / finished / failed / lost / cancelled jobs
-  with their args and a Cancel button.
-- No telemetry subscriptions in this room.
-
-**Gate:**
-- label 20 renders by keyboard in < 1 min;
-- an agent render appears as a running tile within one poll and is
-  replaced by its result;
-- the style tray round-trips to `studio_selection()`;
-- LIVE keeps 60 fps with the monitor playing (perf gate plus an AFK block in
-  [afk-test-session.md](afk-test-session.md)).
+Studio is the first tab (⌘0 — ⌘1/⌘2 stay Prepare/Perform so show keys
+don't move): tree · grid · monitor + record · style tray, the plan's keys,
+jobs pill + hub lamp in the TopBar. Gate evidence: 20 scores by keyboard
+(40 keys) all landed in `library.db`; an agent's `to_hap` over MCP showed
+as a running tile 0.4 s after the call and as its result 0.9 s after it
+ended; tray ⇄ `selection.styles` both ways; mp4 plays in the monitor.
+**Owed:** the native HAP monitor + LIVE 60 fps on screen —
+[afk-test-session.md](afk-test-session.md) block B9. Done — see
+[../reference/operator-ui.md](../reference/operator-ui.md) "Studio + the
+hub".
 
 ### R1 — Render panel + buttons (SHELL + UI)
 

@@ -132,8 +132,12 @@ agents.
   Studio monitor alone renders no composite. The source is dropped (decode
   thread exits on channel disconnect — `video::tests::
   dropping_a_clip_ends_its_decode_thread`) on `preview.file null` **and**
-  whenever the slot's params switch away from `file`, so a webview that
-  forgets to close it can't leak a thread. Open cost lands on the render
+  whenever a *visible* non-file slot takes over (`Core::set_preview_visible`),
+  so a webview that forgets to close it can't leak a thread. Not on a
+  hidden non-file config: those arrive transiently (React StrictMode's dev
+  double-mount, a page reload) on the preview-cfg channel, which the render
+  thread drains *after* the command queue — dropping there closed a file
+  `preview.file` had just opened (found 2026-10-15). Open cost lands on the render
   thread (first-frame decode + staging alloc, ≈ 3–8 ms once per pick —
   one frame, inside budget). Cost is charged to `Stage::PreviewPresent` /
   `GpuPass::Preview`; bench: `studio-preview` (§2.10), which attaches an

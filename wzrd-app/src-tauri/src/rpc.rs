@@ -208,6 +208,16 @@ pub fn preview_set_source(state: State<AppState>, source: String) -> Result<Valu
         .map_err(|e| format!("{e:#}"))
 }
 
+/// Studio monitor (studio plan P1): open one HAP clip / still for the
+/// `"studio"` preview slot, or close it (`path: None`). Never touches a leg.
+#[tauri::command]
+pub fn preview_file(state: State<AppState>, path: Option<String>) -> Result<Value, String> {
+    state
+        .engine()?
+        .request("preview.file", json!({ "path": path }), DEFAULT_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// §5.6 — pre-flight probe thresholds A < B (ms of predicted full-res p95).
 #[tauri::command]
 pub fn probe_get_thresholds(state: State<AppState>) -> Result<Value, String> {

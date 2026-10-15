@@ -369,6 +369,9 @@ export type PreviewParams = {
  * `<NativeSlot>` rather than calling this directly.
  */
 export const previewSetSlot = (slot: {
+  /** `main` (default): a leg / the program view per `params`. `studio`: the
+   *  Studio monitor — shows the `previewFile` source, no leg renders. */
+  id?: 'main' | 'studio';
   x: number;
   y: number;
   width: number;
@@ -376,6 +379,18 @@ export const previewSetSlot = (slot: {
   visible: boolean;
   params?: PreviewParams;
 }) => invoke<void>('preview_set_slot', { slot: { id: 'main', ...slot } });
+type PreviewFileInfo = {
+  path: string | null;
+  kind?: 'clip' | 'still';
+  width?: number;
+  height?: number;
+  fps?: number;
+  frames?: number;
+  duration_s?: number;
+};
+/** Open one HAP clip / still for the `studio` slot (`null` closes it and
+ *  ends its decode thread). Engine `preview.file`. */
+export const previewFile = (path: string | null) => invoke<PreviewFileInfo>('preview_file', { path });
 /** `underlay`: the preview sits under a transparent page, HTML draws over it.
  *  `window`: `WZRD_PREVIEW=window`, the old child window above the page. */
 export const previewModeGet = () => invoke<'underlay' | 'window'>('preview_mode');

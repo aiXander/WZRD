@@ -32,18 +32,21 @@ the other half was guessed ranges (e.g. `scale: 50` on a 0.5–8 control).
 Every scalar now uses the effect descriptor's `min`/`max` (`LayerParams.tsx
 ::rangeFor`, extended to include an out-of-range scene value).
 
-## Rooms (`src/routes/`, ⌘1 Prepare · ⌘2 Perform; Align ⌘3 + Debug ⌘4 via ⚙)
+## Rooms (`src/routes/`, ⌘0 Studio · ⌘1 Prepare · ⌘2 Perform; Align ⌘3 + Debug ⌘4 via ⚙)
 
 | Room | What it's for | Key files |
 |---|---|---|
+| **Studio** | Make, browse and label content (studio plan A2): library roots + folder tree, a folder grid of static thumbs, the preview monitor + the focused item's record and labels, the style tray. Full map: "Studio + the hub" below. | `Studio.tsx`, `components/studio/*`, `state/studio.ts` |
 | **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both, "Show regions" switch), inspector (target, effect cards, dials; Duplicate / Delete / deselect × in its header), bottom drawer = **clip grid** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `LayerList.tsx` (layer + region lists), `LayerInspector.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
 | **Align** | §2.8 warp; side panel with the "projector bumped?" recovery hint, test patterns, background (lit-background warning). | `Align.tsx`, `WarpCanvas.tsx`, `state/alignment.ts` |
 | **Perform** | The booth: monitor (native preview, deck-coloured frame, PREVIEW/PROGRAM label), a slim looks strip + auto-pilot under it, one mixer panel with a Layers \| Clips tab (`MixerPanel`, tab in localStorage `wzrd.perform.mixerTab`; only the visible tab mounts, so the clip poll runs only on Clips), selected layer's dials, deck panel (switch, cue monitor, TAKE/CUT/PULL, FADE, BAR/NOW), masters + BLACK/FLASH/FREEZE + room audio. | `Perform.tsx`, `DeckPanel.tsx`, `LayerStack.tsx`, `ClipGrid.tsx compact`, `LayerParams.tsx`, `LooksBank.tsx`, `MastersPanel.tsx` |
 | **Debug** | Engine internals (unchanged content, restyled), plus the plain "Performance (frame profiler)" readout of the `perf` / `perf_spike` channels — headroom, stage p95 table, threads, clips, last spike ([render-engine.md](render-engine.md) §2.9). | `Debug.tsx` |
 
-`TopBar.tsx` is shared: project menu (`ProjectMenu.tsx`), rooms (only Prepare | Perform as tabs — Align is a once-per-gig room, so it and Debug live in the ⚙ **Setup** menu with the panel-layout controls; while you're in one it shows as an extra active pill; a stored `wzrd.route=align` boots into Perform), compact DESIGN|LIVE + TAKE outside Perform,
+`TopBar.tsx` is shared: project menu (`ProjectMenu.tsx`), rooms (Studio | Prepare | Perform as tabs — Align is a once-per-gig room, so it and Debug live in the ⚙ **Setup** menu with the panel-layout controls; while you're in one it shows as an extra active pill; a stored `wzrd.route=align` boots into Perform), compact DESIGN|LIVE + TAKE outside Perform,
 tempo (beat lamps from the `transport` channel, BPM double-click/scroll,
-TAP, `1` = bar line here), health (Audio / FPS / reload verdict / Engine —
+TAP, `1` = bar line here), the **jobs pill** (running renders · $ today,
+`JobsPill.tsx`) and **hub lamp** (`HubLamp.tsx`) — both "Studio + the hub"
+below — health (Audio / FPS / reload verdict / Engine —
 a restart button while the engine is down), ADOPT for agent edits, help
 overlay (`?`), toasts. While the engine is down a red banner under the bar
 (`EngineDownBanner`) shows the reason and one "Restart engine" button.
@@ -119,6 +122,84 @@ newest first, placed by the C2 provenance sidecar's `region`.
   `useClipsPoller` — that load is NEW's baseline), then polled every 2 s
   only while a `ClipGrid` is mounted (`useClipsLivePoll`, refcounted). A
   scan that overlapped a `clip_file` keeps the optimistic filing.
+
+## Studio + the hub (studio plan A1/A2, 2026-10-15)
+
+The content side of the app. The plan with its decisions S1–S22 and
+contracts L1–L6 is [../TODO/studio-content-library.md](../TODO/studio-content-library.md);
+the hub's own side (routes, `library.db` schema, jobs) is
+[mcp-server.md](mcp-server.md).
+
+- **The hub** is `python -m wzrd_mcp` on `127.0.0.1:8787` (`/mcp` for
+  agents, `/api/*` JSON for the app), a separate process that owns
+  `~/WZRD/media/.wzrd/library.db`, jobs, the Studio selection and spend.
+  `src-tauri/src/hub.rs`: at startup a monitor thread calls `GET
+  /api/hello` — a WZRD answer = attach, a foreign answer = red lamp "port
+  taken" (never spawn), nothing + a live `hub.lock` pid = wait, nothing
+  else = **spawn detached**: absolute `uv` (`WZRD_UV`, else
+  `~/.local/bin/uv`, `/opt/homebrew/bin/uv`…; a Finder launch has no
+  `PATH`) `run --directory <repo> --extra mcp --extra engine --extra
+  islands python -m wzrd_mcp`, own process group, output appended to
+  `.wzrd/hub.log`, a reaper thread so no zombie. The hub **outlives the
+  app** and exits itself after 1 h idle; the monitor re-checks every 3 s
+  and emits `hub:status`, but never respawns on its own — "Start hub" /
+  "Restart hub" (SIGTERM the pid, wait for the port, spawn) do. Repo dir:
+  `WZRD_REPO`, else this checkout (compile-time). Commands: `hub_status`,
+  `hub_ensure`, `hub_restart`, `hub_call {method, path, body}` — the thin
+  `/api` proxy (a dependency-free loopback HTTP/1.1 client, chunked
+  replies handled, 60 s timeout for the job long-poll).
+- **Reads work with the hub down.** `src-tauri/src/library.rs` opens
+  `library.db` **read-only** (`rusqlite`, bundled SQLite) and returns the
+  hub's exact JSON shapes (`library._item`, `/api/library/list`,
+  `/api/library/item`, tags), so the webview has one `LibraryItem` type.
+  `api/hub.ts::listFolder` asks the hub when it's up (that call also
+  indexes what's new — S3 "index on open") and the reader otherwise.
+  Writes (label, move, delete, roots, selection) are hub-only.
+- **Media are URLs, never base64.** Tauri's asset protocol
+  (`protocol-asset` feature, scope granted at runtime by
+  `library::allow_scope` to the library home, every root and the projects
+  root — re-run by `library_roots`) and, for the browser seat, the
+  devport's `GET /file?path=` (same scope check, one `Range` so `<video>`
+  seeks). `api/hub.ts::mediaUrl` picks. 500 indexed items list in ≈ 13 ms
+  (hub) / 11 ms (reader); thumbs lazy-load.
+- **State:** `state/hub.ts` (its own small store — the hub outlives
+  project switches): lamp status (Tauri event; the browser seat polls
+  `hub_status`), the job feed (a refcounted long-poll on `/api/jobs`: the
+  Studio room and the pill hold it; 2 s while a job runs, else up to 20 s,
+  returning early on any change), and **`selection.project` = the open
+  show's folder name**, written on every show switch and whenever the hub
+  comes up — agent tools called without `project=` act on it.
+  `state/studio.ts`: open folder, listing (2 s poll while Studio is
+  mounted), grid selection + cursor, "show ≤ N", monitor item, and the
+  mirror of the hub's L5 selection. The **open folder is the target
+  folder** (S1, written on open); grid selection → `items`; the tray →
+  `styles` (debounced 300 ms; the poll reads it back, so an agent's
+  edit shows in the tray; a pending write blocks the read-back). Labels
+  are optimistic (`pendingLabels` survive a poll until the hub echoes).
+- **The room:** `Split` `studio.cols` = `FolderTree` (roots, lazy tree,
+  "+ Add folder…" = a new root indexed in place, "Index this folder" =
+  deep index) · `MediaGrid` (static thumbs, score/codec/tag badges, a
+  dashed tile per file still being indexed, a **job tile** per running
+  job whose `dest` is this folder with elapsed/ETA, "show ≤ N", "Delete
+  ≤ N…" = dry run then confirm) · `Monitor` + `RecordPanel` (score
+  buttons, tags (agent tags ✦, read-only), notes, made-for chip, settings,
+  inputs, "+ Styles"); `StyleTray` along the bottom with "Renders land
+  in". Tiles drag out as `application/x-wzrd-paths` (the tray takes them;
+  D1's deck slots will). No telemetry subscriptions.
+- **Monitor (S10):** HAP → `<NativeSlot id="studio">` + `previewFile(path)`
+  (engine `preview.file`, render-engine.md §1b — no leg renders);
+  mp4/webm → `<video>`; stills → `<img>`; DXV/other → thumb + "Make
+  playable". Unmount sends `preview.file null`.
+- **Keys** (only while no input has focus; Studio's own handler in
+  `Studio.tsx`, and `shortcuts.ts` returns early in Studio so T/M/digits
+  never TAKE/mute/select layers): arrows move (⇧ extends; ↑↓ step a grid
+  row via `gridColumns()`), space = play in the monitor, `0–9` score, `−`
+  clears it, `T` tags (autocomplete from every tag in use, Tab completes),
+  `N` notes (⌘Enter), `M` move (folders the tree knows, or a typed
+  absolute path), `⌫` delete media (records kept — S7; a multi-selection
+  needs a second ⌫ within 2 s), Esc deselects. Keys act on the selection,
+  else the cursor item (`studio.ts::targets`). Measured: 20 scores = 40
+  keys, all landed in `library.db` in order.
 
 ## Mechanisms worth knowing
 
@@ -264,10 +345,12 @@ The same Vite build runs in a plain browser: `src/api/transport.ts` picks
 Tauri `invoke`/`listen` inside the shell, else `wsBridge.ts` — JSON-RPC to
 the engine's WS (`ws://127.0.0.1:9123`, `?ws=` overrides; declares
 `hello {actor:"ui"}`) plus, for everything the shell does itself (files,
-looks, projects, clips, engine restart), the shell's **debug-build-only
+looks, projects, clips, engine restart, hub + library), the shell's **debug-build-only
 HTTP twin** `src-tauri/src/devport.rs` on `127.0.0.1:9124`
 (`WZRD_DEVPORT`), reached through Vite's `/__shell` proxy. It calls the
-same Rust command functions on the main thread, so a browser seat follows
+same Rust command functions on the main thread (the `hub_*` /
+`library_*` twins run on the connection thread instead — a hub call can
+block for seconds — and `GET /file?path=` serves library media), so a browser seat follows
 project switches (the old Vite file middleware was pinned to
 `WZRD_SCENE`). A switch shows up in the browser as an engine-socket
 reconnect → hydrate. Use it to drive and screenshot the UI with browser
@@ -299,6 +382,17 @@ window (underlay included) even when it is covered.
   `layoutStore.notifyLayout()`** (fires `wzrd:layout`, which NativeSlot
   listens to) — a ResizeObserver misses a pure move. `layoutSplit` already
   covers drags, swaps and panes mounting/unmounting.
+- **Preview-slot configs and engine commands travel on different
+  channels** (`preview_set_slot` → the host's preview-cfg channel; RPCs
+  like `preview.file` → the engine command queue, drained first). React
+  StrictMode's dev double-mount sends a hidden "main" slot config between
+  `preview.file` calls, so the engine only drops the Studio file when a
+  *visible* non-file slot takes over — never on a hidden one (2026-10-15).
+- **`tauri dev` doesn't watch `render-core/`**: after an engine edit,
+  `touch wzrd-app/src-tauri/src/lib.rs` to make it rebuild.
+- **`import('/src/…')` from a page can get a second module instance**
+  after Vite HMR updated that module (`?t=` URLs): calling `setRoute` on it
+  does nothing. Drive the UI through DOM clicks, or reload first.
 - **Monaco `onChange` must route by the changed model's URI, never by
   `activeTab`**: on a tab switch `@monaco-editor/react` can fire a change
   for the new (transient `loading`) model through the previous render's
@@ -335,8 +429,9 @@ D / L hands · T take · ⇧T cut · P pull · B blackout · F (hold) flash · Z
 freeze · Tab tap · `` ` `` bar line · ↑↓ / 1–9 select layer · M / S mute /
 solo · [ ] opacity · ⇧1–9 cue look (⇧⌥ = GO) · ⌘S save design (inside the
 code drawer: save the open file) · Delete/⌫ delete selected layer · ⌘Z
-restore last deleted layer · Esc deselect (Prepare) · ⌘1 Prepare · ⌘2
-Perform · ⌘3 Align · ⌘4 Debug · ? help.
+restore last deleted layer · Esc deselect (Prepare) · ⌘0 Studio · ⌘1
+Prepare · ⌘2 Perform · ⌘3 Align · ⌘4 Debug · ? help. Studio has its own
+single keys (see "Studio + the hub"); none of the above fire there.
 Faders: press = jump, ⇧-drag = fine, double-click = reset. **No mouse
 wheel** — the wheel always scrolls the panel (a future MIDI bridge drives
 faders through the same `actions.ts` calls; gaps listed in

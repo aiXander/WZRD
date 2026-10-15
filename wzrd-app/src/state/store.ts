@@ -106,7 +106,7 @@ export type EffectInput = {
 };
 export type Catalog = Record<string, { kind: string; inputs: EffectInput[] }>;
 export type Toast = { id: number; text: string; tone: 'info' | 'warn' | 'bad' | 'ok' };
-export type Route = 'prepare' | 'align' | 'perform' | 'debug';
+export type Route = 'studio' | 'prepare' | 'align' | 'perform' | 'debug';
 
 export type LogLine = {
   level: string;
@@ -152,7 +152,7 @@ interface Store {
   effects: string[];
   setEffects: (e: string[]) => void;
 
-  // route. Prepare and Perform are the tab bar; Align (done once at load-in)
+  // route. Studio (make + label content), Prepare and Perform are the tab bar; Align (done once at load-in)
   // and Debug live one click down in the TopBar's ⚙ menu.
   route: Route;
   setRoute: (r: Route) => void;
@@ -280,7 +280,7 @@ function initialRoute(): Route {
     const r = localStorage.getItem('wzrd.route');
     // Never reopen on Align: it's a load-in step, and its arrow keys nudge
     // the projector warp — not where a launch mid-gig should land.
-    if (r === 'prepare' || r === 'perform' || r === 'debug') return r;
+    if (r === 'studio' || r === 'prepare' || r === 'perform' || r === 'debug') return r;
   } catch {
     /* ignore */
   }

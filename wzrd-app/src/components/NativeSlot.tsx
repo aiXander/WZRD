@@ -19,12 +19,15 @@ import { previewMode } from '../api/previewMode';
 import { LAYOUT_EVENT } from '../ui/layoutStore';
 
 export function NativeSlot({
+  id = 'main',
   params,
   native = previewMode() === 'underlay',
   className = '',
   style,
   children,
 }: {
+  /** `studio` = the Studio monitor (shows the `previewFile` source). */
+  id?: 'main' | 'studio';
   params?: PreviewParams;
   /** Push this slot to the shell. Defaults to "the underlay is active";
    *  Perform also passes true in `window` mode (the child window). */
@@ -65,7 +68,7 @@ export function NativeSlot({
         const key = `${slot.x},${slot.y},${slot.width},${slot.height},${slot.visible}`;
         if (!force && key === last) return;
         last = key;
-        previewSetSlot({ ...slot, params: p }).catch(() => {
+        previewSetSlot({ id, ...slot, params: p }).catch(() => {
           last = ''; // retry on the next event
         });
       });
@@ -94,7 +97,7 @@ export function NativeSlot({
       window.removeEventListener('focus', onForce);
       previewSetSlot({ x: 0, y: 0, width: 0, height: 0, visible: false }).catch(() => {});
     };
-  }, [native, paramsKey]);
+  }, [native, paramsKey, id]);
 
   return (
     <div ref={ref} className={className} style={style}>

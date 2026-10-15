@@ -2105,6 +2105,15 @@ impl Core {
     /// The host owns the §3.1 responsibility — set false whenever the
     /// preview window is hidden or occluded.
     pub fn set_preview_visible(&mut self, visible: bool) {
+        // Another room's slot (a leg / program view) actually showing
+        // releases the Studio file and its decode thread, even if the
+        // webview never sent `preview.file null`. Only a *visible* slot
+        // counts: a hidden non-file config also arrives transiently (a
+        // React remount, a page reload), on a different channel than
+        // `preview.file`, and must not close a file that is about to show.
+        if visible && !self.preview_params.file && self.file_preview.take().is_some() {
+            log::info!("file preview closed (a leg view took the slot)");
+        }
         if self.preview_visible != visible {
             log::info!(
                 "native preview {}",
@@ -2117,11 +2126,6 @@ impl Core {
     /// Host-set preview view parameters (D3) — which composite, program
     /// view, dim, photo/light weights. Takes effect next frame.
     pub fn set_preview_params(&mut self, params: PreviewParams) {
-        // Leaving the Studio slot releases its file (and decode thread),
-        // even if the webview never sent `preview.file null`.
-        if !params.file && self.file_preview.take().is_some() {
-            log::info!("file preview closed (slot switched to a leg view)");
-        }
         self.preview_params = params;
     }
 

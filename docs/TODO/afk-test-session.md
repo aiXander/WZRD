@@ -67,6 +67,7 @@ point is one sitting.
 | Block | Owner | Duration | What it proves |
 |---|---|---|---|
 | B8 | operator-UI sprint 2026-10-14 | ≈ 10 min | the native preview follows resized/swapped panels; Perform layer × deletes |
+| B9 | Studio plan P1/A2 (2026-10-15) | ≈ 6 min | a HAP file plays natively in the Studio monitor while LIVE holds 60 fps; leaving Studio frees its decoder |
 
 ### B8 — operator-UI sprint (2026-10-14): panel layout × native preview, Perform delete
 
@@ -120,6 +121,53 @@ misses, record "selector drift" and move on.
 **After the run:** delete `projects/b8`. Pass → delete this block and its
 runbook row. A misplaced native picture is a `notifyLayout()` gap — see the
 operator-ui.md trap on NativeSlot moves.
+
+---
+
+### B9 — Studio plan P1/A2 (2026-10-15): the Studio monitor plays HAP natively, LIVE holds 60 fps
+
+**Owner:** [studio-content-library.md](studio-content-library.md) P1 (the
+engine's `preview.file` source, reference: render-engine.md §1b "Studio
+file preview") + A2 (the Studio room). The bench (`studio-preview`) proved
+the cost windowless; the underlay picture itself is invisible to the
+browser seat and to webview screenshots. **Duration:** ≈ 6 min.
+
+**Preconditions:** `projects/fixture-a` with HAP clips in
+`generated/` (else `uv run python wzrd-app/scripts/fixture_projects.py`);
+the hub may or may not be running (the app attaches or spawns it).
+
+**Commands** (repo root, wrapped in `caffeinate -dims`):
+
+    export B=test_results/afk-b9 && mkdir -p $B
+    (cd wzrd-app && WZRD_SCENE=../projects/fixture-a/scene.json pnpm tauri dev > ../$B/app.log 2>&1 &)
+    until grep -q "hub: up" $B/app.log; do sleep 1; done; sleep 5
+    source .claude/skills/afk-session/scripts/appenv.sh
+    sidebyside
+    G=$PWD/projects/fixture-a/generated; CLIP=$(ls $G/*.mov | head -1)
+    curl -s -X POST localhost:8787/api/roots -d "{\"path\":\"$G\"}" > /dev/null
+    room studio
+    js "import('/src/state/studio.ts').then(async m=>{await m.openDir('$G');m.useStudio.getState().setMonitor('$CLIP');return 'ok'})"
+    sleep 4; shot b9-studio-monitor
+    rpc preview.snapshot '{"width":480}' > $B/snapshot.txt    # leg must read "file"
+    snap > $B/perf-studio.txt                                  # LIVE, engine window presenting
+    grep "file preview" $B/app.log > $B/file-preview.log
+    room perform; sleep 3
+    grep "file preview" $B/app.log >> $B/file-preview.log      # must end with "file preview closed"
+    curl -s -X POST localhost:8787/api/roots/remove -d "{\"path\":\"$G\"}" > /dev/null
+
+**Pass criteria:** `b9-studio-monitor.png` shows the clip moving image in
+the Studio monitor (top right), fitted inside the frame with black bars, no
+offset. `snapshot.txt` has `"leg": "file"`. `perf-studio.txt`:
+`presenting: true`, `interval_p95` ≤ 17.5 ms (60 fps with the monitor
+playing). `file-preview.log` ends with `file preview closed`. If `room
+studio` doesn't switch (module-instance drift), click the Studio tab:
+`js "document.querySelector('button[title^=\\\"Make, browse\\\"]').click()"`.
+
+**Results:** _(filled by the runner)_
+
+**After the run:** pass → delete this block and its runbook row, and drop
+"on-screen check owed" from the Studio plan's P1/A2 pointers. A picture in
+the wrong place is a `notifyLayout()` gap (operator-ui.md traps).
 
 ---
 

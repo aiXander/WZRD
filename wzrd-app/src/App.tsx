@@ -33,12 +33,14 @@ import { hydrateOverrides, loadLooks, refreshLiveScene, resetActionState } from 
 import { dropPendingCommits } from './state/sceneCommit';
 import { useAutopilot } from './state/autopilot';
 import { useClipsPoller } from './state/clips';
+import { useHubWire } from './state/hub';
 import { ensureMasks } from './state/masks';
 import { loadLayout } from './ui/layoutStore';
 import { useShortcuts } from './state/shortcuts';
 import { useAutopilotDriver } from './state/autopilot';
 import { HelpOverlay, Toasts, TopBar } from './components/TopBar';
 import { EngineDownBanner } from './components/ProjectMenu';
+import { Studio } from './routes/Studio';
 import { Prepare } from './routes/Prepare';
 import { Align } from './routes/Align';
 import { Perform } from './routes/Perform';
@@ -176,6 +178,7 @@ export default function App() {
   useShortcuts();
   useAutopilotDriver();
   useClipsPoller();
+  useHubWire();
 
   // The whole room re-tints with the deck (see index.css `--deck`).
   useEffect(() => {
@@ -302,6 +305,7 @@ export default function App() {
       <TopBar />
       <EngineDownBanner />
       <main className="flex-1 min-h-0 overflow-hidden">
+        {route === 'studio' && <Studio />}
         {route === 'prepare' && <Prepare />}
         {route === 'align' && <Align />}
         {route === 'perform' && <Perform />}

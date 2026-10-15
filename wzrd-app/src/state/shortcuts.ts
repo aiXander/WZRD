@@ -41,8 +41,15 @@ function legBindings(): string[] {
   return (parseScene(json)?.bindings ?? []).map((b) => b.id);
 }
 
-// ⌘1/⌘2 = the tab bar (Prepare · Perform); ⌘3/⌘4 = the ⚙ menu's rooms.
-const ROUTE_KEYS: Record<string, Route> = { '1': 'prepare', '2': 'perform', '3': 'align', '4': 'debug' };
+// ⌘0 Studio · ⌘1 Prepare · ⌘2 Perform = the tab bar (Studio got ⌘0 so the
+// show rooms keep their keys); ⌘3/⌘4 = the ⚙ menu's rooms.
+const ROUTE_KEYS: Record<string, Route> = {
+  '0': 'studio',
+  '1': 'prepare',
+  '2': 'perform',
+  '3': 'align',
+  '4': 'debug',
+};
 
 export function useShortcuts() {
   useEffect(() => {
@@ -89,6 +96,9 @@ export function useShortcuts() {
         return;
       }
       if (st.route === 'align') return; // arrows/keys belong to the warp canvas
+      // Studio's single keys (score digits, T tag, M move, ⌫ delete, arrows)
+      // are its own (routes/Studio.tsx) — never TAKE / mute / layer delete.
+      if (st.route === 'studio') return;
       const ids = legBindings();
       const sel = st.selectedBindingId;
       const idx = sel ? ids.indexOf(sel) : -1;

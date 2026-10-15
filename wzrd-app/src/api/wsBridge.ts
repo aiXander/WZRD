@@ -27,6 +27,7 @@ const ENGINE: Record<string, (a: any) => [string, Record<string, unknown>]> = {
   promote: (a) => ['promote', { fade_ms: a.fadeMs, quantize: a.quantize }],
   pull: () => ['pull', {}],
   preview_set_source: (a) => ['preview.setSource', { source: a.source }],
+  preview_file: (a) => ['preview.file', { path: a.path ?? null }],
   transport_set: (a) => [
     'transport.set',
     { bpm: a.bpm ?? null, resync: !!a.resync, sync: !!a.sync, leg: a.leg ?? null },
@@ -72,6 +73,14 @@ const SHELL_COMMANDS = new Set([
   'look_read',
   'look_write',
   'look_delete',
+  'hub_status',
+  'hub_ensure',
+  'hub_restart',
+  'hub_call',
+  'library_dir',
+  'library_roots',
+  'library_record',
+  'library_tags',
 ]);
 
 let ws: WebSocket | null = null;

@@ -1,7 +1,7 @@
 # Helpers for driving a running `pnpm tauri dev` WZRD app unattended.
 #   source .claude/skills/afk-session/scripts/appenv.sh   (repo root; set B=<results dir> first, app log in $B/app.log)
 # js '<expr>'   evaluate in the app webview, print the result (devport :9124 + app log)
-# room <name>   switch room (prepare|align|perform|debug) via the store's setRoute
+# room <name>   switch room (studio|prepare|align|perform|debug) via the store's setRoute
 # rpc <method> '<json params>'   one engine JSON-RPC call over ws :9123
 # snap          perf.snapshot summary (interval, drops, knob latency, GPU passes)
 # knobs         100 Hz live brightness wiggle for 10 s (stamps knob_submit)

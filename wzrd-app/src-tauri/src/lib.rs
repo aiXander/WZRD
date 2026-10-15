@@ -16,7 +16,9 @@ mod clips;
 #[cfg(debug_assertions)]
 mod devport;
 mod engine;
+mod hub;
 mod layout;
+mod library;
 mod projects;
 mod rpc;
 #[cfg(target_os = "macos")]
@@ -338,6 +340,13 @@ pub fn run() {
                 }
             }
 
+            // Studio plan A1: attach to (or spawn) the hub off the main
+            // thread, then keep its lamp current; scope media URLs.
+            let hub = hub::Hub::new();
+            hub.spawn_monitor(app.handle().clone());
+            app.manage(hub);
+            library::allow_scope(app.handle());
+
             #[cfg(debug_assertions)]
             devport::spawn(app.handle().clone());
             Ok(())
@@ -356,6 +365,7 @@ pub fn run() {
             rpc::promote,
             rpc::pull,
             rpc::preview_set_source,
+            rpc::preview_file,
             rpc::probe_get_thresholds,
             rpc::probe_set_thresholds,
             rpc::alignment_get,
@@ -389,6 +399,14 @@ pub fn run() {
             clips::clip_file,
             layout::ui_layout_read,
             layout::ui_layout_write,
+            hub::hub_status,
+            hub::hub_ensure,
+            hub::hub_restart,
+            hub::hub_call,
+            library::library_dir,
+            library::library_roots,
+            library::library_record,
+            library::library_tags,
         ])
         .on_window_event(|window, event| {
             // The engine window has its own handler (engine.rs); closing the
