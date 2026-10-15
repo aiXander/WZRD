@@ -21,7 +21,8 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from . import project, provenance
+from . import jobs, library, project, provenance
+from ._keepalive import with_keepalive
 from ._log import log_progress
 from .file_io import resolve_input_async
 from .media_tools import attach_clip
@@ -68,7 +69,7 @@ def _conform_saved(image: Any, size: Optional[tuple[int, int]]) -> Any:
 # ---------------------------------------------------------------------------
 # Background subtraction
 # ---------------------------------------------------------------------------
-@tool(title="Subtract background (image)", tags={"content"})
+@tool(title="Subtract background (image)", tags={"content"}, project_arg=True)
 async def subtract_background_frame(
     generated_image: str,
     background_image: str,
@@ -106,7 +107,7 @@ async def subtract_background_frame(
     }
 
 
-@tool(title="Subtract background (video)", tags={"content"})
+@tool(title="Subtract background (video)", tags={"content"}, project_arg=True)
 async def subtract_background_video(
     video: str,
     background_image: str,
@@ -156,7 +157,7 @@ async def subtract_background_video(
 # ---------------------------------------------------------------------------
 # Surface preparation
 # ---------------------------------------------------------------------------
-@tool(title="Detect projection surface", tags={"surface"})
+@tool(title="Detect projection surface", tags={"surface"}, project_arg=True)
 async def detect_projection_surface(
     image: str,
     margin: float = 0.01,
@@ -194,7 +195,7 @@ async def detect_projection_surface(
     }
 
 
-@tool(title="Align images", tags={"surface"})
+@tool(title="Align images", tags={"surface"}, project_arg=True)
 async def align_images(
     source_image: str,
     target_image: str,
@@ -225,7 +226,7 @@ async def align_images(
     }
 
 
-@tool(title="Darken surface", tags={"surface"})
+@tool(title="Darken surface", tags={"surface"}, project_arg=True)
 async def darken_surface(
     image: str,
     max_brightness: float = 0.25,
@@ -269,7 +270,7 @@ async def darken_surface(
     return response
 
 
-@tool(title="Prepare surface", tags={"surface"})
+@tool(title="Prepare surface", tags={"surface"}, project_arg=True)
 async def prepare_surface(
     night_image: str,
     day_image: Optional[str] = None,
@@ -322,7 +323,7 @@ async def prepare_surface(
 # ---------------------------------------------------------------------------
 # Regions (islands)
 # ---------------------------------------------------------------------------
-@tool(title="Extract color regions", tags={"regions"})
+@tool(title="Extract color regions", tags={"regions"}, project_arg=True)
 async def extract_color_regions(
     image: str,
     max_colors: int = 8,
@@ -400,7 +401,7 @@ async def extract_color_regions(
     }
 
 
-@tool(title="Reproject region video", tags={"regions"})
+@tool(title="Reproject region video", tags={"regions"}, project_arg=True)
 async def reproject_video(
     video: str,
     x: int,
@@ -498,7 +499,8 @@ def _tf_target() -> tuple[str, str]:
     return os.getenv("TEXTUREFLOW_APP", "wzrd-textureflow"), os.getenv("WZRD_MODAL_ENV", "wzrd")
 
 
-@tool(title="TextureFlow animation", tags={"generate", "textureflow"}, open_world=True)
+@tool(title="TextureFlow animation", tags={"generate", "textureflow"}, open_world=True,
+      project_arg=True, render=True)
 async def texture_flow(
     images: Optional[list[str]] = None,
     n_seconds: Optional[float] = None,
@@ -538,6 +540,9 @@ async def texture_flow(
     upscaled (~6 min warm); for tests set use_upscale=false AND
     upscale_esrgan=false (~30 s at 384x384). A cold GPU adds ~1 min
     (textureflow_warm before a show). Media args take a local path or URL.
+    The mp4 lands in the media library (dest=); the preview videos
+    (first_pass_video, control_signal_preview, mapping_motion_preview) are
+    scratch under the library's .wzrd/intermediates/.
 
     Args:
         images: 1-6 style images driving content, textures and colors. Required unless a recipe supplies them.
@@ -561,9 +566,9 @@ async def texture_flow(
         upscale_esrgan: ESRGAN to 1920 px long side (default true; sharp/realistic, less ideal for organic looks). Runs even with use_upscale=false.
         seed: 0-2147483647. Omit for random; the used seed is returned, pass it back to reproduce.
         output_codec: "h264" (default) or "hevc10" (smaller, higher fidelity, not decodable everywhere).
-        region: Optional pack layer id this render is for (e.g. "fabric_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
+        region: Optional pack layer id this render is for (e.g. "fabric_left"). Recorded in the render's record with that layer's box (resolved against this call's project).
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
-        hap: Also write the engine-playable HAP clip + thumbnail (`clip`, `thumb` in the result) — default true.
+        hap: Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.
         recipe: A style recipe name (list_recipes): its style images and settings become the defaults; every argument you pass wins. Add width/height (the region's aspect), and control_input or diffusion_mask for the target.
     """
     # First statement on purpose: locals() is exactly the tool's parameters here.
@@ -576,7 +581,7 @@ async def texture_flow(
         args = apply_recipe(recipe, args)
     elif not images:
         raise ToolError("texture_flow needs images= (1-6 style images) or recipe=")
-    sent = dict(args)  # local paths, before packing — what the sidecar records
+    sent = dict(args)  # local paths, before packing — what the record keeps
     region_info = provenance.region_meta(region) if region else {}
     quick = args.get("use_upscale") is False and args.get("upscale_esrgan") is False
     provenance.check_spend(_TF_EST_QUICK_USD if quick else _TF_EST_FULL_USD, allow_over_cap)
@@ -586,12 +591,18 @@ async def texture_flow(
     mb = sum(len(b) for b in files.values()) / 1e6
     log_progress("texture_flow", f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
     tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
-    res = await tf.render.remote.aio(args=args, files=files)
+    res = await with_keepalive(tf.render.remote.aio(args=args, files=files), ctx, "TextureFlow")
 
+    # The main video is the library item; the previews are scratch beside the job.
     response: dict = {}
+    scratch = library.intermediates_dir() / (jobs.current_job.get() or f"texture_flow_{project.stamp()}")
     for key, out in res["outputs"].items():
-        path = project.output_path(f"texture_flow_{key}", Path(out["filename"]).suffix or ".mp4",
-                                   kind=project.GENERATED)
+        ext = Path(out["filename"]).suffix or ".mp4"
+        if key == "output_video":
+            path = library.output_path("texture_flow", ext)
+        else:
+            scratch.mkdir(parents=True, exist_ok=True)
+            path = str(scratch / f"{key}{ext}")
         await asyncio.to_thread(Path(path).write_bytes, out["bytes"])
         response[key] = path
     response.update(seed=res["params"].get("seed"), params=res["params"],
@@ -659,7 +670,7 @@ _LAYERPACK_TAGS_SCHEMA = {
 }
 
 
-@tool(title="Build layer pack", tags={"regions", "engine"})
+@tool(title="Build layer pack", tags={"regions", "engine"}, project_arg=True)
 async def build_layerpack(
     masks: list[str],
     surface_image: Optional[str] = None,
@@ -805,7 +816,7 @@ def _starter_scene(pack_dir: Path) -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 # Preview
 # ---------------------------------------------------------------------------
-@tool(title="Simulate projected view", tags={"preview"})
+@tool(title="Simulate projected view", tags={"preview"}, project_arg=True)
 async def simulate_view(
     projector_video: str,
     surface_image: str,

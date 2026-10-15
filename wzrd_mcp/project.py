@@ -12,7 +12,7 @@ paths, chaining tools keeps working unchanged.
 Layout (created lazily, per project)::
 
     projects/<name>/
-      project.json        locked canvas + spend cap (C1; absent = legacy project)
+      project.json        locked canvas (C1; absent = legacy project)
       scene.json          engine entry point (authored by the engine/UI)
       effects/            project-local WGSL effects   <- render-core convention
       packs/<pack>/       layer packs (pack.json + masks/ + references/)
@@ -26,9 +26,17 @@ Layout (created lazily, per project)::
 resolves a scene's `pack` relative to the scene file and looks for effects in
 `<scene_dir>/effects/`, so a project folder *is* a scene directory.
 
-The active project comes from (in order): `set_project()` during this session,
-the `WZRD_PROJECT` env var, else `"default"`. Override the root that projects
-live under with `WZRD_PROJECTS_ROOT`.
+The project a call resolves against: its `project=` argument, else the show
+open in the app (the Studio selection's `project`, L5), else the
+`WZRD_PROJECT` env var, else `"default"`. There is deliberately no sticky
+per-chat choice: MCP 2026-07-28 is sessionless, so the hub can't tell two
+Claude chats apart, and a shared sticky value would let one chat redirect
+another's output (Xander's call, 2026-10-15). Override the root that
+projects live under with `WZRD_PROJECTS_ROOT`.
+
+Generators (nano_banana, texture_flow, kling_*, …) no longer write here: their
+outputs go to the media library (`library.output_path`); only venue tools and
+`dest="project"` calls use `output_path` below.
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ import os
 import re
 import shutil
 import tempfile
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 
@@ -55,8 +64,8 @@ PACKS = "packs"
 _DEFAULT_PROJECT = "default"
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
-# Session-level active project, set via the `set_project` MCP tool.
-_active_project: str | None = None
+# The running tool call's `project=` (set by `logged_tool`).
+call_project: ContextVar[str | None] = ContextVar("wzrd_call_project", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -78,17 +87,23 @@ def slugify(name: str) -> str:
 
 
 def active_project() -> str:
-    """Name of the project new outputs are written to."""
-    if _active_project:
-        return _active_project
+    """Name of the project this call resolves against (see the module docstring)."""
+    if name := call_project.get():
+        return name
+    try:
+        from . import library
+
+        if name := library.selection().get("project"):
+            return slugify(name)
+    except Exception:  # noqa: BLE001 — no library yet is not an error here
+        pass
     env = os.getenv("WZRD_PROJECT")
     return slugify(env) if env else _DEFAULT_PROJECT
 
 
 def set_project(name: str) -> Path:
-    """Make *name* the active project for this session, creating it if needed."""
-    global _active_project
-    _active_project = slugify(name)
+    """Make *name* the project for the rest of this call, creating it if needed."""
+    call_project.set(slugify(name))
     path = project_dir()
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -124,7 +139,6 @@ def describe() -> dict:
         "project_dir": str(root),
         "exists": root.is_dir(),
         "canvas": meta.get("canvas") if meta else None,
-        "spend_cap_usd": (meta or {}).get("spend_cap_usd", DEFAULT_SPEND_CAP_USD),
         "subdirs": {
             k: str(root / k)
             for k in (SURFACES, GENERATED, VIDEO, REGIONS, CAPTURES, PACKS)
@@ -133,11 +147,11 @@ def describe() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# project.json — the locked canvas (C1, D7)
+# project.json — the locked canvas (C1, D7). Its old `spend_cap_usd` is
+# ignored: the cap is daily and global now (`jobs.py`).
 # ---------------------------------------------------------------------------
 PROJECT_FILE = "project.json"
 PROJECT_SCHEMA = 1
-DEFAULT_SPEND_CAP_USD = 20.0
 _TIERS = {1: "1K", 2: "2K", 4: "4K"}
 
 
@@ -236,30 +250,20 @@ def lock_canvas(value: str) -> tuple[int, int]:
             f"project); a canvas is chosen once, for new projects only — start a new project"
         )
     root.mkdir(parents=True, exist_ok=True)
-    data = {"schema": PROJECT_SCHEMA, "spend_cap_usd": DEFAULT_SPEND_CAP_USD, **(meta or {})}
+    data = {"schema": PROJECT_SCHEMA, **(meta or {})}
     data["canvas"] = list(size)
     write_project_file(data)
     return size
 
 
-def set_spend_cap(usd: float) -> None:
-    """Change the active project's soft spend cap (writes project.json)."""
-    if usd < 0:
-        raise ValueError("spend_cap_usd must be >= 0")
-    project_dir().mkdir(parents=True, exist_ok=True)
-    data = {"schema": PROJECT_SCHEMA, **(read_project_file() or {})}
-    data["spend_cap_usd"] = float(usd)
-    write_project_file(data)
-
-
 # ---------------------------------------------------------------------------
 # Output paths
 # ---------------------------------------------------------------------------
-def _stamp() -> str:
+def stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _unique(directory: Path, stem: str, ext: str) -> Path:
+def unique(directory: Path, stem: str, ext: str) -> Path:
     """First free `<stem><ext>`, `<stem>_2<ext>`, … in *directory*."""
     candidate = directory / f"{stem}{ext}"
     n = 2
@@ -278,14 +282,14 @@ def output_path(tool: str, ext: str, kind: str = GENERATED, name: str = "") -> s
     """
     if ext and not ext.startswith("."):
         ext = f".{ext}"
-    stem = slugify(name) if name else f"{tool}_{_stamp()}"
-    return str(_unique(kind_dir(kind), stem, ext))
+    stem = slugify(name) if name else f"{tool}_{stamp()}"
+    return str(unique(kind_dir(kind), stem, ext))
 
 
 def output_dir(tool: str, kind: str = GENERATED, name: str = "") -> str:
     """Reserve a fresh output *directory* inside the active project."""
-    stem = slugify(name) if name else f"{tool}_{_stamp()}"
-    path = _unique(kind_dir(kind), stem, "")
+    stem = slugify(name) if name else f"{tool}_{stamp()}"
+    path = unique(kind_dir(kind), stem, "")
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
 
@@ -340,11 +344,12 @@ async def download_async(
     kind: str = GENERATED,
     ext: str = "",
     name: str = "",
+    dest: str | None = None,
 ) -> str:
-    """Stream a remote result into the active project; returns the local path.
+    """Stream a remote result to *dest* (a reserved path — generators pass a
+    `library.output_path`), else into the active project; returns the path.
 
-    This is the landing point for every remote tool call (FAL, TextureFlow):
-    results come home to disk instead of being re-hosted.
+    Results come home to disk instead of being re-hosted.
     """
     import httpx
 
@@ -353,7 +358,7 @@ async def download_async(
 
         ext = Path(urlparse(url).path).suffix
 
-    dest = Path(output_path(tool, ext, kind=kind, name=name))
+    dest = Path(dest) if dest else Path(output_path(tool, ext, kind=kind, name=name))
     async with httpx.AsyncClient(follow_redirects=True, timeout=300) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()

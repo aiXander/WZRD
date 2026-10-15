@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 from pathlib import Path
 from typing import Optional, Union
 
@@ -18,7 +19,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.utilities.types import Image
 
-from . import project
+from . import library, project
 from .file_io import resolve_input_async
 from .server import tool
 
@@ -121,7 +122,7 @@ async def view_media(
     return out
 
 
-@tool(title="Concatenate videos", tags={"content", "video"})
+@tool(title="Concatenate videos", tags={"content", "video"}, dest_arg=True)
 async def concat_videos(
     videos: list[str],
     seamless_loop: bool = False,
@@ -148,7 +149,7 @@ async def concat_videos(
     if len(videos) < 2:
         raise ToolError("concat_videos needs at least 2 videos")
     local = await asyncio.gather(*(resolve_input_async(v, suffix=".mp4") for v in videos))
-    out_path = project.output_path("concat_videos", ".mp4", kind=project.VIDEO)
+    out_path = library.output_path("concat_videos", ".mp4")
     info = await asyncio.to_thread(
         _concat, local, out_path,
         drop_boundary_frames=drop_boundary_frames, seamless_loop=seamless_loop, crf=crf, codec=codec,
@@ -189,89 +190,94 @@ async def check_frames(
 
 
 # ---------------------------------------------------------------------------
-# Playable clips (gig contract C3): <stem>.mp4 -> <stem>.mov (HAP) + <stem>.thumb.jpg
+# Playable clips (Studio S8): <stem>.mp4 -> <stem>.mov (HAP) beside it, same render id
 # ---------------------------------------------------------------------------
-def make_clip(video: str, codec: str = "hap") -> dict:
-    """Transcode *video* to the project's HAP clip + thumbnail (blocking).
+def _beside_ok(src: Path) -> bool:
+    """A HAP may go next to its source: a real folder we can write, not scratch."""
+    import tempfile
 
-    A source already in `generated/` gets its `.mov` beside it (same stem —
-    the app pairs them by name); any other source lands in `generated/`.
+    tmp = Path(tempfile.gettempdir()).resolve()
+    return os.access(src.parent, os.W_OK) and not src.is_relative_to(tmp) and \
+        not src.is_relative_to(library.wzrd_dir())
+
+
+def _same_render(a: Path, b: Path) -> bool:
+    """Is *a* already a file of *b*'s render (an earlier HAP of it — replaced, not duplicated)?"""
+    try:
+        return library.resolve_id(str(a)) == library.resolve_id(str(b))
+    except ValueError:
+        return False
+
+
+def make_clip(video: str, codec: str = "hap") -> dict:
+    """Transcode *video* to a HAP `.mov` the engine plays (blocking).
+
+    The clip goes beside its source with the same stem (S8: the mp4 stays the
+    master, the HAP is a disposable cache); a source in a temp folder (a
+    downloaded URL) or an unwritable one sends it to the library instead.
     """
-    from wzrd.clips import thumbnail, to_hap
+    from wzrd.clips import to_hap
 
     src = Path(video).resolve()
-    gen = project.kind_dir(project.GENERATED).resolve()
-    mov = src.with_suffix(".mov") if src.parent == gen else Path(
-        project.output_path("to_hap", ".mov", name=src.stem))
+    if _beside_ok(src):
+        mov = src.with_suffix(".mov") if src.suffix.lower() != ".mov" else src.with_name(f"{src.stem}_hap.mov")
+        if mov.exists() and not _same_render(mov, src):
+            mov = project.unique(src.parent, mov.stem, ".mov")  # a foreign file of that name stays
+    else:
+        mov = Path(library.output_path("to_hap", ".mov", name=src.stem))
     info = to_hap(src, mov, codec)
-    thumb = thumbnail(src, mov.with_suffix(".thumb.jpg"))
-    return {"clip": str(mov), "thumb": thumb,
-            "hap": {k: info[k] for k in ("codec", "size", "padded", "mb")}}
+    return {"clip": str(mov), "hap": {k: info[k] for k in ("codec", "size", "padded", "mb")}}
 
 
 async def attach_clip(result: dict, video_key: str, hap: Union[bool, str]) -> dict:
-    """After a render tool downloads its mp4: add the HAP clip (C3) to *result*
-    and make the `.mov` sidecar's parent the mp4. `hap` = False, True ("hap")
-    or a codec name."""
+    """After a render tool downloads its mp4: add the HAP clip to *result*,
+    recorded as a variant of the mp4 (same render id). `hap` = False, True
+    ("hap") or a codec name."""
     if not hap or not result.get(video_key):
         return result
     codec = hap if isinstance(hap, str) else "hap"
     clip = await asyncio.to_thread(make_clip, result[video_key], codec)
     result.update(clip)
     prov = result.setdefault("_provenance", {})
-    parents = prov.get("parent") if isinstance(prov.get("parent"), dict) else {}
-    parents[clip["clip"]] = str(Path(result[video_key]).resolve())
-    prov["parent"] = parents
+    prov.setdefault("variant_of", {})[clip["clip"]] = str(Path(result[video_key]).resolve())
     return result
 
 
-def _source_region(video: str) -> dict:
-    """region/source_box from a video's own sidecar, for its clip's sidecar."""
-    import json
-
-    from .provenance import sidecar_path
-
-    try:
-        meta = json.loads(sidecar_path(Path(video).resolve()).read_text())
-    except (OSError, ValueError):
-        return {}
-    return {k: meta.get(k) for k in ("region", "source_box")}
-
-
-@tool(title="Video to HAP clip", tags={"content", "engine"}, idempotent=True)
+@tool(title="Video to HAP clip", tags={"content", "engine"}, idempotent=True, project_arg=True, render=True)
 async def to_hap(video: str, codec: str = "hap", region: Optional[str] = None,
                  ctx: Optional[Context] = None) -> dict:
-    """Make a video playable by the engine: a HAP .mov + 320 px thumbnail in the project's generated/ (the clip grid picks it up).
+    """Make a video playable by the engine: a HAP .mov beside the source (same stem, same render id — labels are shared).
 
     texture_flow and kling_* already do this for their own renders
-    (hap=True); use this for any other video. Dimensions are padded to
-    multiples of 4, fps kept. HAP is 5-10x bigger than H.264 — keep sources
-    as mp4 for transfer. The clip's sidecar inherits the source's region.
+    (hap=True); use this for any other video, a DXV from the Resolume
+    library included. Dimensions are padded to multiples of 4, fps kept.
+    HAP is 5-10x bigger than H.264: the mp4 stays the master, the HAP is a
+    disposable cache. A URL source lands in the library (dest=).
 
     Args:
         video: Path or URL of the source video.
         codec: "hap" (default, smallest), "hap_q" (better colour, ~2x size) or "hap_alpha".
-        region: Pack layer id the clip is for, when the source doesn't record one (a stitched or subtracted video) — files it in that region's clip-grid row.
+        region: Pack layer id the clip is for, when the source records none (a stitched or subtracted video).
     """
     from .provenance import region_meta
 
-    info = region_meta(region) if region else None  # refuse an unknown id before transcoding
+    info = region_meta(region) if region else {}  # refuse an unknown id before transcoding
     path = await resolve_input_async(video, suffix=".mp4")
     result = await asyncio.to_thread(make_clip, path, codec)
-    result["_provenance"] = info or _source_region(path)
+    result["_provenance"] = {**info, "variant_of": {result["clip"]: path}}
     return {"video": path, **result}
 
 
-@tool(title="Extract frames", tags={"content"})
+@tool(title="Extract frames", tags={"content"}, dest_arg=True)
 async def extract_frames(
     video: str,
     at: Optional[list[Union[float, str]]] = None,
     count: Optional[int] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Pull stills out of a video into the project — e.g. a clip's last frame as the next keyframe or start frame.
+    """Pull stills out of a video into the media library — e.g. a clip's last frame as the next keyframe or start frame.
 
-    Default: the first and last frame. Stills are PNG in generated/.
+    Default: the first and last frame. Stills are PNG (dest= picks the folder).
 
     Args:
         video: Path or URL of the video.
@@ -291,7 +297,7 @@ async def extract_frames(
 
     def one(t: Union[float, str]) -> dict:
         label = t if isinstance(t, str) else f"{float(t):.2f}s".replace(".", "_")
-        out = project.output_path("extract_frames", ".png", name=f"{stem}_{label}")
+        out = library.output_path("extract_frames", ".png", name=f"{stem}_{label}")
         return {"at": t, "path": extract_frame(path, t, out)}
 
     frames = [await asyncio.to_thread(one, t) for t in at]

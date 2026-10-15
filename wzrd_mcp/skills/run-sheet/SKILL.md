@@ -19,8 +19,13 @@ on the design deck only when asked, and taking anything live is theirs.
 
 `set_project(name="<venue>-<date>", canvas="<projector aspect>")` — the
 canvas is locked once, so ask the projector's aspect if you don't know it
-(most are 16:9 → 1376×768). Check: the reply shows the canvas and a $20
-spend cap (raise it only on the operator's word).
+(most are 16:9 → 1376×768). Check: the reply shows the canvas and today's
+spend against the daily cap (raise it only on the operator's word).
+
+**From here on, pass `project="<venue>-<date>"` on every call** that takes
+it (import, surface, regions, pack, every render, `to_hap`). Nothing is
+remembered between calls; a call without it works on whatever show the app
+has open.
 
 ## 2. Photos → the surface
 
@@ -86,9 +91,11 @@ Load skill `textureflow` (settings, and the style recipe library).
 5. A new look the operator loves → `save_recipe(name, from_clip=<clip>,
    when_to_use=<mood, motion, which surfaces it reads on>)`, on their word.
 
-Every render lands in the clip grid by itself (HAP clip + thumbnail, filed
-in its region's row via `region=`). Watch the `spend` line in each reply and
-stop at the 80 % warning to ask.
+Every render lands in the media library (`~/WZRD/media`: the folder open in
+Studio, else `inbox/`) with its HAP clip beside it, recorded with the show
+and its region (`project=` + `region=`), so the app files it for this show.
+Watch the `spend` line in each reply (today's spend, all shows) and stop at
+the 80 % warning to ask.
 
 Check: every region's row holds ≥ 3 clips that passed `check_frames`.
 

@@ -2,7 +2,10 @@
 
 FastMCP server exposing the `wzrd` toolkit, the hosted generation models,
 TextureFlow and (locally) the engine authoring slice to an agent — Claude Code
-over streamable HTTP (`:8787/mcp`), Claude Desktop over stdio. Pins:
+over streamable HTTP (`127.0.0.1:8787/mcp`), Claude Desktop over stdio. The
+HTTP process is also the **Studio hub** (next section): it owns the media
+library database, the render jobs and the spend cap, and serves the app's
+JSON API (`/api/*`) beside `/mcp`. Pins:
 **FastMCP 4 / MCP SDK 2.x** (`pyproject.toml` `mcp` extra; the parked
 `modal_app.py` image carries the same pins). Same patterns as the motherbrain
 MCP (`~/Documents/GitHub/agent_frameworks/motherbrain/docs/reference/mcp_server.md`),
@@ -71,11 +74,19 @@ idempotent=, open_world=)` — never `@mcp.tool` by hand:
   List results (engine replies, `view_media`) pass through as content blocks
   (`fastmcp.utilities.types.Image` for images). `test.py mcp` fails any tool
   that advertises an output schema.
-- **`logged_tool` owns logging, errors and provenance**: call/result/error
+- **`logged_tool` owns logging, errors, scope and records**: call/result/error
   lines on stderr (never stdout — stdio transport), request timing, any
-  non-`ToolError` exception re-raised as `ToolError(str(exc))`, and the C2
-  sidecars for every dict result (next section). Tool bodies carry no
+  non-`ToolError` exception re-raised as `ToolError(str(exc))`, the call's
+  scope (contextvars: `project.call_project`, `library.current_dest`,
+  `jobs.current_job`), a `jobs` row for render tools, and the render record
+  of every output of a dict result (below). Tool bodies carry no
   try/except/log boilerplate; raise `ToolError` for an actionable refusal.
+- **Injected params.** `tool(project_arg=True)` adds `project=` (venue,
+  region and generator tools); `tool(render=True)` adds `dest=`, the tag
+  `render` and a job row per call (`nano_banana`, `texture_flow`, `kling_*`,
+  `to_hap`); `dest_arg=True` adds `dest=` alone (`extract_frames`,
+  `concat_videos`). They are spliced into the published signature and
+  stripped before the body runs, so bodies never see them.
 - **Annotations** are MCP behaviour hints: `open_world` = paid/remote call
   (nano_banana, kling, texture_flow), `destructive` = deletes or overwrites
   user-visible state (engine `remove_*`, `set_scene`), `read_only` = no side
@@ -101,14 +112,25 @@ never carries them. The parked Modal image mounts `tools_config.json` and
 
 ## The project folder and its locked canvas
 
-`project.py` keeps every output of a session in one folder under
-`projects/` that doubles as a render-core scene directory (`scene.json`,
-`effects/`, `packs/<pack>/`, plus `surfaces/`, `generated/`, `regions/`,
-`video/`, `captures/`). Tools reserve their destination first
-(`output_path`/`output_dir`) so libraries write straight into it.
+`project.py`: a project (a **show**) is one folder under `projects/` that
+doubles as a render-core scene directory (`scene.json`, `effects/`,
+`packs/<pack>/`, plus `surfaces/`, `generated/`, `regions/`, `video/`,
+`captures/`). Venue tools reserve their destination first
+(`output_path`/`output_dir`) so libraries write straight into it;
+generators write to the media library instead (next section).
+
+**Which project a call uses — no per-chat memory.** A call's `project=`,
+else the show open in the app (the Studio selection's `project`), else
+`WZRD_PROJECT`, else `"default"`. `set_project(name)` creates/opens a show
+and locks its canvas but sets nothing sticky; its reply says to pass
+`project=` from then on. Why: Claude Code speaks MCP 2026-07-28, which is
+sessionless — no `Mcp-Session-Id`, no per-chat marker in headers or
+`_meta` (captured 2026-10-15) — so the hub can't tell two chats apart, and
+a shared sticky value would let one chat redirect another's output. Decided
+with Xander 2026-10-15 (amends the Studio plan's S14).
 
 **`project.json`** (gig contract C1, written by the MCP, read by the app):
-`{ "schema": 1, "canvas": [w, h], "spend_cap_usd": 20 }`. Absent = a
+`{ "schema": 1, "canvas": [w, h] }` (an old `spend_cap_usd` key is ignored). Absent = a
 **legacy project**: tools size outputs from their own args as before.
 
 - **The canvas** is the one pixel frame every surface, segmentation map, mask
@@ -165,68 +187,120 @@ never carries them. The parked Modal image mounts `tools_config.json` and
   reference). Before 2026-10-10 `region_mask` pointed at the crop, so packs
   built from it stretched crops over the whole canvas.
 
-## Provenance sidecars and the spend cap
+## The hub, the media library and render records (Studio H1)
 
-**Sidecar** (gig contract C2): `<output>.meta.json` next to every media file
-(`.png .jpg .jpeg .webp .gif .mp4 .mov .webm`) a tool call created inside the
-active project — `{ "schema": 1, "tool", "args" (non-null client args +
-tool extras: model, used seed), "inputs": [local paths resolved, URLs],
-"parent": path|null (default: first local input), "created": ISO UTC,
-"est_usd", "region": layer id|null, "source_box": [x0,y0,x1,y1]|null }`.
-Reserved for the post-gig toolbox: `"rating"`. Readers ignore unknown keys;
-the app's clip grid reads `region`, `source_box`, `est_usd`, `tool`,
-`created` and the parent's sidecar (`wzrd-app/src-tauri/src/clips.rs`).
+**The hub** (`hub.py`, `python -m wzrd_mcp`): one HTTP process per machine,
+bound to `127.0.0.1:8787`, standalone from the engine. `hub.lock`
+(`{pid, port, started}` in the library's `.wzrd/`) makes it a singleton —
+a second start that finds a hub answering `/api/hello` exits 0, so the
+app's spawn race is harmless; a stale lock is taken over. It exits after
+`--idle-exit` s (default 3600) with no request, no in-flight call and no
+running job; the long-lived `GET /mcp` stream a connected client holds open
+doesn't count (`hub.Activity`). The app spawns it detached
+(`<abs uv> run --directory <repo> --extra mcp --extra engine --extra islands
+python -m wzrd_mcp`); Claude Code attaches with
+`claude mcp add --transport http wzrd http://127.0.0.1:8787/mcp`. A
+`--stdio` server shares the database (WAL) but its jobs die with it.
 
-- Written by `logged_tool` → `provenance.write_sidecars` after the body
-  returns, never by tool bodies. An output = an absolute media path in the
-  result, inside the project, modified during the call, not an input.
-  Failure to write is logged, not raised.
-- A tool that knows more returns a private `_provenance` dict (popped before
-  the agent sees the result): `est_usd` **keyed per output path** (so
-  TextureFlow's three preview videos count $0 and the cost lands once, on
-  `output_video`), `args` extras, `region`/`source_box`, `paid`.
-- **`region=<layer id>`** on `nano_banana`, `kling_*`, `texture_flow`:
-  `provenance.region_meta` looks the id up in the pack the project's
-  `scene.json` points at (else the newest `packs/*/pack.json`) and records
-  its `source_box` (else `bbox` — the engine's own fallback). Unknown id or
-  no pack → refused before any spend. The id is only recorded; it doesn't
-  change what the model is asked to do.
+**`/api/*`** (`hub.py`, Starlette `custom_route`s on the same app): thin
+JSON over `library.py` / `jobs.py`, errors `{error}` with 400/500.
+`hello`, `roots` (+`/remove`), `library/{list, item, index, label, move,
+rename, delete, delete_scored, signal, tags}`, `thumb?id=`, `selection`,
+`jobs` (long-poll on `version`, or `since`), `jobs/item`, `spend`,
+`recipes`. The exact shapes are the route functions — read `hub.py`.
+Destructive operations (delete) exist **only** here, never as MCP tools: an
+agent can't delete by construction.
 
-**Spend cap (D10)**: `spend_cap_usd` in `project.json` (default $20, also
-for legacy projects; `set_project(spend_cap_usd=…)` — only on Xander's
-word). Spent = sum of `est_usd` over the project's sidecars (rglob per
-call; fine at hundreds of files). Each paid tool calls
-`provenance.check_spend(<pre-estimate>, allow_over_cap)` before its remote
-call and refuses with the running total if it would cross the cap; after
-the call its result carries `spend: "$x of $cap"` plus a `spend_warning`
-from 80 %. Pre-estimates vs recorded cost: Nano Banana tier price ×
-images (recorded: from token usage), Kling list price × seconds (recorded:
-the same), TextureFlow $0.20 / $0.03 without upscales (recorded: billed
-container seconds × $1.95/h L40S). Prices: [hosted-models.md](hosted-models.md).
+**The library** (`library.py`): home `~/WZRD/media` (`WZRD_MEDIA_ROOT`),
+new renders in the Studio *target folder* (selection `target`) else
+`inbox/`, extra **roots** indexed in place (never moved). `.wzrd/` holds
+`library.db`, `thumbs/<render id>.jpg` and `intermediates/<job>/`
+(TextureFlow's preview videos — scratch, not library items). Generators
+reserve paths with `library.output_path`; `dest="project"` sends one call's
+outputs to the project's `generated/`, an absolute folder sends them there.
 
-## Playable clips (gig contract C3)
+**`library.db`** (SQLite, WAL; the v1 migration at the top of `library.py`
+is the schema; version in `PRAGMA user_version`, migrations run on open).
+The hub writes; the app reads it `mode=ro` to browse while the hub is down.
 
-The engine plays HAP only, so a render that should reach the wall becomes a
-clip in `generated/`, all sharing the source's stem (the app pairs them by
-name — `wzrd-app/src-tauri/src/clips.rs`):
-
-| File | Written by | Notes |
+| Table | Key | Holds |
 |---|---|---|
-| `<stem>.mp4` + `.mp4.meta.json` | the render tool | carries the cost (`est_usd`) and the prompt/args |
-| `<stem>.mov` + `.mov.meta.json` | `media_tools.make_clip` | HAP (`Hap1` default, `hap_q` / `hap_alpha` by arg); `parent` = the mp4, `region`/`source_box` copied, `est_usd` 0 |
-| `<stem>.thumb.jpg` | same | 320 px wide, middle frame; no sidecar (`provenance.THUMB_SUFFIX`) — the app has no MCP client, so it never makes one |
+| `renders` | `r_<ulid>` (a WZRD render) or `fp_<fingerprint>` (a foreign file) | the creation record (JSON), denormalised `tool/created/project/region/job/parent`, labels `score` (0–9, Xander only) / `tags` / `agent_tags` / `notes`, `signals` (deck adds, plays, live seconds), `purged`, `thumb` (abs path) |
+| `files` | absolute `path` | `dir` (abs), `render_id`, `variant` (`master`/`hap`), `fp`, size/mtime, probe (`kind`, `codec`, `w/h/frames/fps/duration_s`), `last_seen`, `missing` |
+| `jobs` | `j_<ulid>` | render-tool calls: args, `by`, `pid`, `started`/`ended` (epoch s), `ok`, `error`, `outputs`, `est_usd`, `duration_s`, `cancelled`, `dest`, `size_key`, `remote`, `project` |
+| `roots`, `selection`, `settings` | | extra roots (home row `home=1`); the Studio selection `{styles, items, target, project}`; `daily_cap_usd` |
 
-`texture_flow` and `kling_*` run it on their main output after download
-(`hap=True`; `attach_clip` adds `clip`/`thumb` to the result and the parent
-link); `to_hap` does it for any other video (a source outside `generated/`
-gets a fresh stem there; `region=` files a clip whose source carries no
-region, e.g. a stitched story). The ffmpeg side is `wzrd/clips.py`: sides padded
-(centred, black) to multiples of 4 — BC works in 4×4 blocks and the encoder
-refuses otherwise — fps and frame count kept, audio dropped; codec is a
-parameter (no platform encoder). `extract_frames` pulls stills (`"first"`,
-`"last"` — exact, from the final second — or seconds, or `count` evenly
-spaced) into `generated/`. HAP is 5–10× an H.264's size: move mp4s, make
-HAP where it plays.
+**Identity lives in the file** (`identity.py`): a render's creation record
+is embedded once at creation as the `wzrd` tag — mp4/mov: format metadata
+via `ffmpeg -map 0 -c copy -movflags use_metadata_tags` (+~350 bytes, no
+re-encode; render-core's MOV reader opens tagged HAP, checked by bench);
+png: an iTXt chunk; jpg: a COM segment `wzrd=<json>`. webp/gif/webm/heic
+carry no tag and are linked by fingerprint. **Fingerprint** =
+`<size>-<sha1(first + last 1 MiB)[:20]>`. A path is never an identity:
+labels are keyed by render id, so a Finder rename/move keeps them, and the
+record outlives a deleted file.
+
+- **Record** (the tag JSON): `{schema: 1, id, variant, tool, args, inputs:
+  [{name, path, fp}], parent: <render id>|null, created, est_usd,
+  duration_s, job, project, canvas, region, source_box}`.
+- **Written by `logged_tool` → `provenance.record_outputs`** after the body
+  returns: an output = an absolute media path in the result, modified
+  during the call, not an input, not under `.wzrd/`. Never written by tool
+  bodies; `save_recipe` is exempt (recipe files aren't renders). A tool
+  that knows more returns a private `_provenance` dict: `est_usd` keyed per
+  output path, `args` extras, `region`/`source_box`, `parent`, `paid`, and
+  `variant_of: {hap path: source path}` — that HAP shares the source's id.
+- **Indexing on open** (`library.list_folder`): unchanged files (same
+  size + mtime) are free; new/changed ones are probed on a 4-thread pool
+  and show as `pending` until the next listing. Identity order: embedded
+  tag → a known fingerprint (a moved untagged file) → a legacy `.meta.json`
+  sidecar (absorbed, left on disk, never written into the file) → foreign
+  (`fp_…`). A row whose path vanished but whose fingerprint reappears
+  elsewhere follows the file. Vanished files get `missing = 1`; `/api`
+  delete sets `purged` once a render has no file left.
+
+**Spend cap** (`jobs.py`): daily and global, default $20/day
+(`settings.daily_cap_usd`; `/api/spend` or `set_project(daily_cap_usd=…)`
+on Xander's word). Today = local midnight on, the sum of `est_usd` over
+`jobs` — a running job counts with its pre-estimate (`check_spend` writes
+it onto the job), so a parallel batch can't overshoot. Paid tools call
+`provenance.check_spend(<pre-estimate>, allow_over_cap)` before the remote
+call; their result carries `spend: "$x of $cap today"` and a warning from
+80 %. Pre-estimates vs recorded cost: Nano Banana tier price × images
+(recorded: token usage), Kling list price × seconds, TextureFlow $0.20 /
+$0.03 without upscales (recorded: billed container seconds × $1.95/h L40S).
+Prices: [hosted-models.md](hosted-models.md). `project.json`'s old
+`spend_cap_usd` is ignored.
+
+**`region=<layer id>`** on `nano_banana`, `kling_*`, `texture_flow`,
+`to_hap`: `provenance.region_meta` looks the id up in the pack the call's
+project's `scene.json` points at (else the newest `packs/*/pack.json`) and
+records its `source_box` (else `bbox`). Unknown id or no pack → refused
+before any spend.
+
+## Playable clips (Studio S8)
+
+The engine plays HAP only, so a render that should reach the wall gets a
+HAP `.mov` **beside its source, same stem, same render id** (`variant:
+"hap"` — labels are shared; the mp4 stays the master, the HAP is a
+disposable cache). `media_tools.make_clip`: a source in a temp dir (a
+downloaded URL), under `.wzrd/` or in an unwritable folder sends the HAP to
+the library instead; re-running replaces the render's own `.mov` (written
+temp + rename, so the engine playing the old one keeps its inode) but never
+overwrites a foreign file of that name. A DXV `.mov` gets `<stem>_hap.mov`.
+`texture_flow` and `kling_*` run it after download (`hap=True`;
+`attach_clip` sets `variant_of`); `to_hap` does it for any video
+(`region=` files a source that records none). No `.thumb.jpg` is written
+any more — thumbnails live in the library cache. The ffmpeg side is
+`wzrd/clips.py`: sides padded (centred, black) to multiples of 4, fps and
+frame count kept, audio dropped; codec is a parameter. `extract_frames`
+pulls stills (`"first"`, `"last"`, seconds, or `count` evenly spaced) into
+the library. HAP is 5–10× an H.264's size: move mp4s, make HAP where it
+plays.
+
+**Legacy (pre-Studio) clips** in `<project>/generated/` with C2
+`.meta.json` sidecars still work everywhere a record is read: recipes walk
+the sidecar chain, `get_scene_context` lists them, indexing absorbs them.
 
 ## Style recipes (gig P7, contract C6)
 
@@ -242,9 +316,10 @@ D16: the default is what a Finder-launched app sees). Code:
   `diffusion_mask` belong to the region), `width`/`height`, `seed` (kept in
   `source`), and WZRD-local args. `prompt` = the image prompt the style
   images were made with, lifted from their own sidecars when known.
-- **`save_recipe(name, from_clip, when_to_use, …)`** walks the C2 sidecar
-  chain from the clip (`.mov` / `.mp4` / `.thumb.jpg`; a `to_hap` clip
-  follows `parent` to its mp4) to the `texture_flow` call, copies the style
+- **`save_recipe(name, from_clip, when_to_use, …)`** walks the clip's
+  render record (the library database, else a legacy sidecar chain;
+  `parent` links to the `texture_flow` call — a HAP shares its mp4's
+  record directly), copies the style
   images downscaled to 768 px JPEG (IP-Adapter sees 224 px; ~100 kB each,
   so they're committed) plus a 640 px preview frame. Folder names are
   slugified lowercase; written via a temp dir + rename; an existing name
@@ -253,7 +328,7 @@ D16: the default is what a Finder-launched app sees). Code:
   defaults under the caller's non-null args (`images` too) and refuses a
   shaped recipe (`use_controlnet1` / `denoise < 1`) without a
   `control_input` — that would render near-black. `images` is optional
-  only with a recipe. The *merged* args go into the sidecar (`_provenance`
+  only with a recipe. The *merged* args go into the record (`_provenance`
   `args`), so a clip rendered from a recipe can be saved as a recipe again.
 - **`list_recipes(name?)`**: a compact row per recipe (`look` = a one-line
   summary of the args), or one recipe in full with absolute paths.
@@ -272,9 +347,13 @@ D16: the default is what a Finder-launched app sees). Code:
 | `media_tools.py` | `view_media` (downscaled images; one contact sheet per video), `concat_videos` (→ `wzrd/concat.py`), `to_hap` / `extract_frames` + the C3 clip helpers (→ `wzrd/clips.py`), `check_frames` (→ `wzrd/check_frames.py`: numeric clip QC — flash rate, loop seam, haze, lit share, still-vs-surface shift; thresholds and their reasons in the module docstring) |
 | `google_tools.py`, `fal_tools.py` | hosted models — [hosted-models.md](hosted-models.md) |
 | `engine_tools.py` | engine authoring slice — [render-engine.md](render-engine.md) §2.7 |
-| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, `set_project`, `import_photos` |
-| `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing + sidecar hook; 15 s progress pings during remote calls |
-| `provenance.py` | C2 sidecars, spend cap, `region=` → pack layer box |
+| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, which project a call uses, `set_project`, `import_photos` |
+| `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing + call scope, injected params, job rows, record hook; 15 s progress pings during remote calls (all paid tools, TextureFlow included) |
+| `hub.py` | the hub: `hub.lock`, idle exit, `/api/*` routes |
+| `library.py` | media root + roots + selection, `library.db` schema/migrations, indexing, labels, move/rename/delete, generator output routing |
+| `identity.py` | fingerprint, the embedded `wzrd` tag (read/write), probe, thumbnails, ULIDs |
+| `jobs.py` | job rows, status (lost = no `ended` + dead pid), ETA, the daily spend cap |
+| `provenance.py` | render records for every output (`record_outputs`), legacy sidecar reads, `region=` → pack layer box |
 | `recipe_tools.py` | style recipe library: `list_recipes`, `save_recipe`, `apply_recipe` (the `texture_flow(recipe=)` merge) |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |
 | `file_io.py`, `auth.py`, `modal_app.py`, `upload.py` | input resolution; parked cloud path |
@@ -288,7 +367,8 @@ D16: the default is what a Finder-launched app sees). Code:
   index, `load_skill`, resources and (if `kind: workflow`) prompts with no code
   change. Restart the server; clients re-read instructions on connect.
 - Verify: `uv run python test.py mcp` (boot, text-only results, all three skill
-  surfaces, prompts match workflows).
+  surfaces, prompts match workflows). Point `WZRD_MEDIA_ROOT` at a temp dir in
+  tests so they don't write into the real library.
 
 ## Considered, not done
 

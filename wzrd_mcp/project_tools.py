@@ -10,7 +10,7 @@ from typing import Optional
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from . import project
+from . import jobs, library, project
 from .server import tool
 
 
@@ -18,18 +18,22 @@ from .server import tool
 async def set_project(
     name: Optional[str] = None,
     canvas: Optional[str] = None,
-    spend_cap_usd: Optional[float] = None,
+    daily_cap_usd: Optional[float] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Choose the project folder that every subsequent tool writes its output into.
+    """Create or open a project (a show) and report it; lock a new project's canvas. Then pass project=<name> on every project tool.
 
-    A project is one self-contained folder on this machine holding everything
-    for a single mapping job — prepared surfaces, generated content, region
-    masks, layer packs, and the engine's scene.json + effects/ — so a session's
-    files stay together and the realtime engine can load them straight off disk.
+    A project is one self-contained folder on this machine holding one venue's
+    set — prepared surfaces, region masks, layer packs, and the engine's
+    scene.json + effects/ — so the realtime engine loads it straight off disk.
+    Generators (nano_banana, texture_flow, kling_*, to_hap, …) write to the
+    media library instead (~/WZRD/media: the Studio target folder, else
+    inbox/), recording the project in each render.
 
-    Call this FIRST in any content-pipeline session. Without it, output goes to
-    the project named by the WZRD_PROJECT env var, else "default".
+    Nothing is remembered between calls: the hub can't tell parallel chats
+    apart, so each venue/region/generator call names its show with
+    project=<name>. A call without it uses the show open in the app (omit
+    name here to see which one that is).
 
     A new project should lock its canvas here, once: the pixel frame every
     surface, segmentation map, mask and pack is authored in. Pick the Nano
@@ -38,13 +42,13 @@ async def set_project(
     so nothing is ever cropped or stretched. Surface tools conform photos to it
     and build_layerpack authors at it. It can never change afterwards.
 
-    Paid tools (nano_banana, kling_*, texture_flow) count against the
-    project's soft spend cap (default $20): every result reports the running
-    spend, warns at 80 %, and a call past the cap is refused.
+    Paid tools (nano_banana, kling_*, texture_flow) count against one global
+    daily spend cap (default $20/day): every result reports today's spend,
+    warns at 80 %, and a call past the cap is refused.
 
     Args:
-        name: Project name (created if it doesn't exist yet). Omit to just report the active project and list the existing ones.
-        spend_cap_usd: Change the project's spend cap — only when Xander asks for it.
+        name: Project name (created if it doesn't exist yet). Omit to report the show open in the app and list the existing ones.
+        daily_cap_usd: Change the global daily spend cap — only when Xander asks for it.
         canvas: New projects only, set once: an aspect ("16:9", "4:3", "1:1", "9:16", "21:9", "3:2", "2:3", "4:5", "5:4", "3:4" → its 1K size) or an exact native size like "2752x1536" (2K).
     """
     if name:
@@ -52,15 +56,16 @@ async def set_project(
     try:
         if canvas:
             project.lock_canvas(canvas)
-        if spend_cap_usd is not None:
-            project.set_spend_cap(spend_cap_usd)
+        if daily_cap_usd is not None:
+            jobs.set_daily_cap(daily_cap_usd)
     except ValueError as exc:
         raise ToolError(str(exc))
-    from . import provenance
-
+    current = project.active_project()
     return {
         **project.describe(),
-        "spent_usd": round(provenance.spent(), 2),
+        "use": f'pass project="{current}" on every project tool call (venue tools, region=, generators)',
+        "spend_today": jobs.spend(),
+        "media_root": str(library.media_root()),
         "projects_root": str(project.projects_root()),
         "existing_projects": project.list_projects(),
     }
@@ -96,7 +101,7 @@ def _import_one(src: Path, size: Optional[tuple[int, int]]) -> dict:
     return {"path": out, "source": str(src), "shot_size": list(shot), "size": list(img.size)}
 
 
-@tool(title="Import photos", tags={"project", "surface"})
+@tool(title="Import photos", tags={"project", "surface"}, project_arg=True)
 async def import_photos(
     paths: Optional[list[str]] = None,
     count: int = 1,

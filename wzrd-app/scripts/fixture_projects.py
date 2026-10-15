@@ -1,12 +1,14 @@
 """Build two throwaway projects for testing the app's project switcher (A1)
-and clip grid (A2) without the MCP: `<root>/fixture-a` and `fixture-b`.
+and clip grid / decks (A2, D1) without the MCP: `<root>/fixture-a` and `fixture-b`.
 
 Each is a render-core scene directory (`scene.json` + `packs/main/`, the
 example pack from `python test.py layerpack`) with a few clips in
-`generated/` following the gig plan's contracts: C3 clip files
-(`<stem>.mp4`, HAP `<stem>.mov`, `<stem>.thumb.jpg`) and C2 provenance
-sidecars (`<stem>.mp4.meta.json`, `<stem>.mov.meta.json`). One clip has no
-region (the "unassigned" row), one has no thumbnail (placeholder). Every
+`generated/` shaped like real hub renders (Studio contracts L2/L3): a
+`<stem>.mp4` master and its HAP `<stem>.mov` beside it, both carrying the
+embedded `wzrd` tag with one shared render id, and registered in the media
+library's `library.db` (rows + a cached thumbnail; `generated/` is added as a
+library root). No sidecars. One clip has no region (the "unassigned" row),
+one has no thumbnail (placeholder). Every
 library clip effect (`library/effects/`, gig plan C6) is copied into the
 project's `effects/` — a copy, never a link, as a real project gets them —
 plus the generative example effects (`render-core/examples/effects/`) the
@@ -15,9 +17,12 @@ scenes bind one per region.
     uv run python wzrd-app/scripts/fixture_projects.py              # (re)build both
     uv run python wzrd-app/scripts/fixture_projects.py --add-clip fixture-a --region left_tower
                                                                      # simulate an agent render landing
+                                                                     # (in the library's target folder / inbox/)
 
 Needs ffmpeg with the `hap` encoder. Projects root: `WZRD_PROJECTS_ROOT`,
-else `<repo>/projects` (gitignored).
+else `<repo>/projects` (gitignored). Library: `WZRD_MEDIA_ROOT`, else
+`~/WZRD/media` — writes go straight to its database, so run it while no hub
+is mid-write (WAL makes a running hub safe).
 """
 
 from __future__ import annotations
@@ -33,6 +38,8 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from wzrd_mcp import identity, library  # noqa: E402
 PACK_SRC = REPO / "test_results" / "layerpack" / "pack"
 LIBRARY_FX = REPO / "library" / "effects"
 EXAMPLE_FX = REPO / "render-core" / "examples" / "effects"
@@ -101,34 +108,35 @@ def layer_boxes(project: Path) -> dict[str, list[int]]:
     return {l["id"]: l.get("source_box") or l["bbox"] for l in pack["layers"]}
 
 
-def make_clip(project: Path, stem: str, region: str | None, hue: int, thumb: bool) -> None:
-    gen = project / "generated"
+def make_clip(project: Path, stem: str, region: str | None, hue: int, thumb: bool,
+              folder: Path | None = None) -> None:
+    gen = folder or project / "generated"
     gen.mkdir(parents=True, exist_ok=True)
     box = layer_boxes(project).get(region) if region else None
     # Rendered at the region's box size (D4: clips stay at rendered
     # resolution); HAP needs multiples of 4.
     w, h = ((box[2] - box[0]), (box[3] - box[1])) if box else (1024, 576)
     w, h = max(64, w // 4 * 4), max(64, h // 4 * 4)
-    mp4, mov, jpg = gen / f"{stem}.mp4", gen / f"{stem}.mov", gen / f"{stem}.thumb.jpg"
+    mp4, mov = gen / f"{stem}.mp4", gen / f"{stem}.mov"
     src = f"testsrc2=size={w}x{h}:rate=30:duration=4,hue=h={hue}"
     run(["ffmpeg", "-y", "-f", "lavfi", "-i", src, "-c:v", H264, "-b:v", "4M", "-pix_fmt", "yuv420p", str(mp4)])
     run(["ffmpeg", "-y", "-i", str(mp4), "-c:v", "hap", "-format", "hap", str(mov)])
-    if thumb:
-        run(["ffmpeg", "-y", "-ss", "2", "-i", str(mp4), "-frames:v", "1", "-vf", "scale=320:-2", str(jpg)])
-    else:
-        jpg.unlink(missing_ok=True)
-    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    common = {"region": region, "source_box": box}
-    (gen / f"{stem}.mp4.meta.json").write_text(json.dumps({
-        "schema": 1, "tool": "texture_flow",
-        "args": {"prompt": f"fixture clip {stem}: test pattern, hue {hue}", "seed": hue, "region": region},
-        "inputs": [], "parent": None, "created": now, "est_usd": 0.12, **common,
-    }, indent=2))
-    (gen / f"{stem}.mov.meta.json").write_text(json.dumps({
-        "schema": 1, "tool": "to_hap", "args": {"codec": "hap"},
-        "inputs": [str(mp4)], "parent": str(mp4), "created": now, "est_usd": 0, **common,
-    }, indent=2))
-    print(f"  {stem}: {w}x{h} region={region} thumb={thumb}")
+    record = {
+        "schema": identity.TAG_SCHEMA, "id": identity.new_id(), "variant": "master",
+        "tool": "texture_flow", "args": {"seed": hue, "n_seconds": 4, "width": w, "height": h},
+        "inputs": [], "parent": None,
+        "created": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "est_usd": 0.12, "duration_s": 30.0, "job": None, "project": project.name,
+        "canvas": None, "region": region, "source_box": box,
+    }
+    for path, rec in ((mp4, record), (mov, {**record, "variant": "hap"})):
+        identity.write_tag(path, rec)
+        library.index_file(path, record=rec)
+    if not thumb:  # the placeholder case
+        library.thumb_path(record["id"]).unlink(missing_ok=True)
+        with library.tx() as c:
+            c.execute("UPDATE renders SET thumb=NULL WHERE id=?", (record["id"],))
+    print(f"  {stem}: {w}x{h} region={region} thumb={thumb} id={record['id']}")
 
 
 def build(name: str, spec: dict) -> None:
@@ -142,6 +150,8 @@ def build(name: str, spec: dict) -> None:
              "bindings": spec["bindings"], "post": []}
     (project / "scene.json").write_text(json.dumps(scene, indent=2))
     print(f"{project}")
+    (project / "generated").mkdir()
+    library.add_root(str(project / "generated"))
     for stem, region, hue, thumb in spec["clips"]:
         make_clip(project, stem, region, hue, thumb)
         time.sleep(1.1)  # distinct `created` seconds → stable newest-first order
@@ -157,7 +167,7 @@ def main() -> None:
     if args.add_clip:
         project = projects_root() / args.add_clip
         stem = "tf_" + dt.datetime.now().strftime("%H%M%S")
-        make_clip(project, stem, args.region, int(time.time()) % 360, True)
+        make_clip(project, stem, args.region, int(time.time()) % 360, True, folder=library.target_dir())
         return
     for name, spec in SCENES.items():
         build(name, spec)

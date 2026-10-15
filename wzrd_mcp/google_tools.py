@@ -24,7 +24,7 @@ from google import genai
 from google.genai import errors, types
 from PIL import Image
 
-from . import project, provenance
+from . import library, project, provenance
 from ._keepalive import with_keepalive
 from ._log import log_progress
 from .file_io import resolve_input_async
@@ -183,7 +183,7 @@ async def _generate_one(
 _EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 
 
-@tool(title="Nano Banana image", tags={"generate", "image"}, open_world=True)
+@tool(title="Nano Banana image", tags={"generate", "image"}, open_world=True, project_arg=True, render=True)
 async def nano_banana(
     prompt: str,
     image_urls: Optional[list[str]] = None,
@@ -220,7 +220,7 @@ async def nano_banana(
         enable_web_search: Use Google Search grounding for current events or real-world references.
         seed: Random seed (0-2147483647). It nudges the composition but does not reproduce an image exactly.
         thinking_level: How much the model reasons before drawing. "minimal" (~30% faster, fine for simple edits), "medium" (default), or "high".
-        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
+        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in the render's record with that layer's box (resolved against this call's project).
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
     """
     image_urls = image_urls or []
@@ -267,7 +267,7 @@ async def nano_banana(
 
     paths, costs = [], {}
     for blob, usd in ok:
-        path = project.output_path("nano_banana", _EXT.get(blob.mime_type, ".png"))
+        path = library.output_path("nano_banana", _EXT.get(blob.mime_type, ".png"))
         with open(path, "wb") as f:
             f.write(blob.data)
         paths.append(path)

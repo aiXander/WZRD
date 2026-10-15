@@ -69,8 +69,15 @@ def to_hap(src: PathLike, dst: Optional[PathLike] = None, codec: str = "hap") ->
     w, h, fps, frames = get_video_info(src)
     pw, ph = -(-w // 4) * 4, -(-h // 4) * 4
     vf = ["-vf", f"pad={pw}:{ph}:({pw}-iw)/2:({ph}-ih)/2:black"] if (pw, ph) != (w, h) else []
-    _run(["ffmpeg", "-y", "-v", "error", "-i", str(src), *vf, "-an",
-          "-c:v", "hap", "-format", codec, str(dst)])
+    # Temp file + rename: a reader (the engine playing the old clip) keeps its
+    # inode and never sees a half-written file.
+    tmp = dst.with_name(f".{dst.stem}.tmp{dst.suffix}")
+    try:
+        _run(["ffmpeg", "-y", "-v", "error", "-i", str(src), *vf, "-an",
+              "-c:v", "hap", "-format", codec, str(tmp)])
+        tmp.replace(dst)
+    finally:
+        tmp.unlink(missing_ok=True)
     return {
         "path": str(dst), "codec": codec, "size": [pw, ph], "padded": (pw, ph) != (w, h),
         "fps": round(fps, 3), "frames": frames, "mb": round(dst.stat().st_size / 1e6, 1),

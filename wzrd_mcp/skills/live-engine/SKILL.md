@@ -72,13 +72,13 @@ for the left fabric") to that region.
 
 ```json
 {"select": {"id": "fabric_left"}, "effect": "videoClip",
- "params": {"image": {"clip": "generated/texture_flow_output_video_20261024-2114.mov",
+ "params": {"image": {"clip": "/Users/x/WZRD/media/inbox/texture_flow_20261024-2114.mov",
                       "placement": "region", "rate": 1.0},
             "gain": 1.0}}
 ```
 
-- `clip`: a HAP `.mov` (or a `.png`/`.jpg` still), relative to the project
-  folder. Only `.mov` plays as video — an mp4 needs `to_hap` first.
+- `clip`: a HAP `.mov` (or a `.png`/`.jpg` still) — an absolute path (library
+  clips, as `get_scene_context` lists them) or relative to the project folder. Only `.mov` plays as video — an mp4 needs `to_hap` first.
 - `placement`: `"region"` (default) fits the clip into each selected
   layer's box — the box the region's clips were rendered for; `"canvas"`
   fits it to the whole frame and the layer mask cuts it out. Both

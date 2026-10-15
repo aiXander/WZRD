@@ -1,47 +1,60 @@
-"""Provenance sidecars, the per-project spend cap, and `region=` lookup.
+"""Render records, the daily spend cap, and `region=` lookup.
 
-Gig contract C2: every media file a tool writes into the project gets a
-`<file>.meta.json` beside it — which tool made it, from what, at what cost,
-for which region. The app's clip grid files clips into region rows from it;
-the spend cap sums its `est_usd` across the project.
+Studio contract L2 (replacing the gig's C2 `.meta.json` sidecars): every media
+file a tool call creates gets a **render id** and a creation record, embedded
+in the file itself as the `wzrd` tag (`identity.write_tag`) and stored as a
+`renders` + `files` row in `library.db`. Labels live in the database, keyed by
+the id, so renaming or moving the file never loses them.
 
-Tools never write sidecars themselves. `logged_tool` calls `write_sidecars`
+Tools never write records themselves. `logged_tool` calls `record_outputs`
 after every successful call: outputs are the media paths in the result that
-the call created inside the project. A tool that knows more (cost, region,
-the model it ran) returns a private `_provenance` dict, popped before the
-result reaches the agent:
+the call created (anywhere — the library, a project, beside a source). A tool
+that knows more returns a private `_provenance` dict, popped before the result
+reaches the agent:
 
     {"est_usd": {path: usd}, "args": {...}, "region": id, "source_box": [...],
-     "parent": path | {output path: path}}
+     "parent": path | {output path: path}, "variant_of": {hap path: source path},
+     "paid": bool}
 
-`est_usd` is keyed per output so a multi-output call (TextureFlow's preview
-videos) is counted once, on the file that cost the money.
+`est_usd` is keyed per output so a multi-output call is counted once, on the
+file that cost the money. `variant_of` marks a HAP made from a source in the
+same call (or by `to_hap`): it shares the source's render id (S8).
+
+Old sidecars are still read (`legacy_sidecar`) wherever a record is looked
+up, and absorbed into the database when their folder is indexed.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from fastmcp.exceptions import ToolError
 
-from . import project
+from . import identity, jobs, library, project
 
-SIDECAR_SUFFIX = ".meta.json"
-THUMB_SUFFIX = ".thumb.jpg"  # a clip's preview (C3) — derived, no sidecar of its own
-SIDECAR_SCHEMA = 1
-WARN_AT = 0.8
-_MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm"}
+SIDECAR_SUFFIX = ".meta.json"  # legacy (gig C2), read-only now
+THUMB_SUFFIX = ".thumb.jpg"  # legacy clip preview beside a .mov (gig C3), read-only now
+RECORD_SCHEMA = identity.TAG_SCHEMA
+_NO_RECORD = {"save_recipe"}  # writes into library/recipes — not renders
 
 
 # ---------------------------------------------------------------------------
-# Sidecars
+# Records (L2)
 # ---------------------------------------------------------------------------
 def sidecar_path(path: str | Path) -> Path:
     return Path(f"{path}{SIDECAR_SUFFIX}")
+
+
+def legacy_sidecar(path: str | Path) -> Optional[dict]:
+    try:
+        return json.loads(sidecar_path(Path(path).resolve()).read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def _strings(value: Any):
@@ -72,17 +85,17 @@ def _inputs(client_args: dict) -> list[str]:
 
 
 def _outputs(result: dict, since: float, inputs: list[str]) -> list[str]:
-    """Media files in *result* that this call wrote inside the active project."""
-    root = project.project_dir().resolve()
+    """Media files in *result* that this call wrote (not inputs, not scratch)."""
+    scratch = library.wzrd_dir()
     found: list[str] = []
     for s in _strings(result):
         if not s.startswith("/") or s.endswith((SIDECAR_SUFFIX, THUMB_SUFFIX)):
             continue
         p = Path(s)
-        if p.suffix.lower() not in _MEDIA_EXTS or not p.is_file():
+        if identity.media_kind(p) is None or not p.is_file():
             continue
         p = p.resolve()
-        if str(p) in inputs or str(p) in found or not p.is_relative_to(root):
+        if str(p) in inputs or str(p) in found or p.is_relative_to(scratch):
             continue
         if p.stat().st_mtime < since - 2:
             continue
@@ -90,80 +103,99 @@ def _outputs(result: dict, since: float, inputs: list[str]) -> list[str]:
     return found
 
 
-def write_sidecars(tool: str, client_args: dict, result: dict, since: float,
-                   prov: Optional[dict] = None) -> list[str]:
-    """Write a C2 sidecar next to every output of one tool call. Returns them."""
+def _input_ref(ref: str) -> dict:
+    if ref.startswith(("http://", "https://")):
+        return {"name": ref, "fp": None}
+    try:
+        fp = identity.fingerprint(ref)
+    except OSError:
+        fp = None
+    return {"name": Path(ref).name, "path": ref, "fp": fp}
+
+
+def _render_id_of(path: str) -> Optional[str]:
+    try:
+        return library.resolve_id(path)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def record_outputs(tool: str, client_args: dict, result: dict, since: float,
+                   prov: Optional[dict] = None, job: Optional[str] = None) -> list[dict]:
+    """Tag + record every output of one tool call. Returns `[{path, id}]`."""
+    if tool in _NO_RECORD:
+        return []
     prov = prov or {}
     inputs = _inputs(client_args)
     outputs = _outputs(result, since, inputs)
+    if not outputs:
+        return []
     est = prov.get("est_usd") or {}
+    variant_of = {str(Path(k).resolve()): str(Path(v).resolve()) for k, v in (prov.get("variant_of") or {}).items()}
     local_inputs = [i for i in inputs if i.startswith("/")]
-    created = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    written = []
     default_parent = local_inputs[0] if local_inputs else None
     parents = prov.get("parent", default_parent)
-    for out in outputs:
-        meta = {
-            "schema": SIDECAR_SCHEMA,
-            "tool": tool,
-            "args": {k: v for k, v in {**client_args, **(prov.get("args") or {})}.items() if v is not None},
-            "inputs": inputs,
-            "parent": parents.get(out, default_parent) if isinstance(parents, dict) else parents,
-            "created": created,
-            "est_usd": round(float(est.get(out, 0.0)), 4),
-            "region": prov.get("region"),
-            "source_box": prov.get("source_box"),
-        }
-        path = sidecar_path(out)
-        path.write_text(json.dumps(meta, indent=2, default=str) + "\n")
-        written.append(str(path))
-    return written
-
-
-# ---------------------------------------------------------------------------
-# Spend cap (D10): soft, per project, summed from the sidecars
-# ---------------------------------------------------------------------------
-def spend_cap() -> float:
-    meta = project.read_project_file() or {}
-    return float(meta.get("spend_cap_usd", project.DEFAULT_SPEND_CAP_USD))
-
-
-def spent() -> float:
-    """Sum of `est_usd` over every sidecar in the active project."""
-    root = project.project_dir()
-    if not root.is_dir():
-        return 0.0
-    total = 0.0
-    for p in root.rglob(f"*{SIDECAR_SUFFIX}"):
+    created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    duration = round(time.time() - since, 2)
+    canvas = project.canvas()
+    input_refs = [_input_ref(i) for i in inputs]
+    args = {k: v for k, v in {**client_args, **(prov.get("args") or {})}.items() if v is not None}
+    ids: dict[str, str] = {}
+    done = []
+    # Masters first, so a HAP made in the same call finds its source's id.
+    for out in sorted(outputs, key=lambda o: o in variant_of):
+        if out in variant_of:
+            src = variant_of[out]
+            rid = ids.get(src) or _render_id_of(src) or f"fp_{identity.fingerprint(src)}"
+            master = library.render(rid)["record"] if library.query_one(
+                "SELECT 1 FROM renders WHERE id=?", (rid,)) else {}
+            if master and prov.get("region") and not master.get("region"):
+                # to_hap(region=) files a source that records none (a stitched story).
+                master = {**master, "region": prov["region"], "source_box": prov.get("source_box")}
+                with library.tx() as c:
+                    c.execute("UPDATE renders SET region=?, record=? WHERE id=?",
+                              (prov["region"], library._dumps(master), rid))
+            if not master and prov.get("region"):
+                with library.tx() as c:
+                    c.execute("UPDATE renders SET region=? WHERE id=? AND region IS NULL", (prov["region"], rid))
+            record = {**master, "id": rid, "variant": "hap"} if master else {
+                "schema": RECORD_SCHEMA, "id": rid, "variant": "hap", "tool": tool, "args": args,
+                "inputs": [_input_ref(src)], "parent": None, "created": created, "est_usd": 0.0,
+                "duration_s": duration, "job": job, "project": project.active_project(), "canvas": None,
+                "region": prov.get("region"), "source_box": prov.get("source_box"),
+            }
+        else:
+            parent = parents.get(out, default_parent) if isinstance(parents, dict) else parents
+            record = {
+                "schema": RECORD_SCHEMA, "id": identity.new_id(), "variant": "master", "tool": tool,
+                "args": args, "inputs": input_refs,
+                "parent": _render_id_of(parent) if parent and Path(parent).is_file() else None,
+                "created": created, "est_usd": round(float(est.get(out, 0.0)), 4),
+                "duration_s": duration, "job": job, "project": project.active_project(),
+                "canvas": list(canvas) if canvas else None,
+                "region": prov.get("region"), "source_box": prov.get("source_box"),
+            }
         try:
-            total += float(json.loads(p.read_text()).get("est_usd") or 0.0)
-        except (ValueError, OSError):
-            continue
-    return total
+            identity.write_tag(out, record)
+        except Exception as exc:  # noqa: BLE001 — the database row still identifies it (by fp)
+            from ._log import log_progress
+
+            log_progress(tool, f"wzrd tag not embedded in {out}: {exc}")
+        library.index_file(out, record=record)
+        ids[out] = record["id"]
+        done.append({"path": out, "id": record["id"]})
+    return done
 
 
+# ---------------------------------------------------------------------------
+# Spend cap (S15): daily, global, summed from the jobs table — see jobs.py
+# ---------------------------------------------------------------------------
 def check_spend(est_usd: float, allow_over_cap: bool) -> None:
-    """Refuse a paid call that would take the project past its cap."""
-    total, cap = spent(), spend_cap()
-    if total + est_usd > cap and not allow_over_cap:
-        raise ToolError(
-            f"spend cap: project {project.active_project()!r} has spent ${total:.2f} of its "
-            f"${cap:.2f} cap and this call costs ~${est_usd:.2f}. Ask Xander first; then call "
-            f"again with allow_over_cap=true, or raise the cap with set_project(spend_cap_usd=…)."
-        )
+    jobs.check_spend(est_usd, allow_over_cap)
 
 
 def spend_report() -> dict:
-    """The `spend` line appended to every paid tool's result (after its sidecars)."""
-    total, cap = spent(), spend_cap()
-    out: dict[str, Any] = {"spend": f"${total:.2f} of ${cap:.2f} cap"}
-    if total >= WARN_AT * cap:
-        out["spend_warning"] = (
-            f"project has used {total / cap:.0%} of its spend cap — tell Xander before "
-            f"spending more" if total < cap else
-            "project is over its spend cap — every further paid call needs Xander's OK"
-        )
-    return out
+    return jobs.spend_report()
 
 
 # ---------------------------------------------------------------------------

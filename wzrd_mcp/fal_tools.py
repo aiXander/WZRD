@@ -24,7 +24,7 @@ import fal_client
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from . import project, provenance
+from . import library, project, provenance
 from ._keepalive import with_keepalive
 from .file_io import resolve_input_async
 from .media_tools import attach_clip
@@ -236,12 +236,12 @@ async def _run_fal_tool(
 
     if output_type == "video":
         log_progress(tool_name, "Downloading video from FAL...")
-        path = await project.download_async(urls[0], tool=tool_name, kind=project.GENERATED, ext=".mp4")
+        path = await project.download_async(urls[0], dest=library.output_path(tool_name, ".mp4"))
         return {"output_video": path, "info": response_info}
 
     log_progress(tool_name, f"Downloading {len(urls)} image(s) from FAL...")
     paths = list(await asyncio.gather(*[
-        project.download_async(u, tool=tool_name, kind=project.GENERATED, ext=".jpg") for u in urls
+        project.download_async(u, dest=library.output_path(tool_name, ".jpg")) for u in urls
     ]))
     return {"output_images": paths, "info": {**response_info, "num_images": len(paths)}}
 
@@ -249,7 +249,8 @@ async def _run_fal_tool(
 # ---------------------------------------------------------------------------
 # Tool: Kling v2.5 Turbo Pro Image-to-Video
 # ---------------------------------------------------------------------------
-@tool(title="Image to video (Kling v2.5)", tags={"generate", "video"}, open_world=True)
+@tool(title="Image to video (Kling v2.5)", tags={"generate", "video"}, open_world=True,
+      project_arg=True, render=True)
 async def kling_v25_image_to_video(
     prompt: str,
     image_url: str,
@@ -274,9 +275,9 @@ async def kling_v25_image_to_video(
         tail_image_url: Optional URL or local path of an image for the last frame (start→end transition).
         negative_prompt: Things to avoid in the generation.
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
-        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
+        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in the render's record with that layer's box (resolved against this call's project).
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
-        hap: Also write the engine-playable HAP clip + thumbnail (`clip`, `thumb` in the result) — default true.
+        hap: Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.
     """
     region_info = provenance.region_meta(region) if region else {}
     usd = _KLING_V25_5S + _KLING_V25_PER_EXTRA_S * max(0, int(duration) - 5)
@@ -304,7 +305,8 @@ async def kling_v25_image_to_video(
 # ---------------------------------------------------------------------------
 # Tool: Kling v3 Image-to-Video
 # ---------------------------------------------------------------------------
-@tool(title="Image to video (Kling v3)", tags={"generate", "video"}, open_world=True)
+@tool(title="Image to video (Kling v3)", tags={"generate", "video"}, open_world=True,
+      project_arg=True, render=True)
 async def kling_v3_image_to_video(
     prompt: str,
     start_image_url: str,
@@ -333,9 +335,9 @@ async def kling_v3_image_to_video(
         negative_prompt: Things to avoid in the generation.
         cfg_scale: Guidance scale 0.0-1.0. Lower = more creative, higher = closer to prompt.
         aspect_ratio: "16:9", "9:16" or "1:1". Default: the one nearest the start image's aspect.
-        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in its provenance sidecar with that layer's box, so the clip grid files it in that region's row.
+        region: Optional pack layer id this output is made for (e.g. "pillar_left"). Recorded in the render's record with that layer's box (resolved against this call's project).
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
-        hap: Also write the engine-playable HAP clip + thumbnail (`clip`, `thumb` in the result) — default true.
+        hap: Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.
     """
     region_info = provenance.region_meta(region) if region else {}
     usd = int(duration) * (_KLING_V3_PER_S_AUDIO if generate_audio else _KLING_V3_PER_S)

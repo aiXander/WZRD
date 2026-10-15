@@ -49,13 +49,14 @@ full-frame TextureFlow render can usually be projected as-is: preview it with
 
 ## For the live engine
 
-- **`region=<pack layer id>`** on every render meant for one region: the
-  sidecar files it in that region's row of the clip grid, and the engine
+- **`region=<pack layer id>`** (with `project=<show>`) on every render meant
+  for one region: its record files it under that region, and the engine
   places it in the region's box. Render at the region's `aspect_ratio`
   (from `extract_color_regions`) — the engine contain-fits, so a matching
   aspect fills the box.
-- Each render also writes the engine-playable HAP clip + thumbnail
-  (`clip`, `thumb` in the reply). It's in the clip grid within seconds.
+- Each render also writes the engine-playable HAP clip beside the mp4
+  (`clip` in the reply, same render id). Renders land in the media library
+  (the Studio target folder, else `inbox/`); `dest=` picks another folder.
 - `check_frames(<mp4>)` on every render before it can reach the wall: a
   `flash` fail is never played (the audience lies looking up); `haze`
   means a lifted black floor that washes the surface; `loop_seam` near 1 =

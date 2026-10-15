@@ -14,7 +14,8 @@ and the base for previews.
 
 ## Steps
 
-1. `set_project("<surface-or-show-name>")` if not done.
+1. `set_project("<surface-or-show-name>")` if not done; pass
+   `project="<name>"` on every call below (nothing is remembered between calls).
 2. Pick the path by what the user has:
 
    | Photos | Call |

@@ -77,7 +77,7 @@ _BINDING_SCHEMA = {
         "effect": {"type": "string", "description": "Effect name: built-in (tint, hueCycle, flash, wobble, videoClip) or project-local (author with upsert_effect)."},
         "params": {
             "type": "object",
-            "description": 'Effect inputs: a constant ("#ffffff", 1.2) or a driver, e.g. {"driver": "audio.onset", "band": "low", "decay": 0.15}, {"driver": "clock.bars", "n": 4, "shape": "pingpong", "range": [0.2, 1.0]} (clock shapes: pingpong/sine = smooth, saw = default ramp+jump, ramp_down, square, random), {"driver": "ui.slider", "name": "x", "default": 0.1}. An `image`-type input takes a clip: {"clip": "generated/x.mov", "placement": "region"|"canvas", "rate": 1.0} (path relative to the scene dir; HAP .mov or a .png/.jpg still).',
+            "description": 'Effect inputs: a constant ("#ffffff", 1.2) or a driver, e.g. {"driver": "audio.onset", "band": "low", "decay": 0.15}, {"driver": "clock.bars", "n": 4, "shape": "pingpong", "range": [0.2, 1.0]} (clock shapes: pingpong/sine = smooth, saw = default ramp+jump, ramp_down, square, random), {"driver": "ui.slider", "name": "x", "default": 0.1}. An `image`-type input takes a clip: {"clip": "/abs/library/x.mov", "placement": "region"|"canvas", "rate": 1.0} (an absolute path — library clips — or one relative to the scene dir; HAP .mov or a .png/.jpg still).',
         },
     },
     "required": ["select", "effect"],
@@ -429,36 +429,54 @@ def _render_bindings(
     return "\n".join(lines)
 
 
-def _render_clips(scene_dir: Optional[str], depth: str) -> str:
-    """The project's playable clips (gig plan C3: HAP `.mov` under
-    `generated/`, each with a `<clip>.meta.json` sidecar naming the region it
-    was made for), newest first, as the paths an `image.clip` param takes.
-    Read from this machine's disk — the engine and this server share it."""
-    if not scene_dir or not os.path.isdir(os.path.join(scene_dir, "generated")):
-        return "clips: none (no generated/ folder next to the scene)"
+def _show_clips(scene_dir: str) -> list[tuple[str, Optional[str], float]]:
+    """(bind path, region, mtime) of every playable HAP clip made for this show:
+    library renders recorded with `project` = the scene folder's name
+    (absolute paths), plus legacy clips in `<scene>/generated/` with C2
+    sidecars (relative paths). Read from this machine's disk + library.db."""
+    out: dict[str, tuple[str, Optional[str], float]] = {}
+    try:
+        from . import library
+
+        rows = library.query(
+            "SELECT f.path, f.mtime, r.region FROM files f JOIN renders r ON r.id = f.render_id "
+            "WHERE r.project = ? AND f.codec = 'hap' AND f.missing = 0", (os.path.basename(scene_dir),))
+        for r in rows:
+            if os.path.isfile(r["path"]):
+                out[r["path"]] = (r["path"], r["region"], r["mtime"])
+    except Exception:  # noqa: BLE001 — no library is not an error here
+        pass
     gen = os.path.join(scene_dir, "generated")
-    movs = sorted(
-        (f for f in os.listdir(gen) if f.lower().endswith(".mov")),
-        key=lambda f: os.path.getmtime(os.path.join(gen, f)),
-        reverse=True,
-    )
-    if not movs:
-        return "clips: none in generated/ (render, then transcode to HAP)"
+    if os.path.isdir(gen):
+        for f in os.listdir(gen):
+            full = os.path.join(gen, f)
+            if not f.lower().endswith(".mov") or full in out:
+                continue
+            region = None
+            try:
+                with open(full + ".meta.json") as fh:
+                    region = json.load(fh).get("region")
+            except (OSError, ValueError):
+                pass
+            out[full] = (f"generated/{f}", region, os.path.getmtime(full))
+    return sorted(out.values(), key=lambda c: c[2], reverse=True)
+
+
+def _render_clips(scene_dir: Optional[str], depth: str) -> str:
+    """The show's playable clips, newest first, as the paths an `image.clip`
+    param takes (absolute for library clips, scene-relative for legacy ones)."""
+    if not scene_dir:
+        return "clips: none (no scene dir)"
+    clips = _show_clips(scene_dir)
+    if not clips:
+        return ("clips: none made for this show yet (render with project=<show>, "
+                "hap=true, or to_hap an existing video)")
     limit = None if depth == "full" else 12
-    lines = [
-        f"clips ({len(movs)} HAP in generated/, newest first; bind as "
-        f'image.clip="generated/<name>"):'
-    ]
-    for f in movs[:limit]:
-        region = None
-        try:
-            with open(os.path.join(gen, f + ".meta.json")) as fh:
-                region = json.load(fh).get("region")
-        except (OSError, ValueError):
-            pass
-        lines.append(f"  generated/{f}" + (f"  (made for region {region})" if region else ""))
-    if limit and len(movs) > limit:
-        lines.append(f"  … {len(movs) - limit} older (depth='full' lists all)")
+    lines = [f"clips ({len(clips)} HAP made for this show, newest first; bind the path as image.clip):"]
+    for path, region, _ in clips[:limit]:
+        lines.append(f"  {path}" + (f"  (made for region {region})" if region else ""))
+    if limit and len(clips) > limit:
+        lines.append(f"  … {len(clips) - limit} older (depth='full' lists all)")
     return "\n".join(lines)
 
 
@@ -684,8 +702,9 @@ async def upsert_binding(
     Playing a clip on a region (gig plan C5): effect "videoClip" (or any
     effect declaring an `image` input) with
     params {"image": {"clip": "generated/tf_0412.mov", "placement": "region",
-    "rate": 1.0}, "gain": 1.0}. `clip` is relative to the scene dir — take it
-    from the clips list get_scene_context prints. "region" (default) fits the
+    "rate": 1.0}, "gain": 1.0}. `clip` is an absolute path (library
+    clips) or relative to the scene dir — take it from the clips list
+    get_scene_context prints. "region" (default) fits the
     clip into each target layer's source_box ("contain", never stretched);
     "canvas" plays it full-frame cut by the mask. The playhead is the leg's
     clock × rate, looping. A clip that can't load comes back as a WARNING —

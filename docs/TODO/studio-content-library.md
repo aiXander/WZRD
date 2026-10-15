@@ -1,6 +1,6 @@
 # Studio: content generation, the media library and clip decks (sprint plan)
 
-> **Status: agreed with Xander 2026-10-15 (grilling session), ready to build. Nothing built yet.**
+> **Status: agreed with Xander 2026-10-15 (grilling session); building. H1 and P1 done.**
 > Every decision below is settled. Don't re-litigate them; ask Xander if
 > a build finding contradicts one. **Deadline:** everything lands by
 > **7 Nov 2026**, decks included, before the gig's dress-rehearsal week
@@ -79,7 +79,7 @@ app**, not mainly from a chat terminal:
 | S11 | **The MCP server is the hub**: a single instance, streamable HTTP on `127.0.0.1:8787` (not `0.0.0.0` when spawned by the app), standalone from the engine so they can't crash together | The app and the agents need one owner of jobs and the database |
 | S12 | **The app spawns the hub** if `GET /api/hello` doesn't answer as a WZRD hub; a lock file prevents a second copy. The hub **outlives the app** (in-flight renders finish) and **shuts itself down after 1 h idle** (no running job, no request). Claude Code sessions need the app opened first; no stdio bridge for now | Xander renders from the app; simplest correct lifecycle |
 | S13 | **App ↔ hub over a small JSON API** (`/api/*` Starlette routes beside `/mcp` on the same server, sharing the Python implementations). Agents use MCP tools. Destructive operations (delete, purge) exist **only on `/api`** | Simpler than an MCP-client crate in Rust, and the agent can't delete by construction |
-| S14 | **Generators are project-free**: `nano_banana`, `texture_flow`, `kling_*`, `to_hap`, `extract_frames`, `concat_videos` write to the library. Venue tools (`import_photos`, `prepare_surface`, `extract_color_regions`, `build_layerpack`) keep writing into the project. The **active project is per MCP session**, plus a per-call `project=` override; `region=` resolves against it. A `dest="project"` arg covers the in-between cases (a segmentation map) | Several parallel Claude sessions share one hub; today's module-global `_active_project` would let them redirect each other |
+| S14 | **Generators are project-free**: `nano_banana`, `texture_flow`, `kling_*`, `to_hap`, `extract_frames`, `concat_videos` write to the library. Venue tools (`import_photos`, `prepare_surface`, `extract_color_regions`, `build_layerpack`) keep writing into the project. ~~The active project is per MCP session~~ **Amended 2026-10-15 (build finding, Xander's call): no per-chat project.** MCP 2026-07-28 (what Claude Code speaks) is sessionless, so the hub can't tell chats apart. Every project-resolving call passes `project=`; omitted = the show open in the app (selection `project`). `set_project` creates/opens a show and locks its canvas, nothing sticky. `region=` resolves against the call's project. A `dest="project"` arg covers the in-between cases (a segmentation map) | Several parallel Claude sessions share one hub; a shared sticky project would let them redirect each other |
 | S15 | **Spend cap is daily and global**: default $20/day, warn at 80 %, the app asks before exceeding (agents get today's refusal + `allow_over_cap`). Summed from the jobs table. "$ today" sits in the jobs pill | Renders no longer belong to a project; a runaway batch is a same-day risk |
 | S16 | **Rendering from the app = a Render panel** in Studio: recipe picker, style tray, target region, key knobs (strength, length, seed), count, cost estimate, Go. Plus **More like this** (same args, new seeds), **Make playable** and **Cancel** for running jobs. Chat for creative work stays a Claude Code terminal; in-app chat is post-gig ([vj-toolbox.md](vj-toolbox.md) phase 7) | Covers the repetitive "4 more like this" loop without typing |
 | S17 | **Render tools can return immediately** (`wait=false` → job id); `jobs()` reports status; jobs can be **cancelled** (Modal `FunctionCall.cancel`, FAL cancel). Default for agents stays blocking | A full TextureFlow is 5–6 min; blocking freezes the chat |
@@ -97,77 +97,18 @@ editing this section in the same commit. On landing, each moves into
 [../reference/operator-ui.md](../reference/operator-ui.md) (L6) and
 leaves a pointer here.
 
-**L1 — library home + roots**
-
-```
-~/WZRD/media/  ($WZRD_MEDIA_ROOT)
-  inbox/                    default landing folder
-  <Xander's folders>/…      free-form, any depth
-  .wzrd/
-    library.db              L3 (SQLite, WAL mode)
-    thumbs/<key>.jpg        thumbnail cache, key = render id or fingerprint
-    hub.lock                L4
-```
-
-Extra roots are rows in the database's `roots` table, added from Studio.
-An **item** is one media file. A render's mp4 and its HAP `.mov` are two
-files of one render and share its id. No files are written beside media
-except a HAP conversion (S8). Thumbnails live only in the cache, and folder
-names carry no meaning.
-
-**L2 — the embedded `wzrd` tag** (written once by the hub at creation, never
-rewritten)
-
-- mp4/mov: format-level metadata key `wzrd`, written with
-  `ffmpeg -c copy -movflags use_metadata_tags -metadata wzrd='<json>'` into a
-  temp file + rename (verified 2026-10-15 on an mp4 and a HAP `.mov`: +345
-  bytes, no re-encode, `ffprobe` reads it back). `to_hap` copies the tag
-  with `variant: "hap"`. **Verify in H1** that render-core's MOV reader
-  (`video.rs`, which walks `moov/trak`) still opens a tagged `.mov`.
-- png: an iTXt chunk `wzrd` (PIL `PngInfo`); jpg: the COM segment.
-- JSON: `{schema: 1, id: "r_<ulid>", variant: "master"|"hap", tool, args,
-  inputs: [{name, fp}], parent: <render id>|null, created, est_usd,
-  duration_s, job, project, canvas, region, source_box}`. These are today's C2
-  keys, plus identity, plus input fingerprints so a style image is
-  recognised after its folder moves.
-
-**L3 — `library.db`** (single writer: the hub; the app opens it
-**read-only** so Studio can browse while the hub is down)
-
-| Table | Key | Holds |
-|---|---|---|
-| `renders` | `id` (`r_…` from the tag, or `fp_<fingerprint>` for a foreign file) | the L2 record (JSON), `score`, `tags`, `agent_tags`, `notes`, `signals` (S6), `purged` |
-| `files` | `path` | `render_id`, `fp`, `size`, `mtime`, `codec`, `w`, `h`, `frames`, `fps`, `last_seen`, `missing` |
-| `jobs` | `id` | `tool`, `args`, `by` (`agent`/`app`), `session`, `started`, `ended`, `ok`, `error`, `outputs`, `est_usd`, `duration_s`, `cancelled` |
-| `roots` | `path` | `home` flag, `added` |
-| `selection` | singleton | L5 |
-
-**Fingerprint** = `size` + sha1 of the first and last 1 MiB. A **path is
-never an identity**, only "last seen here": opening a folder refreshes its
-rows, and a vanished file gets `missing = 1`. Schema version in
-`PRAGMA user_version`; migrations live in the hub.
-
-**L4 — the hub** (`python -m wzrd_mcp`, streamable HTTP)
-
-- `/mcp`: the MCP tools (agents).
-- `/api/*`: JSON for the app: `hello` (`{app: "wzrd-hub", version, pid,
-  media_root}`), library list/index/move/rename/delete/purge/label,
-  roots, selection, render/cancel/jobs (an SSE or long-poll job feed), spend.
-- Singleton: `hub.lock` holds `{pid, port}`. The app calls `hello`: a
-  WZRD answer means attach; a foreign answer means a red health lamp
-  ("port 8787 taken"); no answer plus a stale lock means spawn. The spawn is
-  **detached**, so it survives the app quitting, and uses the absolute `uv`
-  path (a Finder-launched app has no shell `PATH`). The hub exits after 1 h
-  with no running job and no request.
-- Claude Code connects with
-  `claude mcp add --transport http wzrd http://127.0.0.1:8787/mcp`. `--stdio`
-  stays for Claude Desktop as its own process: it shares the database (WAL)
-  but its jobs die with it.
-
-**L5 — Studio selection** (hub state, persisted in the `selection` table):
-`{styles: [paths], items: [paths], target: dir|null, project: name|null}`.
-The app writes it on every change; the agent reads it with
-`studio_selection()`.
+**L1–L5 landed with H1 (2026-10-15)** — the library home + roots, the
+embedded `wzrd` tag, the `library.db` schema, the hub (lock, idle exit,
+`/api/*` routes) and the Studio selection now live in
+[../reference/mcp-server.md](../reference/mcp-server.md) "The hub, the media
+library and render records". Deltas from the pinned text: the record's
+`inputs` entries also carry `path`; the jpg tag is a COM segment
+`wzrd=<json>`; webp/gif/webm/heic carry no tag (linked by fingerprint);
+fingerprint = `<size>-<sha1(first + last 1 MiB)[:20]>`; `library.db` adds
+a `settings` table (`daily_cap_usd`) and denormalised columns; the hub's
+idle check ignores a client's open `GET /mcp` stream; the app spawns it
+with `--extra mcp --extra engine --extra islands`. `/api` names follow the
+app agent's list (`library/delete_scored`, `move {paths, dest}`).
 
 **L6 — decks** (`<project>/decks.json`, replaces `clipgrid.json`)
 
@@ -206,44 +147,24 @@ Rough agent time with review loops: H1 ≈ 2 d, H2 ≈ 1 d, H3 ≈ 0.5 d, A1 ≈
 P1 ≈ 1 d, A2 ≈ 2 d, R1 ≈ 1.5 d, D1 ≈ 2 d, D2 + D3 ≈ 1 d. That's ≈ 13 days of
 agent time, parallel across lanes.
 
-### H1 — the hub, the library database, identity in the file (PY)
+### H1 — the hub, the library database, identity in the file (PY) — **done 2026-10-15**
 
-- `__main__.py`: HTTP binds `127.0.0.1` by default; `hub.lock`; idle exit
-  after 1 h; `/api/hello`. `media_root()` and `roots`; the `library.db`
-  schema (L3) plus migrations.
-- Identity: a render id per call in `logged_tool` (`_log.py`); the L2 tag
-  written by `provenance.py` (replacing `write_sidecars`) on every media
-  output; `to_hap` (`wzrd/clips.py`, `media_tools.py`) copies the tag; `renders`
-  and `files` rows inserted at creation.
-- S14 routing: generators → the target folder (L5) else `inbox/`; venue tools
-  unchanged; `dest="project"`. The active project moves from the module
-  global in `project.py` to per MCP session state, plus `project=` on tools
-  that resolve a project.
-- Switch the three sidecar readers to the database, falling back to the tag
-  and then to the legacy sidecar:
-  - `recipe_tools.py` `_render_sidecar` (walks `parent` to the
-    `texture_flow` call);
-  - `engine_tools.py` (`get_scene_context` lists clips with their region);
-  - the app's `clips.rs` grid (it is replaced by D1 anyway; keep it working
-    until then).
-- Indexing (`index_folder(path, deep=False)`): fingerprint, `ffprobe`
-  (codec, size, frames), thumbnail into the cache, absorb a legacy
-  `.meta.json`.
-- S15: `check_spend` sums today's `jobs` rows. `jobs` start/end rows for
-  every tool tagged `render` in `tools_config.json`.
-- Update `wzrd-app/scripts/fixture_projects.py` to write tagged files (and
-  drop the fake `prompt` arg it passes to `texture_flow`).
-
-**Gate:**
-- a `texture_flow` and a `nano_banana` from a Claude session over HTTP land
-  in `inbox/` with an embedded tag (`ffprobe`), a `renders` row and a jobs
-  start/end pair;
-- `to_hap` on it gives a `.mov` with the same id that the HEAD engine opens;
-- rename + move the mp4 in Finder, re-open the folder → same record, new path;
-- delete it → record kept, `missing = 1`;
-- two parallel sessions with different `set_project`s don't cross;
-- the daily cap refuses at the cap;
-- `build_layerpack` still writes into the project.
+Shipped: `wzrd_mcp/hub.py` (lock, idle exit, `/api/*`), `library.py`
+(`~/WZRD/media`, roots, `library.db`, indexing on open, labels,
+move/rename/delete), `identity.py` (fingerprint, the `wzrd` tag), `jobs.py`
+(job rows, daily cap), `provenance.record_outputs` replacing sidecars;
+generators route to the library (`dest=`), venue tools stay in the project,
+`project=` per call (S14 as amended); `recipe_tools` and `get_scene_context`
+read the database with legacy-sidecar fallback; `fixture_projects.py` writes
+tagged, registered clips. Gate passed: a real Claude Code session's
+`texture_flow` + `nano_banana` landed in `inbox/` tagged, with render rows
+and job start/end pairs; the TF HAP shares the mp4's id and the release
+engine opens tagged HAP (bench, 0 stale); Finder rename + move kept the
+record, Finder delete left it `missing = 1`; the daily cap refused at the
+cap; `build_layerpack` still wrote into the project. Still owed to the app
+lane: `clips.rs` reads the database instead of sidecars (query sent to the
+app agent). Done — see
+[../reference/mcp-server.md](../reference/mcp-server.md).
 
 ### H2 — non-blocking jobs + cancel (PY)
 
@@ -256,8 +177,7 @@ agent time, parallel across lanes.
   dead).
 - ETA = median `duration_s` of the last 20 successful jobs of the same tool
   and size args.
-- Add `with_keepalive` (`_keepalive.py`) to the blocking `texture_flow`
-  path, which has none; a 6-min silent call risks a client timeout.
+- ~~Add `with_keepalive` to the blocking `texture_flow` path~~ — done in H1.
 
 **Gate:**
 - queue 4 TextureFlows from chat, keep chatting, all 4 land;

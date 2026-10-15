@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
+import inspect
 import json
 import sys
 import time
 import traceback
 from datetime import datetime
+from typing import Annotated, Optional
 
 # Global debug flag — toggled via --debug / --no-debug CLI flag
 DEBUG = True
@@ -108,23 +111,62 @@ def log_overhead(tool_name: str, req_received: float, tool_start: float,
     )
 
 
-def _with_provenance(tool: str, client_args: dict, result: dict, since: float) -> dict:
-    """Write the C2 sidecars for a call's outputs (see `provenance.py`) and,
-    for a paid call, append the project's running spend. A sidecar failure is
-    logged, never fatal — the output itself is already on disk."""
+def _with_provenance(tool: str, client_args: dict, result: dict, since: float,
+                     job: Optional[str]) -> tuple[dict, list[dict], Optional[float]]:
+    """Tag + record a call's outputs (see `provenance.py`) and, for a paid
+    call, append today's spend. Returns (result, records, recorded cost or
+    None). A record failure is logged, never fatal — the output itself is
+    already on disk."""
     from . import provenance
 
     prov = result.pop("_provenance", None)
+    records: list[dict] = []
     try:
-        provenance.write_sidecars(tool, client_args, result, since, prov)
+        records = provenance.record_outputs(tool, client_args, result, since, prov, job)
     except Exception as exc:  # noqa: BLE001
-        log_progress(tool, f"provenance sidecar skipped: {exc}")
+        log_progress(tool, f"render record skipped: {exc}")
+    cost = None
+    if prov and prov.get("est_usd") is not None:
+        cost = float(sum((prov.get("est_usd") or {}).values()))
     if prov and prov.get("paid"):
         result.update(provenance.spend_report())
-    return result
+    return result, records, cost
 
 
-def logged_tool(fn):
+def _session() -> Optional[str]:
+    """The legacy streamable-HTTP `mcp-session-id`, when a client still sends
+    one — informational only (a job's `session`). MCP 2026-07-28 clients
+    (Claude Code) are sessionless, which is why nothing keys on it."""
+    try:
+        from fastmcp.server.dependencies import get_http_request
+
+        return get_http_request().headers.get("mcp-session-id")
+    except Exception:  # noqa: BLE001 — not an HTTP request
+        return None
+
+
+#: Params `server.tool()` can add to a tool's signature; stripped before the body runs.
+_PROJECT_DOC = ("Project (show) this call works on — its files, and what region= resolves against. "
+                "Pass it on every call; omitted = the show open in the app.")
+_DEST_DOC = ('Where outputs land: omit or "library" = the Studio target folder, else the media '
+             'library\'s inbox/; "project" = the project\'s generated/ (e.g. a segmentation map); '
+             'or an absolute folder path.')
+
+
+def _injected_params(project_arg: bool, dest_arg: bool) -> list[inspect.Parameter]:
+    from pydantic import Field
+
+    out = []
+    if project_arg:
+        out.append(inspect.Parameter("project", inspect.Parameter.KEYWORD_ONLY, default=None,
+                                     annotation=Annotated[Optional[str], Field(description=_PROJECT_DOC)]))
+    if dest_arg:
+        out.append(inspect.Parameter("dest", inspect.Parameter.KEYWORD_ONLY, default=None,
+                                     annotation=Annotated[Optional[str], Field(description=_DEST_DOC)]))
+    return out
+
+
+def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg: bool = False):
     """Log a tool call end to end and turn any failure into a `ToolError`.
 
     Logs the client-supplied params on entry, the result (or the error +
@@ -133,36 +175,89 @@ def logged_tool(fn):
     exception is logged and re-raised as `ToolError(str(exc))` so the agent
     sees an actionable message instead of FastMCP's masked "internal error".
     Tool bodies therefore need no try/except/log boilerplate of their own.
-    A dict result also gets its provenance sidecars written here.
+
+    Around the body it also sets the call's scope: the MCP session (whose
+    `set_project` the call resolves against), a `project=` override
+    (`project_arg`), and for `render` tools the `dest=` routing plus a
+    `jobs` row from start to finish. A dict result gets its outputs tagged
+    and recorded (`provenance.record_outputs`).
 
     Applied by `server.tool()` — never stack it by hand.
     """
     from fastmcp.exceptions import ToolError
 
+    from . import jobs, library, project
+
+    dest_arg = dest_arg or render
+    extra = _injected_params(project_arg, dest_arg)
+    extra_names = {p.name for p in extra}
+
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
+        scope = {k: kwargs.pop(k) for k in list(kwargs) if k in extra_names}
         client_args = {k: v for k, v in kwargs.items() if k not in _SKIP_PARAMS}
-        t0 = log_call(fn.__name__, client_args)
+        t0 = log_call(fn.__name__, {**client_args, **{k: v for k, v in scope.items() if v is not None}})
         timing = _request_timing.get(None)
         if timing is not None:
             timing["tool_name"] = fn.__name__
             timing["tool_start"] = time.time()
+        sid = _session()
+        tokens = [(project.call_project, project.call_project.set(project.call_project.get()))]
+        job = None
         try:
+            if scope.get("project"):
+                tokens.append((project.call_project, project.call_project.set(project.slugify(scope["project"]))))
+            if dest_arg:
+                try:
+                    library.check_dest(scope.get("dest"))
+                except ValueError as exc:
+                    raise ToolError(str(exc))
+                tokens.append((library.current_dest, library.current_dest.set(scope.get("dest"))))
+            if render:
+                job = jobs.start(fn.__name__, {k: v for k, v in client_args.items() if v is not None},
+                                 by=jobs.current_by.get(), session=sid, project=project.active_project(),
+                                 dest=str(library.dest_dir()))
+                tokens.append((jobs.current_job, jobs.current_job.set(job)))
             result = await fn(*args, **kwargs)
+            records, cost = [], None
             if isinstance(result, dict):
-                result = _with_provenance(fn.__name__, client_args, result, t0)
+                result, records, cost = await asyncio.to_thread(
+                    _with_provenance, fn.__name__, client_args, result, t0, job)
+            if job:
+                jobs.finish(job, ok=True, outputs=[r["path"] for r in records], est_usd=cost)
+                result = {"job": job, **result} if isinstance(result, dict) else result
             log_done(fn.__name__, t0, result if isinstance(result, dict) else None)
             return result
+        except asyncio.CancelledError:
+            if job:
+                jobs.finish(job, ok=False, error="cancelled", cancelled=True)
+            raise
         except ToolError as exc:
+            if job:
+                jobs.finish(job, ok=False, error=str(exc))
             log_error(fn.__name__, exc, t0, tb=False)
             raise
         except Exception as exc:
+            if job:
+                jobs.finish(job, ok=False, error=str(exc))
             log_error(fn.__name__, exc, t0)
             raise ToolError(str(exc)) from exc
         finally:
+            for var, token in reversed(tokens):
+                var.reset(token)
             if timing is not None:
                 timing["tool_end"] = time.time()
 
+    if extra:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        at = next((i for i, p in enumerate(params) if p.name == "ctx"), len(params))
+        params[at:at] = [p for p in extra if p.name not in sig.parameters]
+        # Keyword-only params must follow the positional-or-keyword ones.
+        params.sort(key=lambda p: p.kind == inspect.Parameter.KEYWORD_ONLY)
+        wrapper.__signature__ = sig.replace(parameters=params)  # type: ignore[attr-defined]
+        wrapper.__annotations__ = {**getattr(fn, "__annotations__", {}),
+                                   **{p.name: p.annotation for p in extra}}
     return wrapper
 
 

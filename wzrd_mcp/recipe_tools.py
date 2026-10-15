@@ -19,7 +19,8 @@ the target rather than the style: media (`images` lives beside it,
 so an agent can make more in the same vein.
 
 Hand-curated and agent-saved recipes share the folder: `save_recipe` builds
-one from a clip's provenance sidecar (C2), `texture_flow(recipe=…)` takes its
+one from a clip's render record (the library database / embedded `wzrd`
+tag, else a legacy C2 sidecar), `texture_flow(recipe=…)` takes its
 args as defaults. Large media never goes in (no preview clips) — the
 `library/recipes/.gitignore` keeps video out of git.
 """
@@ -37,8 +38,8 @@ from typing import Optional
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from . import project
-from .provenance import THUMB_SUFFIX, sidecar_path
+from . import library, project
+from .provenance import THUMB_SUFFIX, legacy_sidecar
 from .server import tool
 
 RECIPE_FILE = "recipe.json"
@@ -125,28 +126,59 @@ def _look(args: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Sidecar walk: from a clip (.mov / .mp4 / thumb) back to the render's call
+# Record walk: from a clip (.mov / .mp4 / legacy thumb) back to the render's call
 # ---------------------------------------------------------------------------
+def _record_of(path: Path) -> Optional[dict]:
+    """A file's creation record: the library database (which reads the
+    embedded tag on first sight), else a legacy `.meta.json` sidecar."""
+    try:
+        rec = library.render(str(path))["record"]
+        if rec:
+            return rec
+    except ValueError:
+        pass
+    return legacy_sidecar(path)
+
+
+def _master_path(render_id: str, fallback: Path) -> Path:
+    files = library.render(render_id)["files"]
+    for f in files:
+        if f["variant"] == "master" and not f["missing"]:
+            return Path(f["path"])
+    return fallback
+
+
 def _render_sidecar(clip: Path) -> tuple[Path, dict]:
-    """(rendered video, its texture_flow sidecar), following `parent` links
-    from *clip* (a HAP .mov made by to_hap points at its mp4)."""
+    """(rendered video, its texture_flow record), following `parent` links
+    from *clip*. A HAP shares its mp4's render id, so it resolves directly;
+    legacy sidecar chains (a to_hap .mov → its mp4) still work."""
     if clip.name.endswith(THUMB_SUFFIX):
         stem = clip.name[: -len(THUMB_SUFFIX)]
         candidates = [clip.with_name(stem + ext) for ext in (".mp4", ".mov")]
         clip = next((c for c in candidates if c.is_file()), candidates[0])
-    path, seen = clip.resolve(), set()
-    while path and str(path) not in seen:
-        seen.add(str(path))
-        meta_path = sidecar_path(path)
-        if not meta_path.is_file():
+    path: Optional[Path] = clip.resolve()
+    rec, seen = _record_of(path), set()
+    while rec and json.dumps(rec, sort_keys=True, default=str) not in seen:
+        seen.add(json.dumps(rec, sort_keys=True, default=str))
+        if rec.get("tool") == "texture_flow":
+            video = _master_path(rec["id"], path) if rec.get("id") else path
+            return video, rec
+        parent = rec.get("parent") or rec.get("parent_path")  # parent_path: an absorbed sidecar
+        if parent and str(parent).startswith(("r_", "fp_")):
+            try:
+                pr = library.render(parent)
+            except ValueError:
+                break
+            rec = pr["record"]
+            path = _master_path(parent, path)
+        elif parent:  # legacy sidecar: parent is a path
+            path = Path(parent)
+            rec = _record_of(path)
+        else:
             break
-        meta = json.loads(meta_path.read_text())
-        if meta.get("tool") == "texture_flow":
-            return path, meta
-        path = Path(meta["parent"]) if meta.get("parent") else None
     raise ToolError(
-        f"{clip} has no texture_flow provenance (no <file>.meta.json chain back to a texture_flow "
-        f"call) — a recipe is built from what the render was called with"
+        f"{clip} has no texture_flow record (neither the library nor a <file>.meta.json chain leads "
+        f"back to a texture_flow call) — a recipe is built from what the render was called with"
     )
 
 
@@ -161,12 +193,9 @@ def _style_copy(src: str, dst: Path) -> None:
 
 
 def _image_prompt(image: str) -> Optional[str]:
-    """The prompt a style image was generated with, from its own sidecar."""
-    try:
-        meta = json.loads(sidecar_path(Path(image).resolve()).read_text())
-    except (OSError, ValueError):
-        return None
-    return (meta.get("args") or {}).get("prompt")
+    """The prompt a style image was generated with, from its own record."""
+    meta = _record_of(Path(image).resolve())
+    return ((meta or {}).get("args") or {}).get("prompt")
 
 
 def _save(name: str, clip: Path, when_to_use: str, notes: Optional[str], prompt: Optional[str],
@@ -177,7 +206,7 @@ def _save(name: str, clip: Path, when_to_use: str, notes: Optional[str], prompt:
     args = meta.get("args") or {}
     images = args.get("images") or []
     if not images:
-        raise ToolError(f"{video.name}'s sidecar records no style images")
+        raise ToolError(f"{video.name}'s record has no style images")
     local = [i for i in images if not i.startswith(("http://", "https://"))]
     missing = [i for i in local if not Path(i).expanduser().is_file()]
     if missing:
@@ -210,7 +239,7 @@ def _save(name: str, clip: Path, when_to_use: str, notes: Optional[str], prompt:
             "args": {k: v for k, v in args.items() if k not in _TARGET_ARGS},
             "source": {
                 "clip": str(video),
-                "project": video.parent.parent.name,
+                "project": meta.get("project") or video.parent.parent.name,
                 "seed": args.get("seed"),
                 "size": [args.get("width"), args.get("height")],
                 "region": meta.get("region"),
@@ -229,6 +258,22 @@ def _save(name: str, clip: Path, when_to_use: str, notes: Optional[str], prompt:
             "preview": str(dest / PREVIEW), "prompt": recipe["prompt"]}
 
 
+def recipes_table(name: Optional[str] = None) -> dict:
+    """One compact row per recipe, or one recipe in full (also `/api/recipes`)."""
+    if name:
+        recipe = load_recipe(name)
+        return {**recipe, "dir": str(_recipe_dir(name)),
+                "preview": str(_recipe_dir(name) / PREVIEW) if (_recipe_dir(name) / PREVIEW).is_file() else None}
+    rows = [{
+        "name": r["name"],
+        "when_to_use": r.get("when_to_use"),
+        "look": _look(r.get("args") or {}),
+        "images": len(r.get("images") or []),
+        "preview": str(r["_dir"] / PREVIEW) if (r["_dir"] / PREVIEW).is_file() else None,
+    } for r in _all_recipes()]
+    return {"root": str(recipes_root()), "recipes": rows}
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -244,17 +289,7 @@ async def list_recipes(name: Optional[str] = None, ctx: Optional[Context] = None
     Args:
         name: A recipe to show in full. Omit for the table.
     """
-    if name:
-        recipe = load_recipe(name)
-        return {**recipe, "dir": str(_recipe_dir(name)),
-                "preview": str(_recipe_dir(name) / PREVIEW) if (_recipe_dir(name) / PREVIEW).is_file() else None}
-    rows = [{
-        "name": r["name"],
-        "when_to_use": r.get("when_to_use"),
-        "look": _look(r.get("args") or {}),
-        "images": len(r.get("images") or []),
-    } for r in _all_recipes()]
-    return {"root": str(recipes_root()), "recipes": rows}
+    return recipes_table(name)
 
 
 @tool(title="Save style recipe", tags={"generate", "textureflow", "library"})
@@ -269,7 +304,7 @@ async def save_recipe(
 ) -> dict:
     """Save the look of a TextureFlow clip the operator liked as a reusable recipe in the global library (library/recipes/<name>/).
 
-    Reads the clip's provenance sidecar (follows a HAP .mov back to its mp4),
+    Reads the clip's render record (a HAP .mov shares its mp4's record),
     copies its style images (downscaled) and a preview frame, and keeps the
     style args — not the size, seed, region or masks, which belong to the
     target. Only save on the operator's word; recipes are shared across every
@@ -277,10 +312,10 @@ async def save_recipe(
 
     Args:
         name: Recipe name (lowercase-dashes, e.g. "ember-veil").
-        from_clip: Path of the clip — its .mov, .mp4 or .thumb.jpg in a project's generated/.
+        from_clip: Path of the clip — its .mov or .mp4 (anywhere in the library or a project).
         when_to_use: One line a future agent picks it by: mood, motion, which surfaces/regions it reads on.
         notes: Optional craft notes: what worked, what to avoid, settings worth varying.
-        prompt: The image prompt behind the style images; omit to take it from their own sidecars.
+        prompt: The image prompt behind the style images; omit to take it from their own render records.
         overwrite: Replace an existing recipe of that name.
     """
     clip = Path(from_clip).expanduser()

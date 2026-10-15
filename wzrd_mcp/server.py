@@ -63,8 +63,12 @@ surface features sells the illusion.
 - The real surface never moves: generated media must keep the background pixel-static (no camera \
 motion, no global flicker), or background subtraction lights up the whole frame.
 
-Files are LOCAL: call set_project first; every tool writes into that project folder and returns \
-absolute paths, which chain straight into the next tool. Inputs accept local paths or URLs. \
+Files are LOCAL and every tool returns absolute paths, which chain straight into the next tool. \
+Inputs accept local paths or URLs. A show is a project folder: set_project creates/opens one, then \
+pass project=<name> on every venue, region= and generator call (nothing is remembered between \
+calls; omitted = the show open in the WZRD app). Generators (nano_banana, texture_flow, kling_*, \
+to_hap, extract_frames, concat_videos) write to the media library (~/WZRD/media: the Studio target \
+folder, else inbox/); dest="project" puts one into the project instead. \
 Look at what you made (view_media) before presenting it; don't celebrate first results, let the \
 user judge. Run at most 6 generation calls in parallel.
 
@@ -87,15 +91,28 @@ def tool(
     destructive: bool = False,
     idempotent: bool = False,
     open_world: bool = False,
+    project_arg: bool = False,
+    render: bool = False,
+    dest_arg: bool = False,
 ):
     """Register an async tool function with WZRD's standard stack.
 
     `@mcp.tool(output_schema=None)` → `jsonify_result` (one JSON text block,
     never text + structuredContent) → `logged_tool` (logging, ToolError
-    wrapping, request timing) → body. The annotations are MCP's behaviour
-    hints: `open_world` = calls a paid/remote service, `destructive` =
-    overwrites or deletes user-visible state, `read_only` = no side effects.
+    wrapping, request timing, session scope, render records) → body. The
+    annotations are MCP's behaviour hints: `open_world` = calls a
+    paid/remote service, `destructive` = overwrites or deletes user-visible
+    state, `read_only` = no side effects.
+
+    `project_arg` adds a `project=` param (a per-call project override,
+    Studio S14). `render` makes the tool a generator: it adds `dest=` (where
+    outputs land — the library by default), every call becomes a `jobs` row
+    (and counts toward the daily spend), and the tag `render` is added.
+    `dest_arg` alone adds `dest=` without a job (quick library writers:
+    extract_frames, concat_videos).
     """
+    if render:
+        tags = {*tags, "render"}
 
     def deco(fn):
         return mcp.tool(
@@ -111,7 +128,7 @@ def tool(
             ),
             output_schema=None,
             timeout=get_timeout(fn.__name__),
-        )(jsonify_result(logged_tool(fn)))
+        )(jsonify_result(logged_tool(fn, project_arg=project_arg, render=render, dest_arg=dest_arg)))
 
     return deco
 
@@ -126,6 +143,7 @@ from . import fal_tools as _fal_tools  # noqa: E402, F401
 from . import google_tools as _google_tools  # noqa: E402, F401
 from . import local_tools as _local_tools  # noqa: E402, F401
 from . import engine_tools as _engine_tools  # noqa: E402, F401  (no-op without `websockets`)
+from . import hub as _hub  # noqa: E402, F401  (the app's /api/* routes)
 
 
 # ---------------------------------------------------------------------------
