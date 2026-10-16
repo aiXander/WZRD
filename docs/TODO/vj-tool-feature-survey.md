@@ -209,7 +209,7 @@ All 📋 rows are in the **MIDI spec (on hold)**. The research mostly confirms i
 | Hand-fix a mask (feathered bezier) | [MadMapper](https://madmapper.com/madmapper/features), Kantan soft edges | fix AI segmentation by hand | ❌ gig plan: "only if needed" | Med |
 | Never light outside regions | Resolume output masks (crop by default) | — | ✅ by construction (additive) | — |
 | Projector-view scan | [MadMapper Space Scanner](https://madmapper.com/files/13-Space%20Scanner%20Guide-1.pdf) | — | ❌ (Top pick 14) | High |
-| Display pick, cursor hide, no sleep | [TD Window COMP](https://docs.derivative.ca/Window_COMP) | — | 🟡 `WZRD_DISPLAY`; cursor and display-sleep (?) | Med |
+| Display pick, cursor hide, no sleep | [TD Window COMP](https://docs.derivative.ca/Window_COMP) | — | ✅ OUTPUT pill (display pick, cursor hide, keep awake, identify — 2026-10-15) | — |
 
 ### Monitoring, safety, show reliability
 

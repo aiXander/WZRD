@@ -179,6 +179,9 @@ pub struct EngineWindows {
     /// The engine window is sized to the first pack that boots on it; later
     /// engines keep whatever size/placement the operator gave it.
     sized: AtomicBool,
+    /// Canvas (pack) size of the current engine — the output's window-mode
+    /// aspect (`output.rs`).
+    canvas: Mutex<(u32, u32)>,
     /// The streaming telemetry channels the webview currently displays
     /// (`telemetry_demand`). Lives here (not per engine) because the
     /// consumers stay mounted across an engine restart.
@@ -379,11 +382,12 @@ impl EngineWindows {
             current_stop: Mutex::new(Arc::new(AtomicBool::new(false))),
             preview_cfg: Mutex::new(None),
             sized: AtomicBool::new(false),
+            canvas: Mutex::new((1920, 1080)),
             demand: Arc::new(ChannelDemand::default()),
         });
 
         // Engine-window events: sizes flow to the render thread; closing the
-        // projector window means "quit the app" (parity with WinitHost).
+        // projector window means "output off" (output.rs) — not quit.
         // Registered once — handlers would pile up per restart otherwise.
         {
             let weak = Arc::downgrade(&windows);
@@ -397,10 +401,9 @@ impl EngineWindows {
                         *w.sizes.pending.lock().expect("size lock") = Some(dims);
                     }
                     tauri::WindowEvent::CloseRequested { api, .. } => {
-                        // Route through the app-exit path so teardown (render
-                        // thread join, session snapshot) happens exactly once.
+                        // The window outlives every engine: hide, never close.
                         api.prevent_close();
-                        app.exit(0);
+                        crate::output::on_close_requested(&app);
                     }
                     tauri::WindowEvent::Destroyed => {
                         w.current_stop
@@ -413,6 +416,16 @@ impl EngineWindows {
             });
         }
         Ok(windows)
+    }
+
+    /// The projector output window (shown/placed by `output.rs`).
+    pub fn output_window(&self) -> &tauri::Window {
+        &self.engine
+    }
+
+    /// Canvas size of the current engine, physical px.
+    pub fn canvas_size(&self) -> (u32, u32) {
+        *self.canvas.lock().expect("canvas lock")
     }
 
     /// Replace the webview's streaming-channel demand (see
@@ -584,8 +597,11 @@ impl EngineHandle {
         log_bus(&ctx.bus);
 
         let window = windows.engine.clone();
-        if !windows.sized.swap(true, Ordering::Relaxed) {
-            size_engine_window(&window, core.pack().atlas_width, core.pack().atlas_height)
+        let canvas = (core.pack().atlas_width, core.pack().atlas_height);
+        *windows.canvas.lock().expect("canvas lock") = canvas;
+        // A visible window was placed by the operator (output.rs) — keep it.
+        if !windows.sized.swap(true, Ordering::Relaxed) && !window.is_visible().unwrap_or(false) {
+            size_engine_window(&window, canvas.0, canvas.1)
                 .context("sizing engine output window")?;
         }
         let size = window.inner_size().context("querying engine window size")?;
@@ -1013,53 +1029,27 @@ fn telemetry_loop(
     log::info!("engine telemetry fan-in thread exiting");
 }
 
-/// Create the engine output window. Default: a decorated window, sized to
-/// the first pack that boots on it (`size_engine_window`; dev parity with
-/// the old `--windowed` spawn). With `WZRD_DISPLAY=<idx>`: borderless,
-/// filling that monitor — the projector deployment shape.
+/// Create the engine output window, **hidden**: output is a manual switch
+/// (`output.rs`). Hidden reads as occluded, so the engine renders offscreen
+/// until the operator turns the output on.
 fn build_engine_window(app: &AppHandle) -> Result<tauri::Window> {
-    let mut builder = tauri::window::WindowBuilder::new(app, "engine")
-        .title("WZRD Engine Output")
-        .resizable(true);
-    if wzrd_display().is_some() {
-        builder = builder.decorations(false);
-    }
-    builder.build().context("building engine window")
+    tauri::window::WindowBuilder::new(app, "engine")
+        .title("WZRD Output")
+        .resizable(true)
+        .visible(false)
+        .build()
+        .context("building engine window")
 }
 
-fn wzrd_display() -> Option<usize> {
-    std::env::var("WZRD_DISPLAY").ok().and_then(|s| s.parse().ok())
-}
-
+/// Pre-size the hidden window to the first pack (the swapchain size until
+/// the operator picks a target).
 fn size_engine_window(window: &tauri::Window, pack_w: u32, pack_h: u32) -> Result<()> {
-    match wzrd_display() {
-        Some(idx) => {
-            let monitors = window
-                .available_monitors()
-                .context("listing monitors")?;
-            let monitor = monitors.get(idx).ok_or_else(|| {
-                anyhow!(
-                    "WZRD_DISPLAY={idx} but only {} monitor(s) detected",
-                    monitors.len()
-                )
-            })?;
-            window
-                .set_position(tauri::Position::Physical(*monitor.position()))
-                .context("positioning engine window")?;
-            window
-                .set_size(tauri::Size::Physical(*monitor.size()))
-                .context("sizing engine window")?;
-        }
-        None => {
-            window
-                .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-                    pack_w.max(320),
-                    pack_h.max(240),
-                )))
-                .context("sizing engine window")?;
-        }
-    }
-    Ok(())
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+            pack_w.max(320),
+            pack_h.max(240),
+        )))
+        .context("sizing engine window")
 }
 
 /// Scale `(w, h)` down (never up) to fit inside `(max_w, max_h)`, keeping

@@ -31,7 +31,9 @@ serde_json = "1"
 # `protocol-asset`: Studio thumbnails + preview media load as asset URLs
 # (scoped at runtime to the library home, its roots and the projects root —
 # `library.rs::allow_scope`), not base64 over IPC.
-tauri = { version = "2", features = ["unstable", "protocol-asset"] }
+# `webview-data-url`: OUTPUT → Identify's per-display number overlays are
+# inline `data:` pages (output.rs).
+tauri = { version = "2", features = ["unstable", "protocol-asset", "webview-data-url"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 # Read-only browsing of the hub's library.db (studio plan L3) while the hub

@@ -1,7 +1,9 @@
 // The final compositor pass — everything between the composites and the
 // projector, in one pass, one submit:
 //
+//   0. §2.8 output flip (dest space, before the LUT — `fs_main` only)
 //   1. §5.14 alignment warp (dest → source via the baked offset LUT)
+//   1b. §2.8 fit (the composite's rect inside warp-source space)
 //   2. §5.6 promote crossfade (live × design lerped by adjust.z)
 //   3. §5.4 output masters (saturation, then brightness)
 //
@@ -34,6 +36,12 @@ struct FinalPass {
     // space so it warps with the content and reveals misalignment against
     // physical edges.
     pattern: vec4<f32>,
+    // §2.8 output transform, fit: (offset.xy, 1/scale.xy) — the composite's
+    // rect inside warp-source uv. Identity (0, 0, 1, 1) = stretch.
+    fit: vec4<f32>,
+    // §2.8 output transform, flips: (flip_h, flip_v, _, _) as 0/1. Read by
+    // `fs_main` only.
+    flip: vec4<f32>,
 };
 
 @group(0) @binding(0) var composite_tex: texture_2d<f32>;
@@ -78,15 +86,32 @@ fn test_pattern(uv: vec2<f32>, mode: f32, th: f32, cells: f32) -> vec3<f32> {
     return vec3<f32>(0.0);
 }
 
+// Warp-source uv → composite uv (the `fit` rect). Outside [0,1] afterwards
+// means letterbox bar / cropped away, which `shade` paints as background.
+fn fit_uv(s: vec2<f32>) -> vec2<f32> {
+    return (s - uniforms.fit.xy) * uniforms.fit.zw;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Flip first, in dest space, before the LUT lookup. The projector mirrors
+    // its input, so wall position = M(output pixel): flipping here keeps the
+    // LUT (and the Align canvas, which draws dest space) in *wall* space, so
+    // toggling a flip never disturbs the operator's corners. Integer mirror
+    // for the LUT texel (x → W−1−x), and the matching uv (u → 1−u, the same
+    // texel centre). The LUT is sized exactly to this pass's target.
+    let flip = uniforms.flip.xy > vec2<f32>(0.5);
+    let dims = vec2<i32>(textureDimensions(warp_lut));
+    let px = vec2<i32>(in.pos.xy);
+    let dest_px = select(px, dims - vec2<i32>(1) - px, flip);
+    let dest_uv = select(in.uv, vec2<f32>(1.0) - in.uv, flip);
     var off = vec2<f32>(0.0);
     if (uniforms.adjust.w > 0.5) {
         // textureLoad takes no implicit derivatives, so this branch is legal
         // regardless of the uniformity of the condition.
-        off = textureLoad(warp_lut, vec2<i32>(in.pos.xy), 0).xy;
+        off = textureLoad(warp_lut, dest_px, 0).xy;
     }
-    return shade(in.uv + off);
+    return shade(fit_uv(dest_uv + off));
 }
 
 // Everything after the warp lookup: promote mix, test pattern, masters,
@@ -151,7 +176,9 @@ fn fs_preview(in: VsOut) -> @location(0) vec4<f32> {
         let texel = clamp(floor(in.uv * dims), vec2<f32>(0.0), dims - 1.0);
         off = textureLoad(warp_lut, vec2<i32>(texel), 0).xy;
     }
-    let uv = in.uv + off;
+    // Fit applies here too; the flip does not — the program view shows wall
+    // space, like the Align canvas drawn over it.
+    let uv = fit_uv(in.uv + off);
     let light = shade(uv);
     // Sampled unconditionally (uniform control flow), masked to the source
     // rect so the clamped edge doesn't smear into the background.

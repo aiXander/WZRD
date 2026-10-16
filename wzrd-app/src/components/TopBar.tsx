@@ -15,6 +15,7 @@ import { useTelemetryDemand } from '../api/telemetryDemand';
 import { DeckSwitch, TakeButton } from './DeckPanel';
 import { ProjectMenu } from './ProjectMenu';
 import { HubLamp } from './HubLamp';
+import { OutputPill } from './OutputPill';
 import { JobsPill } from './JobsPill';
 import { restartEngine } from '../state/actions';
 
@@ -95,6 +96,7 @@ export function TopBar() {
       )}
 
       <Tempo />
+      <OutputPill />
       <JobsPill />
       <HubLamp />
       <Health />

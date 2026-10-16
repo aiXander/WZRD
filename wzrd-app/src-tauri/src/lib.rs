@@ -20,6 +20,7 @@ mod fork;
 mod hub;
 mod layout;
 mod library;
+mod output;
 mod projects;
 mod relink;
 mod rpc;
@@ -305,6 +306,7 @@ pub fn run() {
             };
             let scene_path = scene_path.map(|p| p.canonicalize().unwrap_or(p));
 
+            app.manage(output::Output::new(app.handle()));
             let windows = EngineWindows::create(app.handle()).map_err(|e| {
                 log::error!("could not create engine windows: {e:#}");
                 e.to_string()
@@ -330,6 +332,10 @@ pub fn run() {
             } else {
                 log::warn!("no scene bound (WZRD_SCENE / --scene / recent project) — starting without an engine");
             }
+
+            // Output starts off; scripted launches may turn it on.
+            output::apply_env(app.handle());
+            output::spawn_watcher(app.handle().clone());
 
             if audio_requested() {
                 match spawn_audio_server() {
@@ -398,6 +404,11 @@ pub fn run() {
             projects::engine_restart,
             fork::project_save_as,
             relink::relink_missing,
+            output::output_displays,
+            output::output_state,
+            output::output_set,
+            output::output_options,
+            output::output_identify,
             layout::ui_layout_read,
             layout::ui_layout_write,
             hub::hub_status,

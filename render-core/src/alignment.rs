@@ -94,6 +94,19 @@ pub struct AlignmentDoc {
     pub background: String,
     pub corners: Corners,
     pub points: Vec<WarpPoint>,
+    /// Output transform — properties of the *projector*, not of the warp, so
+    /// they apply even with `enabled: false` and survive `alignment.reset`.
+    /// Mirror the output horizontally / vertically (a projector left in
+    /// rear or ceiling mode). Applied in dest space **before** the LUT
+    /// lookup, so corners, handles and the LUT stay in wall space.
+    #[serde(rename = "flip_h")]
+    pub flip_h: bool,
+    #[serde(rename = "flip_v")]
+    pub flip_v: bool,
+    /// How the composite sits inside warp-source space when its aspect
+    /// differs from the projector's. Applied **after** the warp.
+    #[serde(deserialize_with = "lenient_fit")]
+    pub fit: FitMode,
 }
 
 impl Default for AlignmentDoc {
@@ -104,8 +117,87 @@ impl Default for AlignmentDoc {
             background: "#000000".to_string(),
             corners: identity_corners(),
             points: Vec::new(),
+            flip_h: false,
+            flip_v: false,
+            fit: FitMode::Stretch,
         }
     }
+}
+
+/// Composite → projector aspect policy (the alignment doc's `fit`).
+///
+/// - `stretch` — the composite fills the whole output, aspect be damned
+///   (the pre-flag behaviour, hence the default: old alignments don't move).
+/// - `fit` — keep aspect, letterbox/pillarbox; the bars get `background`.
+/// - `fill` — keep aspect, crop the overflowing axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FitMode {
+    #[default]
+    Stretch,
+    Fit,
+    Fill,
+}
+
+impl FitMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FitMode::Stretch => "stretch",
+            FitMode::Fit => "fit",
+            FitMode::Fill => "fill",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "stretch" => Some(FitMode::Stretch),
+            "fit" => Some(FitMode::Fit),
+            "fill" => Some(FitMode::Fill),
+            _ => None,
+        }
+    }
+}
+
+/// A file with an unknown `fit` (a newer build, a typo in a hand edit)
+/// degrades to `stretch` instead of failing the whole document — losing the
+/// operator's corners over one bad enum value would be the worse outcome.
+fn lenient_fit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<FitMode, D::Error> {
+    let v = Value::deserialize(d)?;
+    Ok(match v.as_str().and_then(FitMode::parse) {
+        Some(f) => f,
+        None => {
+            log::warn!("alignment.json fit {v} unknown — using \"stretch\"");
+            FitMode::Stretch
+        }
+    })
+}
+
+/// The composite's rect inside warp-source uv, as `(scale, offset)`:
+/// composite uv `c = (s − offset) / scale`. `composite` and `output` are
+/// pixel sizes (the pack atlas and the projector swapchain). Stretch — or a
+/// zero size anywhere — is the unit square.
+pub fn fit_rect(fit: FitMode, composite: (u32, u32), output: (u32, u32)) -> ([f32; 2], [f32; 2]) {
+    let unit = ([1.0, 1.0], [0.0, 0.0]);
+    if fit == FitMode::Stretch
+        || composite.0 == 0
+        || composite.1 == 0
+        || output.0 == 0
+        || output.1 == 0
+    {
+        return unit;
+    }
+    let a_c = composite.0 as f32 / composite.1 as f32;
+    let a_o = output.0 as f32 / output.1 as f32;
+    // `fit` shrinks the axis the composite is too short on (scale ≤ 1,
+    // letterbox); `fill` grows the other one (scale ≥ 1, crop).
+    let wider = a_c > a_o;
+    let scale = match (fit, wider) {
+        (FitMode::Fit, true) | (FitMode::Fill, false) => [1.0, a_o / a_c],
+        (FitMode::Fit, false) | (FitMode::Fill, true) => [a_c / a_o, 1.0],
+        (FitMode::Stretch, _) => unreachable!(),
+    };
+    let offset = [(1.0 - scale[0]) * 0.5, (1.0 - scale[1]) * 0.5];
+    (scale, offset)
 }
 
 /// §3.6 — a generated pattern substituted for the composite **in source
@@ -225,6 +317,13 @@ pub struct AlignmentPatch {
     pub background: Option<String>,
     pub corners: Option<Vec<[f32; 2]>>,
     pub points: Option<Vec<PointPatch>>,
+    #[serde(rename = "flip_h")]
+    pub flip_h: Option<bool>,
+    #[serde(rename = "flip_v")]
+    pub flip_v: Option<bool>,
+    /// Validated in `merge` (not by serde) so a bad value gets the same
+    /// prescriptive message as every other field.
+    pub fit: Option<String>,
 }
 
 /// One handle in an `alignment.set` payload.
@@ -242,6 +341,17 @@ pub struct PointPatch {
     pub dest: [f32; 2],
     #[serde(default)]
     pub radius: Option<f32>,
+}
+
+/// The per-frame slice of the alignment the final pass reads.
+#[derive(Debug, Clone, Copy)]
+pub struct FinalPassInputs {
+    pub warp: bool,
+    /// Linear light.
+    pub background: [f32; 3],
+    pub flip_h: bool,
+    pub flip_v: bool,
+    pub fit: FitMode,
 }
 
 /// Shared alignment state: the solved document plus the dirty stamps the
@@ -303,10 +413,16 @@ impl AlignmentState {
         self.lock().bake_uniforms()
     }
 
-    /// What the final pass needs each frame: `(warp_enabled, background_rgb)`.
-    pub fn final_pass_inputs(&self) -> (bool, [f32; 3]) {
+    /// What the final pass needs each frame.
+    pub fn final_pass_inputs(&self) -> FinalPassInputs {
         let s = self.lock();
-        (s.doc.enabled, s.background_linear)
+        FinalPassInputs {
+            warp: s.doc.enabled,
+            background: s.background_linear,
+            flip_h: s.doc.flip_h,
+            flip_v: s.doc.flip_v,
+            fit: s.doc.fit,
+        }
     }
 
     pub fn set_output(&self, width: u32, height: u32) {
@@ -368,11 +484,16 @@ impl AlignmentState {
 
     /// Identity corners, no points, black background. Leaves `enabled` alone —
     /// resetting the geometry should not silently switch the warp off (or on)
-    /// under an operator mid-alignment.
+    /// under an operator mid-alignment — and the output transform
+    /// (`flip_h`/`flip_v`/`fit`), which describes the projector, not the
+    /// geometry.
     pub fn reset(&self) -> AlignmentDoc {
-        let enabled = self.lock().doc.enabled;
+        let current = self.doc();
         let doc = AlignmentDoc {
-            enabled,
+            enabled: current.enabled,
+            flip_h: current.flip_h,
+            flip_v: current.flip_v,
+            fit: current.fit,
             ..AlignmentDoc::default()
         };
         let solved = solve(doc).expect("identity alignment always solves");
@@ -399,6 +520,9 @@ impl AlignmentState {
             "background": s.doc.background,
             "corners": s.doc.corners,
             "points": s.doc.points,
+            "flip_h": s.doc.flip_h,
+            "flip_v": s.doc.flip_v,
+            "fit": s.doc.fit.as_str(),
             "weights": s.weights,
             "output": [w, h],
             "points_max": MAX_POINTS,
@@ -422,6 +546,21 @@ fn merge(current: &AlignmentSolution, patch: AlignmentPatch) -> Result<Alignment
             format!("background {bg:?} is not a #rrggbb colour (e.g. \"#000000\")")
         })?;
         doc.background = bg;
+    }
+    if let Some(h) = patch.flip_h {
+        doc.flip_h = h;
+    }
+    if let Some(v) = patch.flip_v {
+        doc.flip_v = v;
+    }
+    if let Some(fit) = patch.fit {
+        doc.fit = FitMode::parse(&fit).ok_or_else(|| {
+            format!(
+                "fit {fit:?} is not one of \"stretch\" (fill the output, ignore aspect) | \
+                 \"fit\" (keep aspect, letterbox with the background) | \
+                 \"fill\" (keep aspect, crop)"
+            )
+        })?;
     }
 
     let corners_moved = patch.corners.is_some();
@@ -1162,5 +1301,87 @@ mod tests {
             ..Default::default()
         })
         .is_err());
+    }
+
+    #[test]
+    fn output_transform_defaults_keep_old_files_unchanged() {
+        // A pre-flag file: no flip_h / flip_v / fit at all.
+        let doc: AlignmentDoc = serde_json::from_str(
+            r##"{"version":1,"enabled":true,"background":"#000000",
+                "corners":[[0,0],[1,0],[1,1],[0,1]],"points":[]}"##,
+        )
+        .unwrap();
+        assert!(!doc.flip_h && !doc.flip_v);
+        assert_eq!(doc.fit, FitMode::Stretch);
+        // Unknown fit degrades to stretch rather than losing the corners.
+        let doc: AlignmentDoc =
+            serde_json::from_str(r#"{"corners":[[0.1,0],[1,0],[1,1],[0,1]],"fit":"zoom"}"#).unwrap();
+        assert_eq!(doc.fit, FitMode::Stretch);
+        assert!(close(doc.corners[0], [0.1, 0.0], 1e-6));
+        // Written flat, snake_case, and read back.
+        let doc = AlignmentDoc { flip_h: true, fit: FitMode::Fill, ..Default::default() };
+        let v = serde_json::to_value(&doc).unwrap();
+        assert_eq!(v["flip_h"], true);
+        assert_eq!(v["flip_v"], false);
+        assert_eq!(v["fit"], "fill");
+        let back: AlignmentDoc = serde_json::from_value(v).unwrap();
+        assert!(back.flip_h && back.fit == FitMode::Fill);
+    }
+
+    #[test]
+    fn set_merges_and_validates_output_transform_and_reset_keeps_it() {
+        let state = AlignmentState::identity();
+        let patch: AlignmentPatch =
+            serde_json::from_str(r#"{"flip_h":true,"fit":"fit"}"#).unwrap();
+        state.apply_patch(patch).unwrap();
+        let doc = state.doc();
+        assert!(doc.flip_h && !doc.flip_v && doc.fit == FitMode::Fit);
+
+        let err = state
+            .apply_patch(serde_json::from_str(r#"{"fit":"cover","flip_v":true}"#).unwrap())
+            .unwrap_err();
+        assert!(err.contains("\"stretch\"") && err.contains("cover"), "message: {err}");
+        // Rejected whole: flip_v from the bad patch did not land.
+        assert!(!state.doc().flip_v);
+
+        let payload = state.to_json();
+        assert_eq!(payload["flip_h"], true);
+        assert_eq!(payload["flip_v"], false);
+        assert_eq!(payload["fit"], "fit");
+
+        // Reset is about corners/handles — the projector's flips stay.
+        state
+            .apply_patch(AlignmentPatch {
+                corners: Some(vec![[0.1, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+                ..Default::default()
+            })
+            .unwrap();
+        let doc = state.reset();
+        assert_eq!(doc.corners, identity_corners());
+        assert!(doc.flip_h && doc.fit == FitMode::Fit);
+    }
+
+    #[test]
+    fn fit_rect_math() {
+        let eq = |a: ([f32; 2], [f32; 2]), b: ([f32; 2], [f32; 2])| {
+            close(a.0, b.0, 1e-6) && close(a.1, b.1, 1e-6)
+        };
+        let unit = ([1.0, 1.0], [0.0, 0.0]);
+        // Stretch ignores aspect; equal aspects are the unit square for all.
+        assert!(eq(fit_rect(FitMode::Stretch, (1920, 1080), (1024, 768)), unit));
+        for m in [FitMode::Fit, FitMode::Fill] {
+            assert!(eq(fit_rect(m, (1920, 1080), (1280, 720)), unit));
+            assert!(eq(fit_rect(m, (0, 1080), (1280, 720)), unit));
+        }
+        // 2:1 composite on a 1:1 output: fit letterboxes (half height,
+        // centred), fill crops (double width, centred).
+        assert!(eq(fit_rect(FitMode::Fit, (200, 100), (64, 64)), ([1.0, 0.5], [0.0, 0.25])));
+        assert!(eq(fit_rect(FitMode::Fill, (200, 100), (64, 64)), ([2.0, 1.0], [-0.5, 0.0])));
+        // 1:2 composite on a 16:9 output: fit pillarboxes, fill crops height.
+        let a = 0.5 / (16.0 / 9.0);
+        let (s, o) = fit_rect(FitMode::Fit, (100, 200), (1600, 900));
+        assert!(close(s, [a, 1.0], 1e-6) && close(o, [(1.0 - a) / 2.0, 0.0], 1e-6));
+        let (s, _) = fit_rect(FitMode::Fill, (100, 200), (1600, 900));
+        assert!(close(s, [1.0, 1.0 / a], 1e-5));
     }
 }

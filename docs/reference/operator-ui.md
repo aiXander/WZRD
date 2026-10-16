@@ -110,6 +110,42 @@ scene — the crash recovery.
   the embedded `wzrd` tag and registered in `library.db`, a "Main" deck);
   `--add-clip <project> --region <id>` simulates an agent render landing.
 
+## Projector output — the OUTPUT pill (2026-10-15)
+
+Resolume's Output menu: the engine output window is created **hidden** and
+the operator turns it on from the TopBar **OUTPUT** pill (pill → display =
+two clicks). Hidden reads as occluded, so the engine renders offscreen and
+presents nothing (render-engine.md §3.1) — off is free, on is instant, no
+engine restart.
+
+- Shell: `src-tauri/src/output.rs` (`output_displays` / `output_state` /
+  `output_set {target: off|window|display, display}` / `output_options` /
+  `output_identify`; pushes `output:state` + `output:displays`). Webview:
+  `components/OutputPill.tsx` + `state/output.ts`; the browser seat reaches
+  the same commands through devport.
+- **Display target** = borderless window covering that display at
+  `NSMainMenuWindowLevel + 1` (above its menu bar and Dock), shown with
+  `orderFrontRegardless` so key focus — and every UI shortcut — stays on
+  the operator window. The display holding the UI is disabled in the list
+  (a borderless above-menu-bar window there would bury the UI with no way
+  back); use **Window** for single-screen testing.
+- **Persistence:** the target is never saved — output is off at every
+  launch. Per machine (`settings.json` → `output`): last display **by
+  name** (indices shuffle on replug; duplicates get ` (2)`), `hide_cursor`,
+  `keep_awake` (an `NSActivityIdleDisplaySleepDisabled` assertion held only
+  while live). **Flips + fit** live in the project's `alignment.json`
+  (render-engine.md §2.8 — they describe the install) and are written via
+  `state/alignment.ts::setOutputTransform`, not by `output.rs`.
+- A watcher thread re-lists displays every 2 s; a vanished target display
+  turns the output **off** (never onto the operator's screen) and the pill
+  goes red with `lost`. A display not in its native mode (CoreGraphics
+  `kDisplayModeNativeFlag`) gets an amber dot and a "set it to native"
+  note.
+- Closing the output window (window mode) = output off, not quit.
+- Scripted launches: `WZRD_OUTPUT=window` or `display:<idx>`
+  (`WZRD_DISPLAY=<idx>` still works) turn it on at boot — AFK fps gates
+  need this, a hidden window measures offscreen frames.
+
 ## Clip decks (studio plan D1, 2026-10-15; was the gig's clip grid)
 
 Resolume's clip stacks, per show, in `<project>/decks.json` (contract L6:

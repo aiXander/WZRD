@@ -261,6 +261,9 @@ pub fn alignment_set(
     background: Option<String>,
     corners: Option<Value>,
     points: Option<Value>,
+    flip_h: Option<bool>,
+    flip_v: Option<bool>,
+    fit: Option<String>,
 ) -> Result<Value, String> {
     state
         .engine()?
@@ -271,6 +274,9 @@ pub fn alignment_set(
                 "background": background,
                 "corners": corners,
                 "points": points,
+                "flip_h": flip_h,
+                "flip_v": flip_v,
+                "fit": fit,
             }),
             DEFAULT_TIMEOUT,
         )

@@ -38,9 +38,19 @@ const ENGINE: Record<string, (a: any) => [string, Record<string, unknown>]> = {
   alignment_set: (a) => [
     'alignment.set',
     Object.fromEntries(
-      ['enabled', 'background', 'corners', 'points']
-        .filter((k) => a[k] != null)
-        .map((k) => [k, a[k]])
+      (
+        [
+          ['enabled', 'enabled'],
+          ['background', 'background'],
+          ['corners', 'corners'],
+          ['points', 'points'],
+          ['flipH', 'flip_h'],
+          ['flipV', 'flip_v'],
+          ['fit', 'fit'],
+        ] as const
+      )
+        .filter(([k]) => a[k] != null)
+        .map(([k, wire]) => [wire, a[k]])
     ),
   ],
   alignment_reset: () => ['alignment.reset', {}],

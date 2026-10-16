@@ -168,9 +168,12 @@ agents.
   engine). The shell's tee logger follows the current engine's bus itself
   (`telemetry::global_bus` is set-once). Project list, settings and the UI
   side: [operator-ui.md](operator-ui.md) "Projects + engine restart".
-- **Env knobs:** `WZRD_DISPLAY=<idx>` → engine window borderless
-  fullscreen on that monitor (default: decorated window sized to the first
-  pack that boots on it); `WZRD_SPIKE=panic|device_loss` → deliberate
+- **Output window is a manual switch** (2026-10-15): created hidden,
+  pre-sized to the first pack, shown/placed by `output.rs` from the TopBar
+  OUTPUT pill — see [operator-ui.md](operator-ui.md) "Projector output".
+  Hidden = occluded = offscreen frames, so nothing here changed.
+- **Env knobs:** `WZRD_OUTPUT=window|display:<idx>` (or the older
+  `WZRD_DISPLAY=<idx>`) → output on at boot; `WZRD_SPIKE=panic|device_loss` → deliberate
   render-thread crash ~5 s after launch, once per process (test hook,
   never in a show).
 - **Known warts:** (1) after an engine crash, SIGTERM is a no-op (the
@@ -469,8 +472,8 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `master.list` | inline | Both legs' masters: `{ live: {...}, design: {...} }`. |
 | `session.save` | queued | §5.3 — write the session sidecar now (also happens debounced after master/knob changes and on SIGTERM/SIGINT/window close). |
 | `alignment.get` | inline | §2.8 — the full document plus `{output: [w,h], points_max, test_pattern}` and the solved `weights` (read-only derived state, so a client can draw the real field without re-solving; never persisted, ignored on input). |
-| `alignment.set {enabled?, background?, corners?, points?}` | **inline** | §2.8 partial merge, validated (exactly 4 corners; ≤64 points; finite coords; radius > 0). Rejects with a prescriptive message and the previous alignment keeps rendering. Two behaviours worth knowing: sending `corners` **alone** carries the extra handles with the content (the engine recomputes their dest positions), and a point with **no `anchor`** is anchored at the current field, so adding a handle doesn't move the image. No `base_rev` CAS — one human editor at a time, last-write-wins is right for a drag. |
-| `alignment.reset` | inline | §2.8 — identity corners, no handles, black background. Leaves `enabled` alone. |
+| `alignment.set {enabled?, background?, corners?, points?, flip_h?, flip_v?, fit?}` | **inline** | §2.8 partial merge, validated (exactly 4 corners; ≤64 points; finite coords; radius > 0; `fit` ∈ `stretch` \| `fit` \| `fill`). Rejects with a prescriptive message and the previous alignment keeps rendering. Two behaviours worth knowing: sending `corners` **alone** carries the extra handles with the content (the engine recomputes their dest positions), and a point with **no `anchor`** is anchored at the current field, so adding a handle doesn't move the image. No `base_rev` CAS — one human editor at a time, last-write-wins is right for a drag. |
+| `alignment.reset` | inline | §2.8 — identity corners, no handles, black background. Leaves `enabled` and the output transform (`flip_h`/`flip_v`/`fit`) alone. |
 | `alignment.setTestPattern {pattern}` | inline | §2.8 — `none` \| `grid` \| `border` \| `corners`, generated in **source** space so it warps with the content. Runtime-only, never persisted. |
 | `telemetry.subscribe {channels}` / `.unsubscribe` | per-conn | |
 
@@ -493,7 +496,7 @@ Telemetry channels (all emitted by the engine as of the 2026-07 pass):
 | `deck` | on promote/pull/preview transitions + ~10 Hz while ramping | §2.6 snapshot `{promote: idle\|pending\|ramping, mix, fade_ms, quantize, preview_source, two_leg}` (sticky). |
 | `perf` | 2 Hz | §2.9 — the frame-profiler aggregate (headroom, per-stage p50/p95/max, per-pass GPU p50/p95 (`gpu`, null when GPU timing is off/unsupported), threads, clips, latency, process, telemetry bytes/s). Not sticky. |
 | `perf_spike` | on a frame over the trigger (≤ 1 per 2 s) | §2.9 — that frame ± 5 neighbours with per-stage ms and what ran in each (sticky). |
-| `alignment` | at boot, on every accepted mutation, on output resize | §2.8 — the whole document plus `weights` and `{output, points_max, test_pattern, solve_ok}` (sticky, so the Align tab hydrates from `lastPayload` and an external camera script sees the UI's edits). |
+| `alignment` | at boot, on every accepted mutation, on output resize | §2.8 — the whole document (incl. `flip_h`, `flip_v`, `fit`) plus `weights` and `{output, points_max, test_pattern, solve_ok}` (sticky, so the Align tab hydrates from `lastPayload` and an external camera script sees the UI's edits). |
 
 ### 2.4 Effect WGSL contract
 
@@ -973,6 +976,33 @@ pattern for the composite **in source space**, so it warps with the content
 and reveals misalignment against physical edges. Runtime-only and never
 persisted, so a restart can't leave a grid on the wall.
 
+**Output transform: flip + fit** (2026-10-15). Three flat fields on the
+document — `flip_h`, `flip_v` (bool, default false) and `fit`
+(`"stretch"` default = the old behaviour \| `"fit"` letterbox \|
+`"fill"` crop); serde defaults, so older files load unchanged and an unknown
+`fit` degrades to stretch. They describe the **projector**, not the warp:
+they apply even with `enabled: false` and survive `alignment.reset`. Order
+in `fs_main`, per output pixel:
+
+1. **Flip first, in dest space, before the LUT lookup** (integer mirror
+   `x → W−1−x` for the texel, `u → 1−u` for the uv). The projector mirrors
+   its input, so wall position = M(output pixel); flipping here keeps the
+   LUT, the corners and the Align canvas in **wall space** — toggling a flip
+   never disturbs the operator's alignment.
+2. Warp as before (LUT → warp-source uv `s`).
+3. **Fit after the warp**: the composite occupies a centred rect inside
+   warp-source space (`alignment::fit_rect` — composite vs swapchain
+   aspect, rebuilt on the CPU each frame into the `fit` uniform), composite
+   uv `c = (s − offset) / scale`; outside it gets `background`, like any
+   out-of-source pixel. Test patterns are generated in composite uv, so they
+   land inside the rect.
+
+Align's **program view** (`fs_preview`) applies fit but **not** flip — it
+shows wall space, like the canvas drawn over it. The leg previews pass the
+identity transform. Pinned by GPU tests in `gpu.rs` (`flip_h` before the
+warp puts a translated image's background on the opposite side; letterbox
+bars; program view fit-not-flip).
+
 **Control surface.** All three verbs are inline — a drag must not queue
 behind the render thread and none of them rebuild a plan. State lives behind
 a small mutex in an `Arc<AlignmentState>` shared with the render thread;
@@ -1094,7 +1124,9 @@ budget — the engine doesn't know the projector's refresh; CPU-only when
 - **Spikes:** interval > `trigger_ms` (default 33.3) after the first 60
   frames freezes that frame ± 5 neighbours (stages + `ran: {cmds, reloads,
   probe_steps, clip_opens, rev}`) → sticky `perf_spike` + one `warn` log
-  line. At most one capture per 2 s; the rest are `suppressed`.
+  line. At most one capture per 2 s; the rest are `suppressed`. An
+  offscreen (occluded / output-off) frame is judged against `trigger_ms` +
+  its own 33.3 ms pace, or every paced frame would read as a spike.
 - **GPU passes (PM2, `gpu_timing.rs`).** `perf.gpu = {every, frames,
   skipped, total: {p50,p95,max}, passes: {<pass>: {p50,p95,max,n}}}` — passes
   `warp_bake`, `composite.live`, `composite.design`, `final`, `preview`,

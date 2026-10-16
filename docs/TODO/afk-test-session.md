@@ -85,7 +85,7 @@ the fixture's scene and layout stay clean.
 
     rm -rf projects/b8 && cp -R projects/fixture-a projects/b8 && rm -f projects/b8/ui_layout.json
     export B=test_results/afk-b8 && mkdir -p $B
-    (cd wzrd-app && WZRD_SCENE=../projects/b8/scene.json pnpm tauri dev > ../$B/app.log 2>&1 &)
+    (cd wzrd-app && WZRD_OUTPUT=window WZRD_SCENE=../projects/b8/scene.json pnpm tauri dev > ../$B/app.log 2>&1 &)
     until grep -q "preview underlay installed" $B/app.log; do sleep 1; done; sleep 5
     source .claude/skills/afk-session/scripts/appenv.sh
     sidebyside
@@ -139,7 +139,7 @@ the hub may or may not be running (the app attaches or spawns it).
 **Commands** (repo root, wrapped in `caffeinate -dims`):
 
     export B=test_results/afk-b9 && mkdir -p $B
-    (cd wzrd-app && WZRD_SCENE=../projects/fixture-a/scene.json pnpm tauri dev > ../$B/app.log 2>&1 &)
+    (cd wzrd-app && WZRD_OUTPUT=window WZRD_SCENE=../projects/fixture-a/scene.json pnpm tauri dev > ../$B/app.log 2>&1 &)
     until grep -q "hub: up" $B/app.log; do sleep 1; done; sleep 5
     source .claude/skills/afk-session/scripts/appenv.sh
     sidebyside

@@ -229,6 +229,15 @@ pub struct FinalPassUniforms {
     pub background: [f32; 4],
     /// §3.6 test pattern: (mode, thickness in source uv, grid cells, _).
     pub pattern: [f32; 4],
+    /// §2.8 output transform, `fit`: the composite's rect inside warp-source
+    /// uv as (offset.x, offset.y, 1/scale.x, 1/scale.y) — composite uv is
+    /// `(s − offset) / scale`. Applied after the warp, by both `fs_main` and
+    /// `fs_preview`; identity is (0, 0, 1, 1).
+    pub fit: [f32; 4],
+    /// §2.8 output transform, flips: (flip_h, flip_v, _, _) as 0/1. Applied
+    /// in dest space *before* the LUT lookup, by `fs_main` only — the
+    /// program view shows wall space.
+    pub flip: [f32; 4],
 }
 
 impl FinalPassUniforms {
@@ -237,7 +246,27 @@ impl FinalPassUniforms {
             adjust: [brightness, saturation, mix, 0.0],
             background: [0.0, 0.0, 0.0, 1.0],
             pattern: [0.0, 0.0, 0.0, 0.0],
+            fit: [0.0, 0.0, 1.0, 1.0],
+            flip: [0.0; 4],
         }
+    }
+
+    /// §2.8 output transform: mirror flags plus the fit rect from
+    /// [`crate::alignment::fit_rect`] as `(scale, offset)`.
+    pub fn with_output_transform(
+        mut self,
+        flip_h: bool,
+        flip_v: bool,
+        (scale, offset): ([f32; 2], [f32; 2]),
+    ) -> Self {
+        self.flip = [flip_h as u8 as f32, flip_v as u8 as f32, 0.0, 0.0];
+        self.fit = [
+            offset[0],
+            offset[1],
+            1.0 / scale[0].max(1e-6),
+            1.0 / scale[1].max(1e-6),
+        ];
+        self
     }
 
     /// Neutral masters, no crossfade, no warp — the preview blit's baseline.
@@ -2196,27 +2225,219 @@ mod tests {
     /// projector pipeline (`fs_main`, LUT by pixel) at the LUT's own size.
     /// `preview = true`: the preview pipeline (`fs_preview`, LUT by uv) at
     /// `out` px, light only, no dim.
-    #[allow(non_snake_case)]
     fn warp_sample_case(preview: bool, n: u32, out: u32) {
         use crate::alignment::AlignmentDoc;
 
-        let N = n;
+        assert!(preview || out == n, "the projector pass indexes the LUT by pixel");
 
-        let Some((device, queue)) = test_device() else {
+        // Corners translated +0.25 in x ⇒ W(dest) = dest − (0.25, 0).
+        let solution = crate::alignment::solve(AlignmentDoc {
+            corners: [[0.25, 0.0], [1.25, 0.0], [1.25, 1.0], [0.25, 1.0]],
+            background: "#ffffff".into(),
+            ..Default::default()
+        })
+        .expect("translation solves");
+        let uniforms = FinalPassUniforms::new(1.0, 1.0, 0.0)
+            .with_warp(true, solution.background_linear);
+        let Some(px) = render_final_case(FinalCase {
+            composite: (n, n),
+            lut: (n, n),
+            out: (out, out),
+            preview,
+            bake: solution.bake_uniforms(),
+            uniforms,
+        }) else {
             eprintln!("no GPU device — skipping warp sample case (preview={preview})");
             return;
         };
-        assert!(preview || out == N, "the projector pass indexes the LUT by pixel");
+        // Texel t of the composite holds t/N at its centre, so a bilinear
+        // sample at source u reads u − 0.5/N. Output pixel x sits at dest
+        // u = (x+½)/out and samples source u − 0.25 (the translation). At
+        // out == N that is exactly 16 texels to the left; a vertical flip
+        // anywhere in the chain moves the sampled row and fails.
+        let quarter = out / 4;
+        for y in [1u32, out / 8, out / 2, out - 2] {
+            for x in [quarter + 1, quarter + 5, out - 1] {
+                let got = px(x, y);
+                let want_r = (x as f32 + 0.5) / out as f32 - 0.25 - 0.5 / n as f32;
+                let want_g = (y as f32 + 0.5) / out as f32 - 0.5 / n as f32;
+                assert!(
+                    (got[0] - want_r).abs() < 0.015,
+                    "({x},{y}) column: got r={} want {want_r}",
+                    got[0]
+                );
+                assert!(
+                    (got[1] - want_g).abs() < 0.015,
+                    "({x},{y}) row (Y flip?): got g={} want {want_g}",
+                    got[1]
+                );
+            }
+        }
+        // Left quarter maps outside the composite ⇒ background, not a wrap.
+        for y in [0u32, out / 2, out - 1] {
+            for x in [0u32, quarter / 2, quarter - 2] {
+                assert_background(px(x, y), x, y);
+            }
+        }
+    }
+
+    fn assert_background(got: [f32; 3], x: u32, y: u32) {
+        assert!(
+            got[0] > 0.98 && got[1] > 0.98 && got[2] > 0.98,
+            "({x},{y}) should be background white, got {got:?}"
+        );
+    }
+
+    /// §2.8 output flip — `flip_h` mirrors the projector output, and it is
+    /// applied in dest space **before** the LUT lookup. The warp is the same
+    /// +0.25 translation as above, so the order is observable: flip-first
+    /// puts the background quarter on the *right* (the wall-space image,
+    /// mirrored as a whole); flipping the composite uv after the warp would
+    /// leave it on the left. Rows must be untouched.
+    #[test]
+    fn flip_h_mirrors_the_final_pass_before_the_warp() {
+        const N: u32 = 64;
+        let solution = crate::alignment::solve(crate::alignment::AlignmentDoc {
+            corners: [[0.25, 0.0], [1.25, 0.0], [1.25, 1.0], [0.25, 1.0]],
+            background: "#ffffff".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let uniforms = FinalPassUniforms::new(1.0, 1.0, 0.0)
+            .with_warp(true, solution.background_linear)
+            .with_output_transform(true, false, ([1.0, 1.0], [0.0, 0.0]));
+        let Some(px) = render_final_case(FinalCase {
+            composite: (N, N),
+            lut: (N, N),
+            out: (N, N),
+            preview: false,
+            bake: solution.bake_uniforms(),
+            uniforms,
+        }) else {
+            eprintln!("no GPU device — skipping flip_h case");
+            return;
+        };
+        for y in [1u32, N / 2, N - 2] {
+            // Output x shows wall pixel N−1−x, which samples source
+            // (N−1−x + ½)/N − 0.25.
+            for x in [0u32, 5, N / 2, N - N / 4 - 2] {
+                let got = px(x, y);
+                let mx = (N - 1 - x) as f32;
+                let want_r = (mx + 0.5) / N as f32 - 0.25 - 0.5 / N as f32;
+                let want_g = (y as f32 + 0.5) / N as f32 - 0.5 / N as f32;
+                assert!((got[0] - want_r).abs() < 0.015, "({x},{y}) r={} want {want_r}", got[0]);
+                assert!((got[1] - want_g).abs() < 0.015, "({x},{y}) g={} want {want_g}", got[1]);
+            }
+            for x in [N - N / 4 + 1, N - 1] {
+                assert_background(px(x, y), x, y);
+            }
+        }
+    }
+
+    /// `flip_v` mirrors rows, and both flips apply with the warp **off**
+    /// (they describe the projector, not the warp).
+    #[test]
+    fn flip_v_mirrors_rows_with_the_warp_disabled() {
+        const N: u32 = 64;
+        let uniforms = FinalPassUniforms::new(1.0, 1.0, 0.0)
+            .with_warp(false, [0.0; 3])
+            .with_output_transform(false, true, ([1.0, 1.0], [0.0, 0.0]));
+        let Some(px) = render_final_case(FinalCase {
+            composite: (N, N),
+            lut: (N, N),
+            out: (N, N),
+            preview: false,
+            bake: WarpBakeUniforms::zeroed(),
+            uniforms,
+        }) else {
+            eprintln!("no GPU device — skipping flip_v case");
+            return;
+        };
+        for (x, y) in [(3u32, 0u32), (10, 9), (40, 33), (60, 63)] {
+            let got = px(x, y);
+            let want_r = x as f32 / N as f32;
+            let want_g = (N - 1 - y) as f32 / N as f32;
+            assert!((got[0] - want_r).abs() < 0.015, "({x},{y}) r={} want {want_r}", got[0]);
+            assert!((got[1] - want_g).abs() < 0.015, "({x},{y}) g={} want {want_g}", got[1]);
+        }
+    }
+
+    /// §2.8 `fit: "fit"` — a 2:1 composite on a square output letterboxes:
+    /// the top and bottom quarters are background bars, the middle half
+    /// shows the whole composite at its own aspect. Warp off on purpose (fit
+    /// is enabled-independent). The program view (`fs_preview`) gets the
+    /// same fit but **not** the flip, which is set here to prove it.
+    #[test]
+    fn fit_letterboxes_with_background_bars() {
+        fit_case(false);
+    }
+
+    #[test]
+    fn program_preview_applies_fit_but_not_flip() {
+        fit_case(true);
+    }
+
+    fn fit_case(preview: bool) {
+        let (cw, ch) = (64u32, 32u32);
+        const OUT: u32 = 64;
+        let rect = crate::alignment::fit_rect(crate::alignment::FitMode::Fit, (cw, ch), (OUT, OUT));
+        let uniforms = FinalPassUniforms::new(1.0, 1.0, 0.0)
+            .with_warp(false, [1.0; 3])
+            .with_output_transform(preview, false, rect);
+        let Some(px) = render_final_case(FinalCase {
+            composite: (cw, ch),
+            lut: (OUT, OUT),
+            out: (OUT, OUT),
+            preview,
+            bake: WarpBakeUniforms::zeroed(),
+            uniforms,
+        }) else {
+            eprintln!("no GPU device — skipping fit case (preview={preview})");
+            return;
+        };
+        for x in [0u32, 20, OUT - 1] {
+            for y in [0u32, 8, 14, 50, OUT - 1] {
+                assert_background(px(x, y), x, y);
+            }
+            // Inside the bar-free band: composite uv = ((x+½)/64, (s.y − ¼)·2).
+            for y in [17u32, 32, 46] {
+                let got = px(x, y);
+                let want_r = (x as f32 + 0.5) / OUT as f32 - 0.5 / cw as f32;
+                let cy = ((y as f32 + 0.5) / OUT as f32 - 0.25) * 2.0;
+                let want_g = cy - 0.5 / ch as f32;
+                assert!((got[0] - want_r).abs() < 0.02, "({x},{y}) r={} want {want_r} (flipped?)", got[0]);
+                assert!((got[1] - want_g).abs() < 0.02, "({x},{y}) g={} want {want_g}", got[1]);
+                assert!(got[2] < 0.02, "({x},{y}) should be composite, got {got:?}");
+            }
+        }
+    }
+
+    struct FinalCase {
+        /// Composite px; texel (x, y) carries (x/w, y/h) in (r, g).
+        composite: (u32, u32),
+        /// Warp LUT px (`fs_main` indexes it by pixel, so == `out` there).
+        lut: (u32, u32),
+        /// Target px; width a multiple of 64 (256-byte readback rows).
+        out: (u32, u32),
+        /// `fs_preview` (light only, no dim) instead of `fs_main`.
+        preview: bool,
+        bake: WarpBakeUniforms,
+        uniforms: FinalPassUniforms,
+    }
+
+    /// Bake the LUT, run one final pass (projector or preview entry), read
+    /// the linear RGB back. `None` without a GPU adapter.
+    fn render_final_case(case: FinalCase) -> Option<impl Fn(u32, u32) -> [f32; 3]> {
+        let (device, queue) = test_device()?;
+        let (cw, ch) = case.composite;
+        let (ow, oh) = case.out;
 
         // Composite: texel (x, y) carries its own coordinates as (r, g), so a
         // sample landing on the wrong texel is self-identifying.
+        let size = wgpu::Extent3d { width: cw, height: ch, depth_or_array_layers: 1 };
         let composite = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test composite"),
-            size: wgpu::Extent3d {
-                width: N,
-                height: N,
-                depth_or_array_layers: 1,
-            },
+            size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -2224,11 +2445,11 @@ mod tests {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let mut texels = Vec::with_capacity((N * N * 4) as usize);
-        for y in 0..N {
-            for x in 0..N {
-                texels.push(f16(x as f32 / N as f32));
-                texels.push(f16(y as f32 / N as f32));
+        let mut texels = Vec::with_capacity((cw * ch * 4) as usize);
+        for y in 0..ch {
+            for x in 0..cw {
+                texels.push(f16(x as f32 / cw as f32));
+                texels.push(f16(y as f32 / ch as f32));
                 texels.push(f16(0.0));
                 texels.push(f16(1.0));
             }
@@ -2243,14 +2464,10 @@ mod tests {
             bytemuck::cast_slice(&texels),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(N * 8),
-                rows_per_image: Some(N),
+                bytes_per_row: Some(cw * 8),
+                rows_per_image: Some(ch),
             },
-            wgpu::Extent3d {
-                width: N,
-                height: N,
-                depth_or_array_layers: 1,
-            },
+            size,
         );
         let composite_view = composite.create_view(&Default::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -2261,25 +2478,13 @@ mod tests {
             ..Default::default()
         });
 
-        // Corners translated +0.25 in x ⇒ W(dest) = dest − (0.25, 0).
-        let solution = crate::alignment::solve(AlignmentDoc {
-            corners: [[0.25, 0.0], [1.25, 0.0], [1.25, 1.0], [0.25, 1.0]],
-            background: "#ffffff".into(),
-            ..Default::default()
-        })
-        .expect("translation solves");
-
-        let warp = create_warp_target(&device, N, N);
-        queue.write_buffer(&warp.buffer, 0, bytemuck::bytes_of(&solution.bake_uniforms()));
+        let warp = create_warp_target(&device, case.lut.0, case.lut.1);
+        queue.write_buffer(&warp.buffer, 0, bytemuck::bytes_of(&case.bake));
 
         // Non-sRGB target so the readback is the shader's own linear values.
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test output"),
-            size: wgpu::Extent3d {
-                width: out,
-                height: out,
-                depth_or_array_layers: 1,
-            },
+            size: wgpu::Extent3d { width: ow, height: oh, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -2299,11 +2504,9 @@ mod tests {
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let extra_group = create_preview_extra_bind_group(&device, &extra_bgl, &photo_view, &extra_buf);
-        let uniforms = FinalPassUniforms::new(1.0, 1.0, 0.0)
-            .with_warp(true, solution.background_linear);
         let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("test final uniform"),
-            contents: bytemuck::bytes_of(&uniforms),
+            contents: bytemuck::bytes_of(&case.uniforms),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let bind_group = create_final_bind_group(
@@ -2319,7 +2522,7 @@ mod tests {
 
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("test readback"),
-            size: (out * out * 4) as u64,
+            size: (ow * oh * 4) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -2358,7 +2561,7 @@ mod tests {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            if preview {
+            if case.preview {
                 pass.set_pipeline(&preview_pipeline);
                 pass.set_bind_group(1, &extra_group, &[]);
             } else {
@@ -2378,15 +2581,11 @@ mod tests {
                 buffer: &readback,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(out * 4),
-                    rows_per_image: Some(out),
+                    bytes_per_row: Some(ow * 4),
+                    rows_per_image: Some(oh),
                 },
             },
-            wgpu::Extent3d {
-                width: out,
-                height: out,
-                depth_or_array_layers: 1,
-            },
+            wgpu::Extent3d { width: ow, height: oh, depth_or_array_layers: 1 },
         );
         queue.submit(std::iter::once(encoder.finish()));
 
@@ -2397,58 +2596,28 @@ mod tests {
         });
         device.poll(wgpu::Maintain::Wait);
         rx.recv().expect("map callback").expect("map succeeded");
-        let data = slice.get_mapped_range();
-
-        let px = |x: u32, y: u32| -> [f32; 3] {
-            let i = ((y * out + x) * 4) as usize;
+        let data = slice.get_mapped_range().to_vec();
+        readback.unmap();
+        Some(move |x: u32, y: u32| -> [f32; 3] {
+            let i = ((y * ow + x) * 4) as usize;
             [
                 data[i] as f32 / 255.0,
                 data[i + 1] as f32 / 255.0,
                 data[i + 2] as f32 / 255.0,
             ]
-        };
-        // Texel t of the composite holds t/N at its centre, so a bilinear
-        // sample at source u reads u − 0.5/N. Output pixel x sits at dest
-        // u = (x+½)/out and samples source u − 0.25 (the translation). At
-        // out == N that is exactly 16 texels to the left; a vertical flip
-        // anywhere in the chain moves the sampled row and fails.
-        let quarter = out / 4;
-        for y in [1u32, out / 8, out / 2, out - 2] {
-            for x in [quarter + 1, quarter + 5, out - 1] {
-                let got = px(x, y);
-                let want_r = (x as f32 + 0.5) / out as f32 - 0.25 - 0.5 / N as f32;
-                let want_g = (y as f32 + 0.5) / out as f32 - 0.5 / N as f32;
-                assert!(
-                    (got[0] - want_r).abs() < 0.015,
-                    "({x},{y}) column: got r={} want {want_r}",
-                    got[0]
-                );
-                assert!(
-                    (got[1] - want_g).abs() < 0.015,
-                    "({x},{y}) row (Y flip?): got g={} want {want_g}",
-                    got[1]
-                );
-            }
-        }
-        // Left quarter maps outside the composite ⇒ background, not a wrap.
-        for y in [0u32, out / 2, out - 1] {
-            for x in [0u32, quarter / 2, quarter - 2] {
-                let got = px(x, y);
-                assert!(
-                    got[0] > 0.98 && got[1] > 0.98 && got[2] > 0.98,
-                    "({x},{y}) should be background white, got {got:?}"
-                );
-            }
-        }
-        drop(data);
-        readback.unmap();
+        })
     }
 
     #[test]
     fn final_pass_uniform_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<FinalPassUniforms>(), 48);
+        assert_eq!(std::mem::size_of::<FinalPassUniforms>(), 80);
         assert_eq!(std::mem::offset_of!(FinalPassUniforms, background), 16);
         assert_eq!(std::mem::offset_of!(FinalPassUniforms, pattern), 32);
+        assert_eq!(std::mem::offset_of!(FinalPassUniforms, fit), 48);
+        assert_eq!(std::mem::offset_of!(FinalPassUniforms, flip), 64);
+        // Identity output transform: no flip, unit fit rect.
+        assert_eq!(FinalPassUniforms::identity().fit, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(FinalPassUniforms::identity().flip, [0.0; 4]);
         // Defaults never enable the warp: the per-leg preview groups bind a
         // 1×1 dummy LUT (`render_preview` also clears the flag for them).
         assert_eq!(FinalPassUniforms::identity().adjust[3], 0.0);

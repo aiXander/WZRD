@@ -195,13 +195,27 @@ export type AlignmentDoc = {
   weights?: [number, number][];
   /** Projector swapchain size in px — what a one-pixel nudge means. */
   output: [number, number];
+  /**
+   * Output transform (persisted with the alignment — it describes the
+   * install). Flips undo a projector left in rear/ceiling mode; they apply
+   * before the warp lookup, so corners stay in wall space. `fit` places the
+   * canvas in the output when aspects differ (stretch = legacy).
+   */
+  flip_h?: boolean;
+  flip_v?: boolean;
+  fit?: OutputFit;
   points_max: number;
   test_pattern: 'none' | 'grid' | 'border' | 'corners';
   solve_ok: boolean;
 };
 
 /** A partial merge for `alignment.set`; anchor omitted ⇒ engine anchors it. */
+export type OutputFit = 'stretch' | 'fit' | 'fill';
+
 export type AlignmentPatch = {
+  flip_h?: boolean;
+  flip_v?: boolean;
+  fit?: OutputFit;
   enabled?: boolean;
   background?: string;
   corners?: [number, number][];
@@ -288,6 +302,9 @@ export const alignmentSet = (patch: AlignmentPatch) =>
     background: patch.background ?? null,
     corners: patch.corners ?? null,
     points: patch.points ?? null,
+    flipH: patch.flip_h ?? null,
+    flipV: patch.flip_v ?? null,
+    fit: patch.fit ?? null,
   });
 export const alignmentReset = () => invoke<AlignmentDoc>('alignment_reset');
 /** §3.6 test pattern, generated in source space so it warps with the content. */

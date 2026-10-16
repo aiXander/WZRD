@@ -44,6 +44,12 @@ pub const RING_FRAMES: usize = 300;
 const SPIKE_NEIGHBOURS: usize = 5;
 /// Boot frames (shader compiles, first uploads) never trigger a spike.
 const SPIKE_ARM_AFTER_FRAMES: u64 = 60;
+/// The occluded path's deliberate pace (`Core::pace_frame`, ~30 Hz, §3.1).
+/// An offscreen frame only spikes when it overruns *that* by the trigger —
+/// with the output switched off (the app's default since 2026-10-15) every
+/// frame is offscreen, and judging them against 60 Hz logged a "spike"
+/// every 2 s that was just the pacing sleep.
+const OFFSCREEN_PACE_US: u32 = 33_333;
 /// At most one spike capture per this window; the rest are counted.
 const SPIKE_MIN_GAP: Duration = Duration::from_secs(2);
 /// Command kinds remembered per frame for the spike report.
@@ -733,7 +739,10 @@ impl Perf {
                 self.freeze_spike(SPIKE_NEIGHBOURS);
             }
         } else {
-            let trigger = self.shared.trigger_us.load(Ordering::Relaxed);
+            let mut trigger = self.shared.trigger_us.load(Ordering::Relaxed);
+            if !record.presenting {
+                trigger = trigger.saturating_add(OFFSCREEN_PACE_US);
+            }
             if self.frames_total > SPIKE_ARM_AFTER_FRAMES && record.interval_us > trigger {
                 let recent = self
                     .last_spike_at
@@ -1845,6 +1854,20 @@ mod tests {
         assert_eq!(p.spikes_total, 1);
         assert!(p.shared.set_trigger_ms(0.0).is_err());
         assert!(p.shared.set_trigger_ms(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn offscreen_frames_are_judged_past_their_own_pace() {
+        let mut p = Perf::new(true);
+        let trigger = p.shared.trigger_us.load(Ordering::Relaxed);
+        let offscreen = |interval| FrameRecord { presenting: false, ..frame(&[], interval) };
+        for _ in 0..SPIKE_ARM_AFTER_FRAMES + 1 {
+            push(&mut p, offscreen(OFFSCREEN_PACE_US));
+        }
+        push(&mut p, offscreen(OFFSCREEN_PACE_US + 4_000));
+        assert_eq!(p.spikes_total, 0, "a ~37 ms paced offscreen frame is the pace, not a spike");
+        push(&mut p, offscreen(OFFSCREEN_PACE_US + trigger + 1));
+        assert_eq!(p.spikes_total, 1);
     }
 
     #[test]

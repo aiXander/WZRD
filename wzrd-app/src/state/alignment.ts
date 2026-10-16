@@ -217,6 +217,11 @@ export function setAlignmentEnabled(enabled: boolean) {
   commit({ enabled }, { enabled });
 }
 
+/** Flip / fit — the projector-facing output transform (OUTPUT pill). */
+export function setOutputTransform(patch: Pick<AlignmentPatch, 'flip_h' | 'flip_v' | 'fit'>) {
+  commit(patch, patch);
+}
+
 export function setAlignmentBackground(background: string) {
   commit({ background }, { background });
 }

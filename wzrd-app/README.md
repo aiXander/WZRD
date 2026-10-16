@@ -68,8 +68,9 @@ config dir). Switch projects or restart a crashed engine from the TopBar
 project menu — the engine re-roots in-process in a few hundred ms.
 `uv run python wzrd-app/scripts/fixture_projects.py` (from the repo root)
 builds two test projects with HAP clips for the project menu and the clip
-grid. `WZRD_DISPLAY=<idx>` puts the
-engine window borderless-fullscreen on that monitor;
+grid. The projector output starts **off** — turn it on from the TopBar
+OUTPUT pill; `WZRD_OUTPUT=window` or `WZRD_OUTPUT=display:<idx>` (older:
+`WZRD_DISPLAY=<idx>`) turns it on at boot;
 `WZRD_SPIKE=panic|device_loss` deliberately crashes the render thread ~5 s
 in (crash-containment test hook).
 

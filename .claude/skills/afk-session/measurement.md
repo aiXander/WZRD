@@ -37,8 +37,10 @@ uncapped ones and are the closer stand-in for a show.
 ## On-screen numbers
 
 - **fps gates** need the engine window uncovered: a covered window reads
-  27–33 ms. In the Tauri app the engine output window sits *under* the main
-  window by default — move or shrink one so they don't overlap.
+  27–33 ms. Since 2026-10-15 the output window starts **hidden** (the TopBar
+  OUTPUT pill turns it on) — launch with `WZRD_OUTPUT=window` (or
+  `display:<idx>`) or an fps gate measures offscreen frames. The window then
+  centres on the operator's display — move or shrink one so they don't overlap.
 - **Windowed GPU timing** is trustworthy since P6 (verified 2026-10-12:
   app `gpu.total` p95 7.4 ms at 60 fps, was 29.8). Paced in-app passes still
   read ~3× the uncapped bench (GPU downclock), so costs come from the bench.

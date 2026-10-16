@@ -10,7 +10,7 @@ REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel); cd "$REPO"
 SCENE=${4:-projects/fixture-a/perf-clips.scene.json}
 B=test_results/appcpu; mkdir -p $B; LOG=$B/app_$1.log
 cp projects/fixture-a/session.json $B/session.bak
-(cd wzrd-app && WZRD_SCENE=../$SCENE pnpm tauri dev > ../$LOG 2>&1 &)
+(cd wzrd-app && WZRD_OUTPUT=window WZRD_SCENE=../$SCENE pnpm tauri dev > ../$LOG 2>&1 &)
 n=0; until grep -q "preview underlay installed" $LOG; do sleep 1; n=$((n+1)); [ $n -gt 400 ] && echo TIMEOUT && exit 1; done; sleep 5
 PID=$(pgrep -f target/debug/wzrd-app | head -1)
 # setRoute, not localStorage + reload: a stored `align` route boots into Perform.

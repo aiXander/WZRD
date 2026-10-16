@@ -2398,20 +2398,30 @@ impl Core {
     /// §5.6 promote mix, and the §5.14 warp enable + background + test
     /// pattern. Cheap enough to rebuild per presented frame (48 bytes).
     fn final_pass_uniforms(&self) -> FinalPassUniforms {
-        let (warp_enabled, background) = self.alignment.final_pass_inputs();
+        let inputs = self.alignment.final_pass_inputs();
         let pattern = self.alignment.test_pattern();
         // Line thickness in *source* uv. The pattern is generated in source
         // space (so it warps with the content), but it has to read as a thin
         // line on the wall, so scale it off the output's short axis.
-        let (_, out_h) = self.alignment.output();
-        let thickness = 1.5 / out_h.max(240) as f32;
+        let output = self.alignment.output();
+        let thickness = 1.5 / output.1.max(240) as f32;
+        // §2.8 output transform. The fit rect is rebuilt from the live sizes
+        // every frame (a handful of flops), so a resize or an alignment edit
+        // lands next frame; the uniform upload stays deduped by bytes.
+        let composite = self
+            .gpu
+            .as_ref()
+            .map(|g| (g.composite_texture.width(), g.composite_texture.height()))
+            .unwrap_or_else(|| self.composite_size());
+        let fit = alignment::fit_rect(inputs.fit, composite, output);
         FinalPassUniforms::new(
             self.masters.brightness(),
             self.masters.saturation(),
             self.mix,
         )
-        .with_warp(warp_enabled, background)
+        .with_warp(inputs.warp, inputs.background)
         .with_pattern(pattern.mode(), thickness, 8.0)
+        .with_output_transform(inputs.flip_h, inputs.flip_v, fit)
     }
 
     /// Tick both legs, each against **its own** control state (§5.6

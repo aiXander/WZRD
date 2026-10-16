@@ -42,7 +42,7 @@ pub fn read_settings(app: &AppHandle) -> Value {
 }
 
 /// Atomic write (tmp + rename) so a crash mid-write never corrupts it.
-fn write_settings(app: &AppHandle, doc: &Value) -> Result<(), String> {
+pub(crate) fn write_settings(app: &AppHandle, doc: &Value) -> Result<(), String> {
     let path = settings_path(app).ok_or("no app config dir")?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{e}"))?;

@@ -33,7 +33,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-use crate::{hub, layout, library, projects, rpc, AppState};
+use crate::{hub, layout, library, output, projects, rpc, AppState};
 
 pub fn spawn(app: AppHandle) {
     let port: u16 = std::env::var("WZRD_DEVPORT")
@@ -139,6 +139,8 @@ fn off_main(app: &AppHandle, cmd: &str, a: &Value) -> Option<Result<Value, Strin
     let hub_state = || app.state::<std::sync::Arc<hub::Hub>>().inner().clone();
     Some(match cmd {
         "hub_status" => ok(Ok(hub_state().status())),
+        // Async (builds webview windows) — block this connection thread on it.
+        "output_identify" => tauri::async_runtime::block_on(output::identify(app.clone())).map(|()| Value::Null),
         "relink_missing" => crate::relink::run(
             &app.state::<AppState>().session().scene_dir(),
             &crate::relink::search_roots(app),
@@ -279,6 +281,14 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "project_open" => projects::project_open(app.clone(), st(), s("scenePath")?),
         "engine_restart" => projects::engine_restart(app.clone(), st()),
         "project_save_as" => crate::fork::project_save_as(app.clone(), st(), s("name")?),
+        "output_displays" => ok(Ok(output::displays(app))),
+        "output_state" => ok(Ok(app.state::<output::Output>().snapshot())),
+        "output_set" => ok(output::set_target(app, &s("target")?, opt("display").as_deref())),
+        "output_options" => ok(Ok(output::set_options(
+            app,
+            a.get("hideCursor").and_then(Value::as_bool),
+            a.get("keepAwake").and_then(Value::as_bool),
+        ))),
         "ui_layout_read" => layout::ui_layout_read(s("scenePath")?),
         "ui_layout_write" => ok(layout::ui_layout_write(
             s("scenePath")?,
