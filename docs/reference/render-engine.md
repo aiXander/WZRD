@@ -474,7 +474,7 @@ bindings re-resolve. This is what lets surface-language commands ("the
 | `alignment.get` | inline | §2.8 — the full document plus `{output: [w,h], points_max, test_pattern}` and the solved `weights` (read-only derived state, so a client can draw the real field without re-solving; never persisted, ignored on input). |
 | `alignment.set {enabled?, background?, corners?, points?, flip_h?, flip_v?, fit?}` | **inline** | §2.8 partial merge, validated (exactly 4 corners; ≤64 points; finite coords; radius > 0; `fit` ∈ `stretch` \| `fit` \| `fill`). Rejects with a prescriptive message and the previous alignment keeps rendering. Two behaviours worth knowing: sending `corners` **alone** carries the extra handles with the content (the engine recomputes their dest positions), and a point with **no `anchor`** is anchored at the current field, so adding a handle doesn't move the image. No `base_rev` CAS — one human editor at a time, last-write-wins is right for a drag. |
 | `alignment.reset` | inline | §2.8 — identity corners, no handles, black background. Leaves `enabled` and the output transform (`flip_h`/`flip_v`/`fit`) alone. |
-| `alignment.setTestPattern {pattern}` | inline | §2.8 — `none` \| `grid` \| `border` \| `corners`, generated in **source** space so it warps with the content. Runtime-only, never persisted. |
+| `alignment.setTestPattern {pattern}` | inline | §2.8 — `none` \| `grid` \| `border` \| `corners`, generated in **source** space so it warps with the content, or `white` (the whole raster, unwarped — the lit surface photo). Runtime-only, never persisted. |
 | `telemetry.subscribe {channels}` / `.unsubscribe` | per-conn | |
 
 Telemetry channels (all emitted by the engine as of the 2026-07 pass):
@@ -975,6 +975,13 @@ as it is set.
 pattern for the composite **in source space**, so it warps with the content
 and reveals misalignment against physical edges. Runtime-only and never
 persisted, so a restart can't leave a grid on the wall.
+The exception is **`white`** (2026-10-16, for the show-setup wizard's lit
+photo): the whole projector raster at full white — no warp rect, no fit,
+no masters, no background — decided at the very end of `shade()` (after
+the samples, so they stay in uniform control flow). The photo has to show
+everything the lens can light, not the currently aligned rect; that full
+throw is what `rectify_surface` detects. Mode id 4; the line patterns are
+1–3.
 
 **Output transform: flip + fit** (2026-10-15). Three flat fields on the
 document — `flip_h`, `flip_v` (bool, default false) and `fit`

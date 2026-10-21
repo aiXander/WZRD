@@ -258,17 +258,26 @@ the hub's own side (routes, `library.db` schema, jobs) is
   deep index) · `MediaGrid` (static thumbs, score/codec/tag badges, a
   dashed tile per file still being indexed, a **job tile** per running
   job whose `dest` is this folder with elapsed/ETA, "show ≤ N", "Delete
-  ≤ N…" = dry run then confirm) · `Monitor` + `RecordPanel` (score
-  buttons, tags (agent tags ✦, read-only), notes, made-for chip, settings,
-  inputs, "+ Styles"); `StyleTray` along the bottom with "Renders land
-  in". Tiles drag out as `application/x-wzrd-paths` (the tray takes
+  ≤ N…" = dry run then confirm, **Trash (n)** = `RecentlyDeleted`, a
+  hover ⤢ = Lightbox) · `Monitor` + `RecordPanel` (score buttons, **"In
+  show" pins** — the open show's asset names pointing at this file, ×
+  unpins, "★ Pin to show as…" = `NamePrompt` with the roles →
+  `pinAsset(openShow, name, path)` — tags (agent tags ✦, read-only),
+  notes, made-for chip, settings, inputs, "+ Styles"); `StyleTray` along
+  the bottom with "Renders land in". Tiles drag out as `application/x-wzrd-paths` (the tray takes
   them). No telemetry subscriptions.
 - **Render panel (R1)** — the side tab next to Record
   (`RenderPanel.tsx`, tab remembered in `localStorage wzrd.studio.side`):
   TextureFlow (recipe from `/api/recipes`; the tray's styles override the
   recipe's), Image (`nano_banana`) and Video (`kling_v25_image_to_video`,
   5/10 s). "Made for" region → size = the region's aspect, long side 640
-  (step 32) and `region` in the args; Draft = `n_steps 4`, no upscale;
+  (step 32) and `region` in the args; TextureFlow's **Shape input**
+  (`AssetPicker` over the open show's assets, `surface_lit` / `surface`
+  first → `control_input`) with "Use as shape (ControlNet)" (→
+  `use_controlnet1` + `controlnet_strength1`, fader 0.35–0.65, default
+  0.45) and **Mask** (→ `diffusion_mask`), each sent only when set (those
+  two rows use a `<div>` group, not `Field`'s `<label>` — a label forwards
+  every click inside it to its first button); Draft = `n_steps 4`, no upscale;
   count 1–12. `/api/estimate` (debounced) shows ≈ cost vs today's spend;
   over the cap → confirm → `allow_over_cap`. Go = `POST /api/render`
   (`wait=false` jobs, `by: app`), landing in the open folder — the hub
@@ -284,16 +293,88 @@ the hub's own side (routes, `library.db` schema, jobs) is
   (engine `preview.file`, render-engine.md §1b — no leg renders);
   mp4/webm → `<video>`; stills → `<img>`; DXV/other → thumb + "Make
   playable". Unmount sends `preview.file null`.
-- **Keys** (only while no input has focus; Studio's own handler in
-  `Studio.tsx`, and `shortcuts.ts` returns early in Studio so T/M/digits
-  never TAKE/mute/select layers): arrows move (⇧ extends; ↑↓ step a grid
-  row via `gridColumns()`), space = play in the monitor, `0–9` score, `−`
+- **Keys** (only while no input has focus and no modal / lightbox is
+  open; Studio's own handler in `Studio.tsx`, and `shortcuts.ts` returns
+  early in Studio so T/M/digits never TAKE/mute/select layers): arrows
+  move (⇧ extends; ↑↓ step a grid row via `gridColumns()`), space = play
+  in the monitor, `F` / Enter = full-screen `Lightbox` over the visible
+  items (← → move the cursor with it; HAP/DXV show their thumb — the
+  monitor plays them), `0–9` score, `−`
   clears it, `T` tags (autocomplete from every tag in use, Tab completes),
   `N` notes (⌘Enter), `D` add to the open show's active deck, `M` move (folders the tree knows, or a typed
-  absolute path), `⌫` delete media (records kept — S7; a multi-selection
-  needs a second ⌫ within 2 s), Esc deselects. Keys act on the selection,
+  absolute path), `⌫` delete media — **soft** (show-setup G6: the hub
+  moves the files to a trash for 30 min; the toast carries **Undo**, the
+  grid's Trash button restores later; records kept — S7; a
+  multi-selection needs a second ⌫ within 2 s), Esc deselects. Keys act on the selection,
   else the cursor item (`studio.ts::targets`). Measured: 20 scores = 40
   keys, all landed in `library.db` in order.
+
+## Shared media components (`src/ui/media/`, show-setup M1, 2026-10-16)
+
+One set of media building blocks for Studio and the show-setup wizard
+(`components/setup/`), so a tile, a viewer, a delete and a pin behave the
+same everywhere. Exact props live in each file's header.
+
+| File | What |
+|---|---|
+| `types.ts` | `MediaRef` (`path` + optional name/kind/thumb/size/`LibraryItem`), `toMediaRef`, `isImagePath`, `kindOf`, `thumbOf`, `sameDir` |
+| `modalState.ts` | `modalOpen()` refcount (`useModalLock`) + the **Esc layer stack** (`useEscapeLayer`) |
+| `Modal.tsx` | portal dialog: title bar + `headerRight`, scrolling body, `footer`; Esc closes, backdrop only with `closeOnBackdrop` |
+| `Lightbox.tsx` | full-window viewer: ← → step, Esc, F fit / 1:1 (drag pans), Space = play/pause or hold-to-flip the `compareWith` blend; `actions(ref)` in its top bar |
+| `MediaTile.tsx` | static thumb + name, `badges`, hover ⤢ / ★ / ✕ (each only when its handler is given), ★ asset chips (`pins`), selected ring |
+| `JobTile.tsx` | a running job's tile (elapsed / ETA / ✕ cancel); Studio's `MediaGrid` uses it too |
+| `MediaGallery.tsx` | a folder (`listFolder`, 2 s poll while mounted; hub down = reader, no ★/✕) or fixed `items`; job tiles for jobs whose `dest` is the folder; Lightbox; ★ → `NamePrompt` → `pinAsset`; ✕ → soft delete + Undo |
+| `AssetPicker.tsx` | select-like button → popover: the show's named assets (`suggest` first; unpinned / missing greyed), the newest 24 files in the show's working folders (from `ProjectInfo.layout`), "Choose file…" (Tauri only) |
+| `NamePrompt.tsx` | popover: name field (`^[a-z0-9][a-z0-9_-]{0,47}$`, typed lower-case) + suggestion chips; Enter submits |
+| `useFileDrop.ts` | Finder drops via Tauri's `onDragDropEvent` (absolute paths); a stack — only the newest *enabled* user gets hover + drops; no-op in the browser seat |
+| `RecentlyDeleted.tsx` | "Trash (n)" → popover: thumb, name, folder, "until hh:mm", Restore / Restore all / Empty now (two-click); polls 5 s only while open |
+| `trash.ts` | `softDelete(paths)` = `/api/library/delete` + a toast with **Undo** (restores exactly the `trashed` ids that call returned); `useTrash.version` re-counts the Trash button |
+
+Plus `state/projectAssets.ts`: one `ProjectInfo` per show (`GET
+/api/project` — assets, roles, folder map, canvas), polled every 3 s while
+any component holds `useProjectInfo(show)` (refcounted), so an agent's
+`pin_asset` shows up live; after an app-side pin call
+`refreshProjectInfo(show)`. `pinsByPath(info)` = path → asset names.
+
+- **Why a refcount + layer stack instead of each dialog catching keys:**
+  room shortcuts are window listeners registered once at boot; the only
+  cheap, reliable gate is a module flag they check first (`shortcuts.ts`,
+  Studio's handler). Esc is a single capture-phase window listener that
+  calls the **topmost** layer and stops the event, so a Lightbox over a
+  Modal closes alone. An open `<Popover>` (marked `data-popover`) beats
+  every layer: its own listener closes it, the next Esc reaches the layer.
+- **Z-order:** Modal `z-[52]` < Lightbox `z-[58]` < Popover `z-[60]` (a
+  NamePrompt opened from a lightbox's ★ sits on top) < toasts `z-[90]` (an
+  Undo stays clickable over a dialog). Studio's `KeyPrompt` is `z-50`.
+- **Toasts can carry one action** (`store.toast(text, tone, {action:
+  {label, run}, ms})`, 10 s by default with an action) — rendered by
+  `TopBar.tsx::Toasts`.
+- Everything is portalled to `<body>`, a sibling of the page — never an
+  ancestor painting over a `<NativeSlot>` (the hole rule); a modal simply
+  covers the native image while open.
+
+## Show setup wizard (`components/setup/`, show-setup W1, 2026-10-16)
+
+The venue-day steps before anything renders, as one `Modal`
+(`SetupWizard.tsx`, mounted once in `App.tsx` as `SetupHost`). Entry
+points: project menu **New show…** / **Show setup…**, ⚙ Setup → **Show
+setup**. State: `state/setup.ts` — `openSetup({project?, step?, newShow?})`
+/ `closeSetup()`, the wizard's **own `project`** (default = the open show;
+reopening on the same show resumes the last step), and per-show drafts
+(the last surface run + corners + sliders, the segmentation prompt fork +
+settings, the last region extract + typed ids/labels) so jumping between
+steps loses nothing. It passes `project=` on every call; the engine keeps
+playing the open show. Steps are chips (✓ = that step's assets are pinned
+in `assets.json`, read through `useProjectInfo`, so an agent's pins tick
+them too), freely clickable once a show is picked; footer Back / Next.
+
+| Step | File | Calls |
+|---|---|---|
+| Show | `ShowStep.tsx` | pick a show (`existing_projects`) or name + canvas → `runTool('set_project', {name, canvas})`; a legacy show without a canvas can lock one; pinned-asset thumbs + the folder map (`info.layout`) |
+| Photos | `PhotosStep.tsx` | slots **Lit** / **Ambient**: Finder drop (`useFileDrop`; drops go to the targeted slot, two files = lit + ambient), Choose file…, Newest from Downloads (`import_photos` without paths, count 1), or the `captures/` gallery → `import_photos {conform: false}` + `pinAsset(photo_lit \| photo_ambient)`. **Project white** = `setTestPattern('white')` on the open show's output (hint + display buttons while OUTPUT is off); turned off when the step unmounts (leave the step / close the wizard) |
+| Surface | `SurfaceStep.tsx`, `QuadEditor.tsx` | the lit photo with a 4-corner quad (18 px grab radius, ⇧ = ¼ speed, a 4× loupe while dragging, arrow keys nudge a clicked corner by one photo pixel). Sliders = `rectify_surface`'s own defaults. **Run** → `rectifySurface` (corners only when moved by hand; an auto run's returned corners fill the quad; "Auto-detect" forgets manual corners). Outputs side by side (Lightbox compares against the lit crop), **Use this run** pins `surface_lit` + `surface` (+ `surface_ambient`), ★ pins one. **Trials** = `surfaces/` filtered to `*_surface.png`; a click reloads its outputs + settings from `libraryRecord(id).record.args` (auto-detected corners aren't in the record, so an auto trial loads without a quad) |
+| Segmentation | `SegmentationStep.tsx` | input `AssetPicker` (default `surface_lit`); prompt = a fork of `listPrompts('segmentation', project)` (show scope first, then WZRD), `{n_regions}` from the stepper via `fillPrompt`, Save to project / Save to WZRD (`NamePrompt` → `savePrompt`), Reset; count 1–8, 1K/2K, thinking minimal/medium; estimate + spend-cap confirm exactly like the Render panel; **Generate** → `startRender('nano_banana', {…, aspect_ratio: 'auto', dest: <show>/segmentation}, count)`; a `MediaGallery` of that folder shows the job tiles, ★ pins `segmentation` |
+| Regions | `RegionsStep.tsx` | `segmentation` + `surface` pickers, the `extract_color_regions` sliders → `runTool` → an overview (surface + every mask tinted in its colour, hover a card to single one out — canvas compositing only, never `getImageData`: media URLs are another origin, the canvas is tainted) + a card per region (shape swatch, area %, **id** slug-unique, label) → **Build layer pack** = `runTool('build_layerpack', {masks, mask_ids, surface_image, source_capture: photo_lit, tags: {layers: {id: {label}}}, pack_name})`; result note, then **Open show** (two clicks, `actions.ts::openProject(info.scene_path)`) once the show has a scene |
 
 ## Mechanisms worth knowing
 
@@ -526,6 +607,9 @@ code drawer: save the open file) · Delete/⌫ delete selected layer · ⌘Z
 restore last deleted layer · Esc deselect (Prepare) · ⌘0 Studio · ⌘1
 Prepare · ⌘2 Perform · ⌘3 Align · ⌘4 Debug · ? help. Studio has its own
 single keys (see "Studio + the hub"); none of the above fire there.
+**While a modal or lightbox is open nothing here fires** (not even ⌘0–4;
+`ui/media/modalState.ts::modalOpen()`, show-setup G11) — digits in a
+dialog must not select layers, T must not TAKE.
 Faders: press = jump, ⇧-drag = fine, double-click = reset. **No mouse
 wheel** — the wheel always scrolls the panel (a future MIDI bridge drives
 faders through the same `actions.ts` calls; gaps listed in

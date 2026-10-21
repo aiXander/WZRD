@@ -17,6 +17,9 @@ uv run modal run    --env wzrd deploy/textureflow/app.py::lock              # re
 #   smoke also takes --gpu A100-40GB --out <dir> (render on another GPU type)
 ```
 
+Experiments (the graph as plain Python, vendored node code, parity vs this stack): the separate
+`textureflow-lab` repo, `~/Documents/GitHub/Gigabrain/VJ/textureflow-lab`.
+
 Client call:
 
 ```python

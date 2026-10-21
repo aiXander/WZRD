@@ -42,5 +42,10 @@
   "label_render": {"enabled": true, "timeout": 30},
   "move_render": {"enabled": true, "timeout": 120},
   "rename_render": {"enabled": true, "timeout": 60},
-  "add_to_deck": {"enabled": true, "timeout": 60}
+  "add_to_deck": {"enabled": true, "timeout": 60},
+  "rectify_surface": {"enabled": true, "timeout": 120},
+  "pin_asset": {"enabled": true, "timeout": 30},
+  "list_assets": {"enabled": true, "timeout": 15},
+  "list_prompts": {"enabled": true, "timeout": 15},
+  "save_prompt": {"enabled": true, "timeout": 15}
 }

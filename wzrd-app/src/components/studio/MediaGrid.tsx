@@ -1,12 +1,14 @@
 // Studio's folder grid (A2): static thumbnails (no animated thumbs, no
 // autoplay — S10), score / tag / codec badges, tiles for running jobs that
 // land in this folder (elapsed / ETA), files still being indexed, a
-// "show ≤ N" filter and "delete ≤ N in this folder". Click / ⇧ / ⌘ select;
-// double-click plays in the monitor. Tiles drag out as library paths (the
+// "show ≤ N" filter and "delete ≤ N in this folder" (to the trash, like
+// every delete — show-setup G6; the header's Trash button restores). Click /
+// ⇧ / ⌘ select; double-click plays in the monitor; hover ⤢ (or F / Enter)
+// opens the full-screen Lightbox. Tiles drag out as library paths (the
 // style tray takes them; D1's deck slots will too).
 
 import { memo, useEffect, useRef, useState } from 'react';
-import { cancelJob, mediaUrl, startRender, type Job, type LibraryItem } from '../../api/hub';
+import { mediaUrl, startRender, type LibraryItem } from '../../api/hub';
 import { refreshJobs, useHub } from '../../state/hub';
 import { useStore } from '../../state/store';
 import {
@@ -17,6 +19,9 @@ import {
   visibleItems,
 } from '../../state/studio';
 import { Btn } from '../../ui/primitives';
+import { JobTile } from '../../ui/media/JobTile';
+import { RecentlyDeleted } from '../../ui/media/RecentlyDeleted';
+import { sameDir } from '../../ui/media/types';
 
 export const LIBRARY_DRAG = 'application/x-wzrd-paths';
 
@@ -42,7 +47,7 @@ export function MediaGrid() {
   const jobs = useHub((s) => s.jobs);
   const items = visibleItems({ listing, maxScore });
   const sel = new Set(selected);
-  const running = jobs.filter((j) => j.status === 'running' && j.dest === dir);
+  const running = jobs.filter((j) => j.status === 'running' && sameDir(j.dest, dir));
   const focusRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -64,10 +69,11 @@ export function MediaGrid() {
         <MakeFolderPlayable />
         <ScoreFilter />
         <DeleteScored />
+        <RecentlyDeleted />
       </header>
       {deleteArmed > 1 && (
         <div className="px-3 py-1 text-[11px] bg-bad/15 text-bad border-b border-bad/40">
-          Press ⌫ again to delete {deleteArmed} files (labels and settings are kept).
+          Press ⌫ again to move {deleteArmed} files to the trash (restorable for 30 min; labels and settings are kept).
         </div>
       )}
       {listError && <div className="px-3 py-1 text-[11px] text-bad">{listError}</div>}
@@ -175,6 +181,18 @@ const Tile = memo(function Tile({
         {(item.codec ?? item.kind ?? '?').toUpperCase().slice(0, 5)}
       </span>
       {playing && <span className="absolute bottom-7 right-1 text-[10px] text-deck">▶</span>}
+      <button
+        className="absolute top-6 right-1 w-6 h-6 rounded bg-black/75 border border-line2 text-[12px] leading-none text-fg2 hover:text-fg hover:border-fg4 opacity-0 group-hover:opacity-100 transition-opacity"
+        title="Full-screen (F / Enter)"
+        onClick={(e) => {
+          e.stopPropagation();
+          clickItem(item.path, {});
+          useStudio.setState({ lightbox: item.path });
+        }}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        ⤢
+      </button>
       <div className="px-1.5 py-1 flex items-center gap-1 min-w-0">
         <span className="text-[10px] text-fg2 truncate flex-1 min-w-0">{item.name}</span>
       </div>
@@ -190,42 +208,6 @@ const Tile = memo(function Tile({
     </div>
   );
 });
-
-function JobTile({ job }: { job: Job }) {
-  const elapsed = job.elapsed_s ?? 0;
-  const eta = job.eta_s;
-  const frac = eta != null && elapsed + eta > 0 ? elapsed / (elapsed + eta) : null;
-  return (
-    <div
-      className="relative rounded-md border border-deck/50 bg-bg overflow-hidden"
-      title={`${job.tool} by ${job.by} — ${JSON.stringify(job.args).slice(0, 300)}`}
-    >
-      <div className="aspect-video flex flex-col items-center justify-center gap-1">
-        <span className="text-[11px] text-deck font-semibold animate-pulse">rendering</span>
-        <span className="num text-[10px] text-fg3">
-          {Math.round(elapsed)} s{eta != null ? ` · ~${Math.round(eta)} s left` : ''}
-        </span>
-      </div>
-      {frac != null && <div className="absolute bottom-0 left-0 h-[2px] bg-deck" style={{ width: `${frac * 100}%` }} />}
-      <div className="px-1.5 py-1 text-[10px] text-fg2 flex items-center gap-1 min-w-0">
-        <span className="truncate flex-1">
-          {job.tool} · {job.by}
-        </span>
-        <button
-          className="text-fg3 hover:text-bad shrink-0"
-          title="Cancel this render (no output; Modal / FAL cancel the remote call)"
-          onClick={() =>
-            cancelJob(job.job)
-              .then(refreshJobs)
-              .catch((e) => useStore.getState().toast(`Cancel failed: ${e}`, 'bad'))
-          }
-        >
-          ✕
-        </button>
-      </div>
-    </div>
-  );
-}
 
 /** Videos in this folder the engine can't play yet and that have no HAP
  *  beside them (S8) — "Make playable" queues a `to_hap` job for each. */
@@ -295,7 +277,7 @@ function DeleteScored() {
         await deleteScoredHere(armed.n, false);
         setArmed(null);
       }}
-      title="Delete the media files; their records, labels and settings stay"
+      title="Move the media files to the trash (restorable for 30 min); their records, labels and settings stay"
     >
       Delete {armed.count} file{armed.count === 1 ? '' : 's'}?
     </Btn>

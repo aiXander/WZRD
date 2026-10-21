@@ -768,7 +768,7 @@ pub fn dispatch(
                 .map_err(|e| RpcError::message(format!("params: {e}")))?;
             let pattern = crate::alignment::TestPattern::parse(&p.pattern).ok_or_else(|| {
                 RpcError::message(format!(
-                    "unknown test pattern {:?} (\"none\" | \"grid\" | \"border\" | \"corners\")",
+                    "unknown test pattern {:?} (\"none\" | \"grid\" | \"border\" | \"corners\" | \"white\")",
                     p.pattern
                 ))
             })?;

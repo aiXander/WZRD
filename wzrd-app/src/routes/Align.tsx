@@ -27,6 +27,7 @@ const PATTERNS: { id: AlignmentDoc['test_pattern']; label: string; hint: string 
   { id: 'grid', label: 'Grid', hint: 'Generated in source space — bends exactly as the content does' },
   { id: 'border', label: 'Border', hint: 'Just the source rectangle outline' },
   { id: 'corners', label: 'Corners', hint: 'Corner marks + centre crosshair' },
+  { id: 'white', label: 'White', hint: 'The whole projector raster full white — for the lit surface photo' },
 ];
 
 export function Align() {

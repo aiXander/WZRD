@@ -7,8 +7,10 @@
 // an agent reading `studio_selection()`) land in it. Keys (only while no
 // input has focus): arrows move (⇧ extends), space plays in the monitor,
 // 0–9 score (− clears), T tag, N note, M move, D add to the open show’s
-// active deck, ⌫ delete media (records are
+// active deck, F / Enter full-screen (ui/media/Lightbox over the folder),
+// ⌫ delete media (to the trash for 30 min, Undo in the toast; records are
 // kept; a multi-selection needs a second ⌫ within 2 s), Esc deselects.
+// Every key is off while a modal / lightbox is open (show-setup G11).
 // No telemetry subscriptions here — the only engine use is the monitor's
 // `preview.file`.
 
@@ -19,12 +21,17 @@ import { MediaGrid, gridColumns } from '../components/studio/MediaGrid';
 import { Monitor } from '../components/studio/Monitor';
 import { RecordPanel } from '../components/studio/RecordPanel';
 import { RenderPanel } from '../components/studio/RenderPanel';
-import { Seg } from '../ui/primitives';
 import { StyleTray } from '../components/studio/StyleTray';
 import { KeyPrompt, type PromptKind } from '../components/studio/KeyPrompt';
+import { Lightbox } from '../ui/media/Lightbox';
+import { modalOpen } from '../ui/media/modalState';
+import { softDelete } from '../ui/media/trash';
+import { toMediaRef } from '../ui/media/types';
+import { Btn, Seg } from '../ui/primitives';
 import { addToDeck } from '../state/decks';
 import { useHub, useJobsFeed } from '../state/hub';
 import {
+  clickItem,
   deleteMedia,
   lastDir,
   loadSelection,
@@ -34,6 +41,7 @@ import {
   setScore,
   targets,
   useStudio,
+  visibleItems,
 } from '../state/studio';
 
 const POLL_MS = 2000;
@@ -109,7 +117,7 @@ export function Studio() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.metaKey || e.ctrlKey || e.altKey || prompt) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || prompt || modalOpen()) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) {
         return;
@@ -157,6 +165,13 @@ export function Studio() {
         case 'M':
           e.preventDefault();
           return setPrompt('move');
+        case 'f':
+        case 'F':
+        case 'Enter':
+          if (!st.focus) return;
+          e.preventDefault();
+          useStudio.setState({ lightbox: st.focus });
+          return;
         case 'Escape':
           useStudio.setState({ selected: [] });
           return;
@@ -200,6 +215,47 @@ export function Studio() {
       </Split>
       <StyleTray />
       {prompt && <KeyPrompt kind={prompt} onClose={() => setPrompt(null)} />}
+      <StudioLightbox />
     </div>
+  );
+}
+
+/** F / Enter / a tile's ⤢: the focused item full-screen, ← → over the
+ *  folder's visible items (the cursor follows, so closing leaves it there). */
+function StudioLightbox() {
+  const path = useStudio((s) => s.lightbox);
+  const listing = useStudio((s) => s.listing);
+  const maxScore = useStudio((s) => s.maxScore);
+  if (!path) return null;
+  const items = visibleItems({ listing, maxScore }).map(toMediaRef);
+  const index = items.findIndex((m) => m.path === path);
+  const close = () => useStudio.setState({ lightbox: null });
+  return (
+    <Lightbox
+      items={items}
+      index={Math.max(0, index)}
+      onIndex={(i) => {
+        const p = items[i]?.path;
+        if (!p) return;
+        useStudio.setState({ lightbox: p });
+        clickItem(p, {});
+      }}
+      onClose={close}
+      actions={(ref) => (
+        <Btn
+          size="sm"
+          tone="danger"
+          onClick={() => {
+            const i = items.findIndex((m) => m.path === ref.path);
+            const next = items[i + 1] ?? items[i - 1];
+            useStudio.setState((s) => ({ lightbox: next?.path ?? null, monitor: s.monitor === ref.path ? null : s.monitor }));
+            softDelete([ref.path], refreshListing).then(refreshListing);
+          }}
+          title="Delete (to the trash — restorable for 30 min)"
+        >
+          Delete
+        </Btn>
+      )}
+    />
   );
 }

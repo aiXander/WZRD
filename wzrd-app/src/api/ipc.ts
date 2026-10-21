@@ -205,7 +205,7 @@ export type AlignmentDoc = {
   flip_v?: boolean;
   fit?: OutputFit;
   points_max: number;
-  test_pattern: 'none' | 'grid' | 'border' | 'corners';
+  test_pattern: 'none' | 'grid' | 'border' | 'corners' | 'white';
   solve_ok: boolean;
 };
 
@@ -307,9 +307,10 @@ export const alignmentSet = (patch: AlignmentPatch) =>
     fit: patch.fit ?? null,
   });
 export const alignmentReset = () => invoke<AlignmentDoc>('alignment_reset');
-/** §3.6 test pattern, generated in source space so it warps with the content. */
+/** §3.6 test pattern: the line patterns are generated in source space so they
+ *  warp with the content; `white` floods the whole raster (show-setup photo). */
 export const alignmentSetTestPattern = (
-  pattern: 'none' | 'grid' | 'border' | 'corners'
+  pattern: AlignmentDoc['test_pattern']
 ) => invoke<AlignmentDoc>('alignment_set_test_pattern', { pattern });
 
 export const sceneLoad = (jsonText: string) =>

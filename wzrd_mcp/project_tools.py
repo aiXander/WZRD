@@ -132,3 +132,93 @@ async def import_photos(
         result["note"] = "project has no canvas — photos kept their own size (set_project(canvas=…) on a new project)"
     result["_provenance"] = {"parent": {os.path.realpath(p["path"]): p["source"] for p in photos}}
     return result
+
+
+# ---------------------------------------------------------------------------
+# Named assets (show-setup A1) and prompt templates (P1)
+# ---------------------------------------------------------------------------
+@tool(title="Pin asset", tags={"project"}, idempotent=True, project_arg=True)
+async def pin_asset(
+    name: str,
+    path: Optional[str] = None,
+    note: Optional[str] = None,
+    unpin: bool = False,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Name one of the show's files (or forget a name) so every tool can take it as "asset:<name>".
+
+    One name → one file; pinning a name again moves it. The file is never
+    moved or deleted — unpin only forgets the name. Well-known names (the
+    show setup pins these): photo_lit, photo_ambient, surface_lit, surface,
+    surface_ambient, segmentation — list_assets says what each is for.
+
+    Args:
+        name: Asset name: lowercase letters, digits, _ and - (max 48).
+        path: Absolute path of an image or video (or "asset:<other>"). Required unless unpin.
+        note: Optional one-line note shown beside the asset.
+        unpin: True = forget the name (the file stays).
+    """
+    from . import assets
+
+    try:
+        if unpin:
+            out = await asyncio.to_thread(assets.unpin, name)
+        else:
+            if not path:
+                raise ValueError("path is required (or unpin=true)")
+            out = await asyncio.to_thread(assets.pin, name, path, note=note, by="agent")
+    except ValueError as exc:
+        raise ToolError(str(exc))
+    return {"project": project.active_project(), "assets": out}
+
+
+@tool(title="List assets", tags={"project"}, read_only=True, idempotent=True, project_arg=True)
+async def list_assets(ctx: Optional[Context] = None) -> dict:
+    """The show's named assets (pass any as "asset:<name>"), the well-known roles, and its folder map."""
+    from . import assets
+
+    info = await asyncio.to_thread(project.describe)
+    return {**info, "roles": assets.ROLES}
+
+
+@tool(title="List prompt templates", tags={"project", "generate"}, read_only=True, idempotent=True,
+      project_arg=True)
+async def list_prompts(kind: Optional[str] = None, ctx: Optional[Context] = None) -> dict:
+    """Prompt templates for this show (project scope first), then WZRD's global ones. Fill "{n_regions}" with a plain replace before use.
+
+    Args:
+        kind: Template kind, e.g. "segmentation" or "mask". Omit for all.
+    """
+    from . import prompts
+
+    try:
+        found = await asyncio.to_thread(prompts.list_prompts, kind)
+    except ValueError as exc:
+        raise ToolError(str(exc))
+    return {"prompts": found}
+
+
+@tool(title="Save prompt template", tags={"project", "generate"}, project_arg=True)
+async def save_prompt(
+    kind: str,
+    name: str,
+    prompt: str,
+    scope: str = "project",
+    notes: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Save a prompt template — to this show (scope="project") or to WZRD for every show (scope="wzrd", only on Xander's word). Same kind + name replaces it.
+
+    Args:
+        kind: Template kind slug, e.g. "segmentation", "mask".
+        name: Template name slug (lowercase, digits, _ -). "default" is the one the UI preselects.
+        prompt: The template text; "{n_regions}" is the one placeholder.
+        scope: "project" (this show) or "wzrd" (global, repo library/prompts/).
+        notes: Optional notes: when to use it, what it fixed.
+    """
+    from . import prompts
+
+    try:
+        return await asyncio.to_thread(prompts.save_prompt, kind, name, prompt, scope, None, notes)
+    except ValueError as exc:
+        raise ToolError(str(exc))

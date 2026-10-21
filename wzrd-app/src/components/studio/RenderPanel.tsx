@@ -7,6 +7,10 @@
 //   what's set here wins), or the style tray's images; the target region
 //   sets the aspect (long side 640, step 32) and is recorded as "made for";
 //   length / motion / seed; Draft (4 steps, no upscale, ≈ 30 s) or Final.
+//   Optional shape input (`control_input`, an AssetPicker over the open
+//   show's named assets — `surface_lit` / `surface` first) with "Use as
+//   shape" → ControlNet (`use_controlnet1` + `controlnet_strength1`
+//   0.35–0.65), and a `diffusion_mask`. Sent only when set (show-setup M1).
 // - Image (Nano Banana): a prompt + the tray as references.
 // - Video (Kling v2.5): a prompt + the focused still as the start frame,
 //   5 or 10 s.
@@ -28,6 +32,9 @@ import { regionName } from '../../state/scene';
 import { useStore } from '../../state/store';
 import { itemByPath, short, useStudio } from '../../state/studio';
 import { Btn, Seg } from '../../ui/primitives';
+import { Fader } from '../../ui/Fader';
+import { AssetPicker } from '../../ui/media/AssetPicker';
+import { SpendLine, wouldExceedCap } from './SpendLine';
 
 type Kind = 'flow' | 'image' | 'video';
 const TOOL: Record<Kind, RenderTool> = {
@@ -65,6 +72,12 @@ export function RenderPanel() {
   const [estErr, setEstErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [overCap, setOverCap] = useState(false);
+  const [controlInput, setControlInput] = useState<string | null>(null);
+  const [useShape, setUseShape] = useState(true);
+  const [cnStrength, setCnStrength] = useState(0.45);
+  const [diffusionMask, setDiffusionMask] = useState<string | null>(null);
+  const showDir = useStore((s) => s.project?.dir);
+  const show = showDir ? showDir.replace(/\/+$/, '').split('/').pop() ?? null : null;
 
   useEffect(() => {
     if (!hubUp) return;
@@ -88,6 +101,11 @@ export function RenderPanel() {
       if (size) Object.assign(a, size);
       if (seed.trim()) a.seed = Number(seed);
       if (!final) Object.assign(a, { n_steps: 4, use_upscale: false, upscale_esrgan: false });
+      if (controlInput) {
+        a.control_input = controlInput;
+        if (useShape) Object.assign(a, { use_controlnet1: true, controlnet_strength1: Math.round(cnStrength * 100) / 100 });
+      }
+      if (diffusionMask) a.diffusion_mask = diffusionMask;
       return a;
     }
     if (!prompt.trim()) return null;
@@ -96,7 +114,7 @@ export function RenderPanel() {
     }
     if (!startFrame) return null;
     return { ...common, prompt: prompt.trim(), image_url: startFrame, duration: seconds >= 8 ? '10' : '5' };
-  }, [kind, recipe, styles, region, regionLayer, seconds, motion, seed, final, prompt, startFrame]);
+  }, [kind, recipe, styles, region, regionLayer, seconds, motion, seed, final, prompt, startFrame, controlInput, useShape, cnStrength, diffusionMask]);
 
   // The estimate follows the form (debounced).
   const argsKey = JSON.stringify([kind, args, count]);
@@ -114,7 +132,7 @@ export function RenderPanel() {
     return () => clearTimeout(t);
   }, [argsKey, hubUp]);
 
-  const wouldExceed = !!est && est.spend.today_usd + est.spend.running_usd + est.usd > est.spend.cap_usd;
+  const wouldExceed = wouldExceedCap(est);
 
   const go = async (allowOverCap: boolean) => {
     if (!args) return;
@@ -239,6 +257,52 @@ export function RenderPanel() {
                 className="w-full accent-[rgb(var(--deck))]"
               />
             </Field>
+            {show && (
+              <>
+                <Group label="Shape input">
+                  <AssetPicker
+                    project={show}
+                    value={controlInput}
+                    onChange={setControlInput}
+                    suggest={['surface_lit', 'surface']}
+                    placeholder="— none —"
+                    compact
+                  />
+                  {controlInput && (
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <label className="flex items-center gap-1.5 text-[11px] text-fg2 shrink-0 cursor-pointer" title="ControlNet: the render follows this image's shapes / edges. Off = it only shows through black mask areas (and seeds img2img when denoise < 1)">
+                        <input type="checkbox" checked={useShape} onChange={(e) => setUseShape(e.target.checked)} className="accent-[rgb(var(--deck))]" />
+                        Use as shape (ControlNet)
+                      </label>
+                      {useShape && (
+                        <Fader
+                          value={cnStrength}
+                          min={0.35}
+                          max={0.65}
+                          step={0.01}
+                          defaultValue={0.45}
+                          onChange={setCnStrength}
+                          label="strength"
+                          format={(v) => v.toFixed(2)}
+                          size="sm"
+                          className="flex-1 min-w-0"
+                          title="Subtle 0.35–0.45, strong 0.45–0.65; higher tends to look bad"
+                        />
+                      )}
+                    </div>
+                  )}
+                </Group>
+                <Group label="Mask (white = animated)">
+                  <AssetPicker
+                    project={show}
+                    value={diffusionMask}
+                    onChange={setDiffusionMask}
+                    placeholder="— none —"
+                    compact
+                  />
+                </Group>
+              </>
+            )}
             <div className="flex gap-3">
               <Field label="Seed">
                 <input
@@ -275,17 +339,7 @@ export function RenderPanel() {
       </div>
       <footer className="flex items-center gap-2 p-2 border-t border-line shrink-0">
         <div className="flex-1 min-w-0 text-[11px] leading-tight">
-          {missing ? (
-            <span className="text-fg3">{missing}</span>
-          ) : estErr ? (
-            <span className="text-bad">{estErr}</span>
-          ) : est ? (
-            <span className={wouldExceed ? 'text-bad' : est.spend.warn ? 'text-amber' : 'text-fg2'}>
-              ≈ ${est.usd.toFixed(2)} · today ${est.spend.today_usd.toFixed(2)} of ${est.spend.cap_usd.toFixed(0)}
-            </span>
-          ) : (
-            <span className="text-fg3">estimating…</span>
-          )}
+          <SpendLine missing={missing} estErr={estErr} est={est} />
         </div>
         {overCap ? (
           <Btn tone="danger" disabled={busy} onClick={() => go(true)} title="Render even though it takes today past the daily cap">
@@ -322,5 +376,16 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="label">{label}</span>
       {children}
     </label>
+  );
+}
+
+/** `Field` without the <label>: for controls holding buttons / faders, where
+ *  a label would forward every click to its first button (the picker). */
+function Group({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1 min-w-0">
+      <span className="label">{label}</span>
+      {children}
+    </div>
   );
 }

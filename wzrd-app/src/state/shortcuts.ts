@@ -26,6 +26,7 @@ import {
 import { flushScene } from './sceneCommit';
 import { parseScene } from './scene';
 import { useStore, type Route } from './store';
+import { modalOpen } from '../ui/media/modalState';
 
 function typing(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;
@@ -54,6 +55,10 @@ const ROUTE_KEYS: Record<string, Route> = {
 export function useShortcuts() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      // A modal / lightbox owns the keyboard (show-setup G11): digits there
+      // must not select layers, T must not TAKE, ⌘1 must not switch rooms
+      // under a dialog.
+      if (modalOpen()) return;
       const st = useStore.getState();
       if (e.metaKey || e.ctrlKey) {
         if (ROUTE_KEYS[e.key]) {
@@ -158,6 +163,7 @@ export function useShortcuts() {
       if (digit && ids[Number(digit) - 1]) st.setSelectedBindingId(ids[Number(digit) - 1]);
     }
     function onKeyUp(e: KeyboardEvent) {
+      // Not gated by modalOpen(): a flash held when a modal opened must still release.
       if (e.key === 'f' || e.key === 'F') flash(false);
     }
     window.addEventListener('keydown', onKey);

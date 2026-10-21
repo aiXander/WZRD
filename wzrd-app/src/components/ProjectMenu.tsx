@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'react';
 import { projectsList, type ProjectEntry } from '../api/ipc';
 import { openProject, restartEngine, saveProjectAs } from '../state/actions';
 import { relinkMissing, useDecks } from '../state/decks';
+import { openSetup } from '../state/setup';
 import { useStore } from '../state/store';
 import { Popover } from '../ui/Popover';
 import { Btn, Dot } from '../ui/primitives';
@@ -90,8 +91,8 @@ function ProjectList({ anchor, onClose }: { anchor: HTMLElement | null; onClose:
         {err && <div className="p-2 text-[11px] text-bad">{err}</div>}
         {list && list.projects.length === 0 && (
           <div className="p-2 text-[11px] text-fg3 leading-snug">
-            No project folder with a scene.json under the projects root yet — build one with the MCP
-            (<b className="text-fg2">build_layerpack</b> writes a starter scene).
+            No project folder with a scene.json under the projects root yet — start one with{' '}
+            <b className="text-fg2">New show…</b> below (its last step writes a starter scene).
           </div>
         )}
         {list?.projects.map((p) => {
@@ -129,6 +130,7 @@ function ProjectList({ anchor, onClose }: { anchor: HTMLElement | null; onClose:
           );
         })}
       </div>
+      <ShowSetupRow onClose={onClose} />
       <SaveAs busy={busy} setBusy={setBusy} onDone={onClose} />
       <div className="flex items-center gap-2 mt-2 pt-2 border-t border-line">
         <Btn size="sm" tone={running ? 'solid' : 'danger'} active={!running} onClick={restart} title="Re-boot the engine on this project (session + alignment are saved first)">
@@ -164,6 +166,28 @@ function RelinkButton() {
     >
       {busy ? 'Searching…' : `Relink missing${n ? ` (${n})` : ''}`}
     </Btn>
+  );
+}
+
+/** Show setup (docs/TODO/show-setup.md): photos → surface → segmentation →
+ *  regions, for a new show or this one. */
+function ShowSetupRow({ onClose }: { onClose: () => void }) {
+  const project = useStore((s) => s.project);
+  const go = (newShow: boolean) => {
+    openSetup(newShow ? { newShow: true } : {});
+    onClose();
+  };
+  return (
+    <div className="flex items-center gap-2 mt-2 pt-2 border-t border-line">
+      <Btn size="sm" tone="deck" onClick={() => go(true)} title="Make a new show: canvas, photos, surface, regions, layer pack">
+        New show…
+      </Btn>
+      {project && (
+        <Btn size="sm" onClick={() => go(false)} title="Photos, surface, segmentation and regions for this show">
+          Show setup…
+        </Btn>
+      )}
+    </div>
   );
 }
 

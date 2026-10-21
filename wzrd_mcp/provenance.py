@@ -14,7 +14,11 @@ reaches the agent:
 
     {"est_usd": {path: usd}, "args": {...}, "region": id, "source_box": [...],
      "parent": path | {output path: path}, "variant_of": {hap path: source path},
-     "paid": bool}
+     "paid": bool, "record": {extra top-level record fields}}
+
+`record` adds tool-specific fields to every master record of the call
+(e.g. `rectify_surface`'s `corners` / `manual_corners`); the standard keys
+always win.
 
 `est_usd` is keyed per output so a multi-output call is counted once, on the
 file that cost the money. `variant_of` marks a HAP made from a source in the
@@ -167,6 +171,7 @@ def record_outputs(tool: str, client_args: dict, result: dict, since: float,
         else:
             parent = parents.get(out, default_parent) if isinstance(parents, dict) else parents
             record = {
+                **(prov.get("record") or {}),
                 "schema": RECORD_SCHEMA, "id": identity.new_id(), "variant": "master", "tool": tool,
                 "args": args, "inputs": input_refs,
                 "parent": _render_id_of(parent) if parent and Path(parent).is_file() else None,

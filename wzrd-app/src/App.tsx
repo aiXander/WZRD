@@ -40,6 +40,7 @@ import { useShortcuts } from './state/shortcuts';
 import { useAutopilotDriver } from './state/autopilot';
 import { HelpOverlay, Toasts, TopBar } from './components/TopBar';
 import { EngineDownBanner } from './components/ProjectMenu';
+import { SetupHost } from './components/setup/SetupWizard';
 import { Studio } from './routes/Studio';
 import { Prepare } from './routes/Prepare';
 import { Align } from './routes/Align';
@@ -313,6 +314,7 @@ export default function App() {
         {route === 'debug' && <DebugRoute />}
       </main>
       <HelpOverlay />
+      <SetupHost />
       <Toasts />
     </div>
   );

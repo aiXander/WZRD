@@ -56,6 +56,8 @@ export function Popover({
   return createPortal(
     <div
       ref={ref}
+      // ui/media/modalState.ts: an open popover gets Esc before the modal under it.
+      data-popover=""
       style={{ width, left: pos?.left ?? -9999, top: pos?.top ?? -9999 }}
       className="fixed z-[60] rounded-lg border border-line2 bg-raised shadow-[0_16px_48px_rgba(0,0,0,.6)] p-2.5"
     >

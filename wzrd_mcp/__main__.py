@@ -77,6 +77,9 @@ def main() -> None:
     atexit.register(hub.release_lock)
     idle = args.idle_exit if args.idle_exit is not None else hub.IDLE_EXIT_S
     hub.start_idle_watch(idle)
+    hub.start_trash_flusher()
+    from . import library
+    library.ensure_projects_root()
 
     asgi_app = mcp.http_app(transport="streamable-http")
     app = hub.Activity(TimingMiddleware(asgi_app))

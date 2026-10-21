@@ -13,7 +13,6 @@
 
 import { create } from 'zustand';
 import {
-  deleteFiles,
   deleteScored,
   getSelection,
   labelRenders,
@@ -25,6 +24,7 @@ import {
   type LibraryItem,
   type Selection,
 } from '../api/hub';
+import { softDelete, undoToast } from '../ui/media/trash';
 import { hubUp, showName, useHub } from './hub';
 import { useStore } from './store';
 
@@ -48,6 +48,8 @@ type StudioState = {
   expanded: Record<string, { name: string; path: string }[]>;
   /** Multi-delete armed: how many items a second ⌫ would delete (0 = not). */
   deleteArmed: number;
+  /** The full-screen viewer (ui/media/Lightbox) is open on this path. */
+  lightbox: string | null;
   setFocus: (p: string | null) => void;
   setMaxScore: (n: number | null) => void;
   setMonitor: (p: string | null) => void;
@@ -64,6 +66,7 @@ export const useStudio = create<StudioState>((set) => ({
   selection: { styles: [], items: [], target: null, project: null },
   expanded: {},
   deleteArmed: 0,
+  lightbox: null,
   setFocus: (focus) => set({ focus }),
   setMaxScore: (maxScore) => set({ maxScore }),
   setMonitor: (monitor) => set({ monitor }),
@@ -258,6 +261,8 @@ export const setNotes = (items: LibraryItem[], notes: string) =>
   label(items, { notes: notes.trim() || null }, { notes: notes.trim() || null });
 
 // ---------- move / delete (hub only; delete never refused — S7) ----------
+// Deletes are soft (show-setup G6): the hub moves the files to a trash for
+// 30 min; the toast carries Undo, the grid header's Trash button lists them.
 
 export async function moveTo(items: LibraryItem[], dest: string) {
   if (!items.length) return;
@@ -279,12 +284,7 @@ export async function deleteMedia(items: LibraryItem[]) {
   if (useStudio.getState().monitor && paths.includes(useStudio.getState().monitor!)) {
     useStudio.setState({ monitor: null });
   }
-  try {
-    await deleteFiles(paths);
-    toast(`Deleted ${paths.length} file${paths.length === 1 ? '' : 's'} — labels and settings kept`, 'ok');
-  } catch (e) {
-    toast(`Delete failed: ${e}`, 'bad');
-  }
+  await softDelete(paths, refreshListing);
   await refreshListing();
 }
 
@@ -294,7 +294,12 @@ export async function deleteScoredHere(maxScore: number, dryRun: boolean) {
   try {
     const r = await deleteScored(dir, maxScore, dryRun);
     if (!dryRun) {
-      toast(`Deleted media scored ≤ ${maxScore} — records kept`, 'ok');
+      const n = r.deleted?.length ?? r.count ?? 0;
+      undoToast(
+        `Moved ${n} file${n === 1 ? '' : 's'} scored ≤ ${maxScore} to the trash — restorable for 30 min`,
+        (r as { trashed?: { id: string; path: string }[] }).trashed,
+        refreshListing
+      );
       await refreshListing();
     }
     return r;

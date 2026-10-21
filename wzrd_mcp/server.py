@@ -68,7 +68,10 @@ Inputs accept local paths or URLs. A show is a project folder: set_project creat
 pass project=<name> on every venue, region= and generator call (nothing is remembered between \
 calls; omitted = the show open in the WZRD app). Generators (nano_banana, texture_flow, kling_*, \
 to_hap, extract_frames, concat_videos) write to the media library (~/WZRD/media: the Studio target \
-folder, else inbox/); dest="project" puts one into the project instead. \
+folder, else inbox/); dest="project" (generated/) or dest="project/<folder>" puts one into the \
+project instead. A show names its key files (pin_asset; list_assets shows them and the show's \
+folder map: captures/ surfaces/ segmentation/ regions/ styles/ packs/ …): pass "asset:<name>" \
+(e.g. "asset:surface") as any media argument. \
 Look at what you made (view_media) before presenting it; don't celebrate first results, let the \
 user judge. Run at most 6 generation calls in parallel.
 

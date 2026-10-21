@@ -29,7 +29,7 @@ Example usage:
 
 import cv2
 import numpy as np
-from typing import Tuple, List, Optional, Union
+from typing import List, Optional, Sequence, Tuple, Union
 from pathlib import Path
 import os
 
@@ -612,6 +612,26 @@ def iterative_detection(
     return corners
 
 
+def manual_corners_to_pixels(
+    corners: Sequence[Sequence[float]],
+    image_size: Tuple[int, int],
+) -> np.ndarray:
+    """
+    Normalised manual corners (TL, TR, BR, BL in [0, 1]) -> a (4, 2) pixel array.
+
+    Taken exactly as given (no reordering, no clamping): a hand-placed quad
+    may sit slightly outside the photo, and the caller's order is the
+    rectified frame's orientation.
+    """
+    pts = np.asarray(corners, dtype=np.float32)
+    if pts.shape != (4, 2) or not np.all(np.isfinite(pts)):
+        raise ValueError("corners must be 4 [x, y] points (normalised TL, TR, BR, BL)")
+    if np.any(pts < -0.5) or np.any(pts > 1.5):
+        raise ValueError("corners are normalised to the photo (0-1); got values far outside it")
+    w, h = image_size
+    return pts * np.array([w, h], dtype=np.float32)
+
+
 def apply_margin_to_corners(
     corners: np.ndarray,
     margin: float,
@@ -791,6 +811,7 @@ def detect_projection_from_array(
     target_aspect_ratio: Optional[str] = None,
     output_resolution: Optional[int] = None,
     output_size: Optional[Tuple[int, int]] = None,
+    corners: Optional[Sequence[Sequence[float]]] = None,
 ) -> Tuple[np.ndarray, dict]:
     """
     Detect the projection area from a numpy array and return cropped image.
@@ -810,6 +831,9 @@ def detect_projection_from_array(
         output_size: Optional exact (width, height) the whole detected quad is
                      rectified to, corners untouched — a locked project canvas
                      (the projector raster). Overrides the two arguments above.
+        corners: Optional manual quad — 4 normalised (x, y) points in [0, 1]
+                 (TL, TR, BR, BL) of *image*. Skips detection, and is used
+                 exactly as given: no margin, no aspect adjustment.
 
     Returns:
         Tuple of (cropped_image, info_dict):
@@ -817,6 +841,10 @@ def detect_projection_from_array(
             - info_dict containing:
                 - corners: List of 4 (x, y) tuples normalized to [0, 1] (TL, TR, BR, BL)
                 - corners_pixel: Corner coordinates in pixels
+                - corners_crop: The quad actually rectified (after margin /
+                  aspect adjustment), normalised like `corners` — feed it
+                  back as `corners=` to reproduce the crop
+                - manual_corners: True when `corners` was given
                 - preview: Preview image with detected polygon highlighted
                 - original_size: (width, height) of input image
                 - cropped_size: (width, height) of output crop
@@ -834,25 +862,31 @@ def detect_projection_from_array(
     debug = DebugContext(debug_dir)
     debug.save("input_original", image)
 
-    # Find the projection using iterative detection
-    corners = iterative_detection(image, debug=debug, min_projection_fraction=min_projection_fraction)
+    manual = corners is not None
+    if manual:
+        corners = manual_corners_to_pixels(corners, (w, h))
+        margin = 0.0
+        target_aspect_ratio = None
+    else:
+        # Find the projection using iterative detection
+        corners = iterative_detection(image, debug=debug, min_projection_fraction=min_projection_fraction)
 
-    if corners is None:
-        raise ValueError("Could not detect projection area in image")
+        if corners is None:
+            raise ValueError("Could not detect projection area in image")
 
-    # Order points consistently
-    corners = order_points(corners)
-    debug.save_with_corners("detected_corners", image, corners, (255, 255, 0))
+        # Order points consistently
+        corners = order_points(corners)
+        debug.save_with_corners("detected_corners", image, corners, (255, 255, 0))
 
-    # Clamp corners to image bounds
-    corners[:, 0] = np.clip(corners[:, 0], 0, w - 1)
-    corners[:, 1] = np.clip(corners[:, 1], 0, h - 1)
+        # Clamp corners to image bounds
+        corners[:, 0] = np.clip(corners[:, 0], 0, w - 1)
+        corners[:, 1] = np.clip(corners[:, 1], 0, h - 1)
 
     # Store original detected corners (for preview)
     corners_detected = corners.copy()
 
-    # Apply margin for the crop (clamped to image bounds)
-    corners_for_crop = apply_margin_to_corners(corners, margin, image_size=(w, h))
+    # Apply margin for the crop (clamped to image bounds); manual = as given
+    corners_for_crop = corners.copy() if manual else apply_margin_to_corners(corners, margin, image_size=(w, h))
 
     # Debug: show both detected and margin-adjusted corners
     if debug.enabled:
@@ -926,6 +960,8 @@ def detect_projection_from_array(
         'corners': normalized_corners,
         'corners_pixel': corners_detected.tolist(),
         'corners_crop_pixel': corners_for_crop.tolist(),
+        'corners_crop': [(float(x) / w, float(y) / h) for x, y in corners_for_crop],
+        'manual_corners': manual,
         'preview': preview,
         'original_size': (w, h),
         'cropped_size': (cropped.shape[1], cropped.shape[0]),
@@ -949,6 +985,7 @@ def detect_projection_area(
     target_aspect_ratio: Optional[str] = None,
     output_resolution: Optional[int] = None,
     output_size: Optional[Tuple[int, int]] = None,
+    corners: Optional[Sequence[Sequence[float]]] = None,
 ) -> Tuple[np.ndarray, dict]:
     """
     Detect the projection area in an image file and return cropped image.
@@ -971,20 +1008,12 @@ def detect_projection_area(
         output_size: Optional exact (width, height) the whole detected quad is
                      rectified to, corners untouched — a locked project canvas
                      (the projector raster). Overrides the two arguments above.
+        corners: Optional manual quad (normalised TL, TR, BR, BL) — skips
+                 detection; see `detect_projection_from_array`.
 
     Returns:
-        Tuple of (cropped_image, info_dict):
-            - cropped_image: Perspective-corrected crop of the projection area (BGR uint8)
-            - info_dict containing:
-                - corners: List of 4 (x, y) tuples normalized to [0, 1] (TL, TR, BR, BL)
-                - corners_pixel: Corner coordinates in pixels
-                - preview: Preview image with detected polygon highlighted
-                - original_size: (width, height) of input image
-                - cropped_size: (width, height) of output crop
-                - margin: Margin value used
-                - min_projection_fraction: Minimum projection fraction used
-                - target_aspect_ratio: Target aspect ratio used (if any)
-                - output_resolution: Output resolution used (if any)
+        Tuple of (cropped_image, info_dict) — the info of
+        `detect_projection_from_array`, plus:
                 - input_path: Path to input file
                 - output_path: Path to output file (if saved)
                 - preview_path: Path to preview file (if saved)
@@ -1012,6 +1041,7 @@ def detect_projection_area(
         target_aspect_ratio=target_aspect_ratio,
         output_resolution=output_resolution,
         output_size=output_size,
+        corners=corners,
     )
 
     if debug_dir:

@@ -6,13 +6,16 @@
 // The record comes from library.db via the shell's read-only reader, so it
 // shows while the hub is down; label edits need the hub.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { libraryRecord, startRender, type LibraryItem, type RenderRecord, type RenderTool } from '../../api/hub';
 import { activeDeck, addToDeck, useDecks } from '../../state/decks';
 import { refreshJobs } from '../../state/hub';
 import { useStore } from '../../state/store';
 import { addStyles, removeTag, setScore, short, targets, useStudio } from '../../state/studio';
 import { Btn } from '../../ui/primitives';
+import { pinAsset, unpinAsset } from '../../api/project';
+import { DEFAULT_ROLES, pinsByPath, refreshProjectInfo, useProjectInfo } from '../../state/projectAssets';
+import { NamePrompt } from '../../ui/media/NamePrompt';
 import type { PromptKind } from './KeyPrompt';
 
 export function RecordPanel({ onPrompt }: { onPrompt: (k: PromptKind) => void }) {
@@ -57,6 +60,7 @@ export function RecordPanel({ onPrompt }: { onPrompt: (k: PromptKind) => void })
       </header>
       <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-3 text-[12px]">
         <Scores item={item} />
+        <ShowPins item={item} />
         <Tags item={item} onAdd={() => onPrompt('tag')} />
         <div>
           <div className="label mb-1 flex items-center">
@@ -261,5 +265,79 @@ function MakePlayable({ item }: { item: LibraryItem }) {
     >
       Make playable
     </Btn>
+  );
+}
+
+/** The open show's folder name (what the hub takes as `project=`). */
+function useShowName(): string | null {
+  const dir = useStore((s) => s.project?.dir);
+  return dir ? dir.replace(/\/+$/, '').split('/').pop() ?? null : null;
+}
+
+/** Named assets of the open show that point at this file (show-setup A1),
+ *  and "Pin to show as…" — e.g. pin a surface trial as `surface` so
+ *  TextureFlow's shape picker and the setup wizard offer it. */
+function ShowPins({ item }: { item: LibraryItem }) {
+  const show = useShowName();
+  const { info } = useProjectInfo(show);
+  const pins = useMemo(() => pinsByPath(info)[item.path] ?? [], [info, item.path]);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const btn = useRef<HTMLButtonElement | null>(null);
+  if (!show) return null;
+  const toast = useStore.getState().toast;
+  const pin = async (name: string) => {
+    try {
+      await pinAsset(show, name, item.path);
+      await refreshProjectInfo(show);
+      toast(`Pinned as ${name} in ${show}`, 'ok');
+    } catch (e) {
+      toast(`Pin failed: ${e}`, 'bad');
+    }
+  };
+  const unpin = async (name: string) => {
+    try {
+      await unpinAsset(show, name);
+      await refreshProjectInfo(show);
+    } catch (e) {
+      toast(`Unpin failed: ${e}`, 'bad');
+    }
+  };
+  const roles = info ? Object.keys(info.roles ?? {}) : DEFAULT_ROLES;
+  return (
+    <div>
+      <div className="label mb-1 flex items-center">
+        In show <span className="ml-1 normal-case tracking-normal text-fg3 truncate">{show}</span>
+        <span className="flex-1" />
+        <button
+          ref={btn}
+          className="text-[10px] text-fg3 hover:text-fg shrink-0"
+          onClick={() => setAnchor(anchor ? null : btn.current)}
+          title="Pin this file to the open show as a named asset (assets.json) — pickers and agents find it by that name"
+        >
+          ★ Pin to show as…
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {pins.map((n) => (
+          <span key={n} className="group text-[11px] font-mono px-1.5 py-[1px] rounded bg-amber/15 border border-amber/50 text-amber">
+            ★ {n}
+            <button className="ml-1 text-amber/50 group-hover:text-bad" onClick={() => unpin(n)} title={`Unpin ${n}`}>
+              ×
+            </button>
+          </span>
+        ))}
+        {!pins.length && <span className="text-fg4">—</span>}
+      </div>
+      {anchor && (
+        <NamePrompt
+          anchor={anchor}
+          suggestions={roles}
+          initial={pins[0] ?? ''}
+          title={`Pin to ${show} as…`}
+          onSubmit={pin}
+          onClose={() => setAnchor(null)}
+        />
+      )}
+    </div>
   );
 }

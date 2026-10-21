@@ -9,18 +9,22 @@ Here, outputs land in a **project folder** on this machine and tools return
 absolute local paths. Since `file_io.resolve_input()` already accepts local
 paths, chaining tools keeps working unchanged.
 
-Layout (created lazily, per project)::
+Layout — the fixed folder map (`LAYOUT`, show-setup G4; created lazily)::
 
     projects/<name>/
       project.json        locked canvas (C1; absent = legacy project)
+      assets.json         named assets (`assets.py`, A1) — the hub writes it
       scene.json          engine entry point (authored by the engine/UI)
-      effects/            project-local WGSL effects   <- render-core convention
-      packs/<pack>/       layer packs (pack.json + masks/ + references/)
-      surfaces/           prepared surface stills + alignment aids
-      generated/          model outputs (FAL, TextureFlow, …)
+      captures/           raw venue photos (import_photos)
+      surfaces/           rectify_surface runs (<run>_lit/_surface/_ambient.png)
+      segmentation/       colour region maps (nano_banana dest="project/segmentation")
+      regions/<run>/      extract_color_regions mask runs
+      styles/             style images for this show
+      generated/          dest="project" generator outputs, subtraction stills
       video/              processed video (subtract / reproject / simulate)
-      regions/            extract_color_regions runs (one subdir per run)
-      captures/           camera snapshots
+      packs/<pack>/       layer packs (pack.json + masks/ + references/)
+      prompts/<kind>/     this show's prompt templates (`prompts.py`, P1)
+      effects/            project-local WGSL effects   <- render-core convention
 
 `packs/` and `effects/` sit next to `scene.json` deliberately: render-core
 resolves a scene's `pack` relative to the scene file and looks for effects in
@@ -60,6 +64,26 @@ VIDEO = "video"
 REGIONS = "regions"
 CAPTURES = "captures"
 PACKS = "packs"
+SEGMENTATION = "segmentation"
+STYLES = "styles"
+PROMPTS = "prompts"
+EFFECTS = "effects"
+
+#: The fixed folder map (G4): folder -> what goes there. Returned by
+#: `describe()` (set_project, list_assets, /api/project) so the UI and an
+#: agent file things the same way.
+LAYOUT: dict[str, str] = {
+    CAPTURES: "raw venue photos — lit (projector white) and ambient (room lit)",
+    SURFACES: "rectify_surface runs: <run>_lit.png, <run>_surface.png, <run>_ambient.png",
+    SEGMENTATION: "colour region maps (segmentation renders)",
+    REGIONS: "region mask runs, one <run>/ per extract_color_regions call",
+    STYLES: "style images for this show",
+    GENERATED: 'generator outputs sent here with dest="project", subtraction stills',
+    VIDEO: "processed video (subtraction, reprojection, simulated views)",
+    PACKS: "layer packs the engine loads (pack.json + masks/)",
+    PROMPTS: "this show's prompt templates (<kind>/<name>.json)",
+    EFFECTS: "project-local WGSL clip effects",
+}
 
 _DEFAULT_PROJECT = "default"
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -106,6 +130,10 @@ def set_project(name: str) -> Path:
     call_project.set(slugify(name))
     path = project_dir()
     path.mkdir(parents=True, exist_ok=True)
+    # The folder map is real on disk from the start, so Finder, Studio's
+    # tree and the setup wizard all see the same empty slots.
+    for kind in LAYOUT:
+        (path / kind).mkdir(exist_ok=True)
     return path
 
 
@@ -130,19 +158,27 @@ def list_projects() -> list[str]:
     return [p.name for p in sorted(dirs, key=lambda p: p.stat().st_mtime, reverse=True)]
 
 
-def describe() -> dict:
-    """Summary of the active project — what the `set_project` tool reports back."""
-    root = project_dir()
-    meta = read_project_file()
+def layout(name: str | None = None) -> dict[str, dict]:
+    """The folder map with absolute paths: folder -> {path, what}."""
+    root = project_dir(name)
+    return {k: {"path": str(root / k), "what": what} for k, what in LAYOUT.items()}
+
+
+def describe(name: str | None = None) -> dict:
+    """Summary of a project (default: the active one) — what `set_project`,
+    `list_assets` and `/api/project` report: folder map + named assets."""
+    from . import assets
+
+    name = slugify(name) if name else active_project()
+    root = project_dir(name)
+    meta = read_project_file(name) if root.is_dir() else None
     return {
-        "project": active_project(),
+        "project": name,
         "project_dir": str(root),
         "exists": root.is_dir(),
         "canvas": meta.get("canvas") if meta else None,
-        "subdirs": {
-            k: str(root / k)
-            for k in (SURFACES, GENERATED, VIDEO, REGIONS, CAPTURES, PACKS)
-        },
+        "layout": layout(name),
+        "assets": assets.list_assets(name) if root.is_dir() else {},
     }
 
 

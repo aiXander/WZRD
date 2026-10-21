@@ -11,9 +11,10 @@ make it a *hub*:
   `idle_s` (default 1 h) → SIGTERM to itself (uvicorn shuts down cleanly).
   The long-lived `GET /mcp` stream a connected Claude session holds open
   does not count as activity.
-- **`/api/*`** — thin JSON routes over `library.py` / `jobs.py`. Errors are
-  `{error}` with 400 (bad request) or 500. Destructive operations (delete)
-  exist only here, never as MCP tools (S13).
+- **`/api/*`** — thin JSON routes over `library.py` / `jobs.py` /
+  `assets.py` / `prompts.py`. Errors are `{error}` with 400 (bad request) or
+  500. Destructive operations (delete) exist only here, never as MCP tools
+  (S13); deletes are soft (the trash, flushed by a hub thread after 30 min).
 """
 
 from __future__ import annotations
@@ -347,3 +348,121 @@ async def _recipes(request, body):
     from .recipe_tools import recipes_table
 
     return await _thread(recipes_table, _q(request, "name"))
+
+
+# -- show setup: project info + named assets (A1) ----------------------------
+def _show(name: Optional[str]) -> str:
+    from . import project
+
+    return project.slugify(name) if name else project.active_project()
+
+
+def project_info(name: Optional[str] = None) -> dict:
+    from wzrd.utils import NANO_BANANA_SIZES
+
+    from . import assets, project
+
+    show = _show(name)
+    info = project.describe(show)
+    scene = project.project_dir(show) / "scene.json"
+    return {
+        **info,
+        "roles": assets.ROLES,
+        "canvases": [{"name": k, "w": w, "h": h} for k, (w, h) in NANO_BANANA_SIZES.items()],
+        "has_scene": scene.is_file(),
+        "scene_path": str(scene),
+        "existing_projects": project.list_projects(),
+    }
+
+
+@api("/api/project")
+async def _project(request, body):
+    return await _thread(project_info, _q(request, "project"))
+
+
+@api("/api/project/assets", ("POST",))
+async def _project_assets(request, body):
+    from . import assets
+
+    show, name = _show(body.get("project")), body["name"]
+    if body.get("path") is None:
+        out = await _thread(assets.unpin, name, name=show)
+    else:
+        out = await _thread(assets.pin, name, body["path"], note=body.get("note"), by="app", name=show)
+    return {"assets": out}
+
+
+# -- any non-render tool, synchronously (G8) ---------------------------------
+@api("/api/tool", ("POST",))
+async def _tool(request, body):
+    """Run one MCP tool and return its JSON. Render tools go through
+    /api/render (jobs); destructive tools are never run from here."""
+    name, args = body["tool"], dict(body.get("args") or {})
+    t = await mcp.get_tool(name)
+    if t is None:
+        raise ValueError(f"no tool {name!r} (or it is disabled)")
+    if "render" in (t.tags or set()):
+        raise ValueError(f"{name!r} is a render tool — use /api/render")
+    if t.annotations is not None and t.annotations.destructive_hint:
+        raise ValueError(f"{name!r} is destructive — not callable from /api/tool")
+    token = jobs.current_by.set("app")
+    try:
+        res = await t.run(args)
+    finally:
+        jobs.current_by.reset(token)
+    texts = [c.text for c in res.content if getattr(c, "type", None) == "text"]
+    if len(texts) == 1 and len(res.content) == 1:
+        try:
+            return json.loads(texts[0])
+        except ValueError:
+            pass
+    return {"content": texts}
+
+
+# -- prompt templates (P1) ---------------------------------------------------
+@api("/api/prompts", ("GET", "POST"))
+async def _prompts(request, body):
+    from . import prompts
+
+    if request.method == "POST":
+        return await _thread(prompts.save_prompt, body["kind"], body["name"], body["prompt"],
+                             body.get("scope") or "project", _show(body.get("project")),
+                             body.get("notes"), body.get("from"))
+    return {"prompts": await _thread(prompts.list_prompts, _q(request, "kind") or None,
+                                     _show(_q(request, "project")))}
+
+
+# -- trash (T1) --------------------------------------------------------------
+@api("/api/trash")
+async def _trash(request, body):
+    return await _thread(library.trash_list)
+
+
+@api("/api/trash/restore", ("POST",))
+async def _trash_restore(request, body):
+    return await _thread(library.trash_restore, list(body["ids"]))
+
+
+@api("/api/trash/flush", ("POST",))
+async def _trash_flush(request, body):
+    ids = body.get("ids")
+    return await _thread(library.trash_flush, list(ids) if ids is not None else None)
+
+
+TRASH_SWEEP_S = 60.0
+
+
+def start_trash_flusher() -> None:
+    """Flush trash older than `library.TRASH_TTL_S`: overdue entries now, then
+    every `TRASH_SWEEP_S` (G6)."""
+    def sweep() -> None:
+        while True:
+            try:
+                n = library.trash_flush(older_than_s=library.TRASH_TTL_S)["flushed"]
+                if n:
+                    _emit(f"[hub] trash: flushed {n} file(s) older than {library.TRASH_TTL_S:.0f}s")
+            except Exception as exc:  # noqa: BLE001 — keep sweeping
+                _emit(f"[hub] trash flush failed: {exc!r}")
+            time.sleep(TRASH_SWEEP_S)
+
+    threading.Thread(target=sweep, name="wzrd-hub-trash", daemon=True).start()

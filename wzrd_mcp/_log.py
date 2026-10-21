@@ -151,8 +151,8 @@ _PROJECT_DOC = ("Project (show) this call works on — its files, and what regio
 _WAIT_DOC = ("false = return at once with a job id (the render runs in the hub); poll jobs(job), "
              "stop it with cancel_job(job). Use for batches and anything over ~1 min. Default true.")
 _DEST_DOC = ('Where outputs land: omit or "library" = the Studio target folder, else the media '
-             'library\'s inbox/; "project" = the project\'s generated/ (e.g. a segmentation map); '
-             'or an absolute folder path.')
+             'library\'s inbox/; "project" = the project\'s generated/; "project/<folder>" = that '
+             'project folder (e.g. "project/segmentation"); or an absolute folder path.')
 
 
 def _injected_params(project_arg: bool, dest_arg: bool, render: bool) -> list[inspect.Parameter]:
@@ -181,6 +181,10 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
     sees an actionable message instead of FastMCP's masked "internal error".
     Tool bodies therefore need no try/except/log boilerplate of their own.
 
+    Before the body, every `asset:<name>` argument (a str, or a str in a
+    list) becomes that named asset's absolute path in the call's project
+    (`assets.expand_args`, show-setup G3); an unknown name is a `ToolError`.
+
     Around the body it also sets the call's scope: the `project=` it
     resolves against (`project_arg`), the `dest=` routing of generator
     outputs (`dest_arg`, implied by `render`), and for `render` tools a
@@ -192,7 +196,7 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
     """
     from fastmcp.exceptions import ToolError
 
-    from . import jobs, library, project
+    from . import assets, jobs, library, project
 
     dest_arg = dest_arg or render
     extra = _injected_params(project_arg, dest_arg, render)
@@ -201,13 +205,25 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         scope = {k: kwargs.pop(k) for k in list(kwargs) if k in extra_names}
+        tokens = [(project.call_project, project.call_project.set(project.call_project.get()))]
+        if scope.get("project"):
+            tokens.append((project.call_project, project.call_project.set(project.slugify(scope["project"]))))
+        if assets.has_refs(kwargs):
+            # G3: `asset:<name>` -> its file, against this call's project, so
+            # the body and the render record see real paths.
+            try:
+                kwargs = assets.expand_args(kwargs)
+            except ValueError as exc:
+                for var, token in reversed(tokens):
+                    var.reset(token)
+                _emit(f"{_RED}[{_ts()}] ✗ {fn.__name__}: {exc}{_RESET}")
+                raise ToolError(str(exc))
         client_args = {k: v for k, v in kwargs.items() if k not in _SKIP_PARAMS}
         t0 = log_call(fn.__name__, {**client_args, **{k: v for k, v in scope.items() if v is not None}})
         timing = _request_timing.get(None)
         if timing is not None:
             timing["tool_name"] = fn.__name__
             timing["tool_start"] = time.time()
-        tokens = [(project.call_project, project.call_project.set(project.call_project.get()))]
         job = None
 
         async def body():
@@ -244,8 +260,6 @@ def logged_tool(fn, *, project_arg: bool = False, render: bool = False, dest_arg
                     jobs.forget(job)
 
         try:
-            if scope.get("project"):
-                tokens.append((project.call_project, project.call_project.set(project.slugify(scope["project"]))))
             if dest_arg:
                 try:
                     library.check_dest(scope.get("dest"))

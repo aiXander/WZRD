@@ -198,6 +198,23 @@ unused). DWPose was the alternative; skipped because its default detector is
 in the shape input) and `pre_OpenposePreprocessor` (no person: black control
 signal, no error).
 
+## Experiments live in `textureflow-lab` (separate repo)
+
+The pipeline as one plain-Python function, over vendored + pruned copies of every node pack it runs,
+with a harness that renders any change next to this endpoint's exact stack on one GPU:
+`~/Documents/GitHub/Gigabrain/VJ/textureflow-lab` (Modal app `textureflow-lab`, env `wzrd`; it mounts
+the `textureflow-models` volume read-only by convention and never touches this app). It superseded
+the short-lived `deploy/textureflow/tf_pipeline.py` (2026-10-20). Facts about this endpoint it established:
+
+- **Parity:** the plain-Python path reproduces this endpoint's first-pass video, control preview and
+  mapping preview pixel for pixel in all 14 tested cases; the final video differs only by RIFE noise.
+- **RIFE is nondeterministic on GPU:** identical inputs → final video SSIM ≈ 0.97 run to run (this is
+  the "SSIM 0.98 between two L40S runs" under Determinism). `first_pass_video` is deterministic.
+- **ComfyUI's output cache only reuses the loaders here:** `render` stages media under a fresh
+  `input/<request_id>/`, so every node downstream of an input re-runs even for identical files.
+- **Node-pack code is in the image only:** `install_nodes` git-clones the 13 packs at
+  `workflow/snapshot.json`'s hashes; the volume holds weights only. Readable copies: the lab's `vendor/`.
+
 ## The WZRD client
 
 `wzrd_mcp/tools.py`:
@@ -206,10 +223,10 @@ signal, no error).
   Every arg defaults to `None` and **only caller-set args are sent**, so api.yaml
   stays the single source of defaults (the old client's own defaults disagreed).
   Media args: an http(s) URL passes through; a local path is read into `files`
-  under its basename (deduped `name_2.ext`). The returned bytes land via
-  `project.output_path("texture_flow_<output>", …)` in the project's
-  `generated/`; the reply is those paths plus `seed`, `params`, `request_id`,
-  `timings`. No S3, no AWS env. The docstring spells out server defaults and
+  under its basename (deduped `name_2.ext`). `output_video` lands in the media library
+  (`library.output_path`, `~/WZRD/media`, Studio target folder else `inbox/`) with an engine HAP clip
+  beside it; the three previews go to `.wzrd/intermediates/<job>/`; the reply is those paths plus
+  `seed`, `params`, `request_id`, `timings`. No S3, no AWS env. The docstring spells out server defaults and
   the `denoise` / ESRGAN / OpenPose behaviour for calling agents — keep it in sync
   with api.yaml (it lists the `preprocessor1` choices by hand).
   `recipe=<name>` fills unset args and style images from a saved look in

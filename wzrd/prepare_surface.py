@@ -4,6 +4,10 @@ Surface preparation pipeline for projection mapping.
 Combines detect → align → darken into a single entrypoint that produces
 a darkened reference/background image of the projection surface.
 
+`rectify_surface` is the show-setup entry point (lit photo + optional
+ambient photo + optional manual corners -> lit crop, dark surface, aligned
+ambient, all at the canvas). `prepare_surface` below stays for old callers.
+
 Two modes:
 
 1. **Full pipeline** (day photo + night photo):
@@ -25,7 +29,7 @@ Example usage:
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union
 from PIL import Image
 
 from .detect import detect_projection_area
@@ -163,6 +167,86 @@ def prepare_surface(
         result_img.save(str(output_path), quality=95)
 
     return {'image': result_img, 'video': alignment_video}
+
+
+def rectify_surface(
+    lit_image_path: Union[str, Path],
+    ambient_image_path: Optional[Union[str, Path]] = None,
+    *,
+    output_size: Tuple[int, int],
+    corners: Optional[Sequence[Sequence[float]]] = None,
+    margin: float = 0.01,
+    min_projection_fraction: float = 0.10,
+    max_brightness: float = MAX_BRIGHTNESS,
+    detail_boost: float = DETAIL_BOOST,
+    guide_fraction: float = GUIDE_FRACTION,
+    chroma_correction: float = CHROMA_CORRECTION,
+    gradient_source: float = GRADIENT_SOURCE,
+) -> dict:
+    """
+    Lit photo (+ optional ambient photo) -> the three surface images of a show.
+
+    1. Rectify the projector's lit quad in *lit_image_path* to exactly
+       *output_size* (the canvas): auto-detected, or the manual normalised
+       *corners* (TL, TR, BR, BL) used as given (no margin).
+    2. With an ambient photo (same view, room lit): align it to the lit crop
+       and darken that. Without one: darken the lit crop.
+
+    Returns a dict:
+        lit      — PIL RGB, the rectified lit crop (shape/segmentation input)
+        surface  — PIL RGB, the dark colour-corrected surface
+        ambient  — PIL RGB, the aligned undarkened ambient photo, or None
+        corners  — the quad actually rectified, normalised (round-trips as
+                   `corners=`)
+        manual_corners — bool
+        align    — {method, confidence, num_inliers, num_matches} or None
+        size     — (w, h)
+    """
+    from .detect import detect_projection_area
+
+    w, h = int(output_size[0]), int(output_size[1])
+    lit_bgr, info = detect_projection_area(
+        lit_image_path,
+        margin=margin,
+        min_projection_fraction=min_projection_fraction,
+        output_size=(w, h),
+        corners=corners,
+    )
+
+    align_info = None
+    ambient_rgb = None
+    if ambient_image_path is not None:
+        ambient_bgr = cv2.imread(str(ambient_image_path))
+        if ambient_bgr is None:
+            raise FileNotFoundError(f"Could not load ambient image: {ambient_image_path}")
+        aligned_bgr, res = align_images(ambient_bgr, lit_bgr)
+        ambient_rgb = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB)
+        align_info = {
+            'method': res.method,
+            'confidence': round(float(res.confidence), 4),
+            'num_inliers': int(res.num_inliers),
+            'num_matches': int(res.num_matches),
+        }
+
+    lit_rgb = cv2.cvtColor(lit_bgr, cv2.COLOR_BGR2RGB)
+    base = ambient_rgb if ambient_rgb is not None else lit_rgb
+    dark = darken_image(
+        base,
+        max_brightness=max_brightness,
+        detail_boost=detail_boost,
+        guide_fraction=guide_fraction,
+        chroma_correction=chroma_correction,
+        gradient_source=gradient_source,
+    )
+    return {
+        'lit': Image.fromarray(lit_rgb),
+        'surface': Image.fromarray(dark),
+        'ambient': Image.fromarray(ambient_rgb) if ambient_rgb is not None else None,
+        'corners': [[round(float(x), 6), round(float(y), 6)] for x, y in info['corners_crop']],
+        'manual_corners': bool(info['manual_corners']),
+        'align': align_info,
+        'size': (w, h),
+    }
 
 
 # ---------------------------------------------------------------------------

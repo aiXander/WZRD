@@ -14,6 +14,7 @@ import { resetLayout, setLayoutLocked, useLayout } from '../ui/layoutStore';
 import { useTelemetryDemand } from '../api/telemetryDemand';
 import { DeckSwitch, TakeButton } from './DeckPanel';
 import { ProjectMenu } from './ProjectMenu';
+import { openSetup } from '../state/setup';
 import { HubLamp } from './HubLamp';
 import { OutputPill } from './OutputPill';
 import { JobsPill } from './JobsPill';
@@ -163,6 +164,18 @@ function SetupMenu() {
               </button>
             ))}
           </div>
+          <button
+            onClick={() => {
+              openSetup();
+              setOpen(false);
+            }}
+            className="flex items-center gap-2 w-full px-2 py-1.5 mt-0.5 rounded-md text-left border border-transparent hover:bg-panel2"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="text-[12px] font-medium">Show setup</div>
+              <div className="text-[10px] text-fg3 truncate">Photos, surface, segmentation, regions — once per show</div>
+            </div>
+          </button>
           <div className="label px-1 pt-3 pb-1.5 mt-2 border-t border-line">Panel layout</div>
           <label className="flex items-start gap-2 px-2 py-1 cursor-pointer">
             <input
@@ -423,7 +436,8 @@ export function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const drop = useStore((s) => s.dropToast);
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 pointer-events-none">
+    // Above modals + the lightbox (ui/media), so an Undo toast stays reachable.
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[90] flex flex-col items-center gap-2 pointer-events-none">
       {toasts.map((t) => (
         <div
           key={t.id}
@@ -440,6 +454,18 @@ export function Toasts() {
           }
         >
           {t.text}
+          {t.action && (
+            <button
+              className="ml-3 px-2 py-[1px] rounded border border-line2 text-fg hover:bg-panel2 font-medium"
+              onClick={(e) => {
+                e.stopPropagation();
+                drop(t.id);
+                t.action!.run();
+              }}
+            >
+              {t.action.label}
+            </button>
+          )}
         </div>
       ))}
     </div>

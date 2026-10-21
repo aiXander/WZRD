@@ -12,7 +12,11 @@ module keeps what's known about each file and render in SQLite:
 - `files` — one row per path, "last seen here": render id, fingerprint, probe,
   `missing`. A path is never an identity.
 - `jobs` — render-tagged tool calls (`jobs.py`), and the daily spend.
-- `roots`, `selection` (L5), `settings` (the daily cap).
+- `roots`, `selection` (L5), `settings` (the daily cap). The home and the
+  projects root (`project.projects_root()`, show-setup G9) are always roots.
+- `trash` — soft-deleted files (show-setup T1): `delete` moves a file into a
+  hidden trash folder; `trash_flush` unlinks it after `TRASH_TTL_S` (a hub
+  thread), `trash_restore` puts it back.
 
 The hub is the single writer; the app opens the file read-only. Other
 writers (a `--stdio` server) share it through WAL + a busy timeout.
@@ -38,9 +42,12 @@ from typing import Any, Iterable, Optional
 from . import identity
 from ._log import _emit
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 INBOX = "inbox"
 WZRD_DIR = ".wzrd"
+TRASH_DIR = "trash"  # <media_root>/.wzrd/trash/<id>/<name>
+TRASH_BESIDE = ".wzrd-trash"  # <parent>/.wzrd-trash/<id>/<name> on another device
+TRASH_TTL_S = 1800.0  # a deleted file is flushed for good after 30 min (show-setup G6)
 
 # ---------------------------------------------------------------------------
 # Paths (L1)
@@ -170,6 +177,19 @@ _MIGRATIONS: list[str] = [
         value       TEXT NOT NULL          -- JSON
     );
     """,
+    # v2 — show setup T1: soft delete
+    """
+    CREATE TABLE trash (
+        id          TEXT PRIMARY KEY,      -- t_<ulid>
+        path        TEXT NOT NULL,         -- where it lived (and returns to)
+        trash_path  TEXT NOT NULL,         -- where it sits now
+        render_id   TEXT,
+        size        INTEGER,
+        deleted     REAL NOT NULL,         -- epoch seconds
+        flushed     REAL                   -- epoch seconds, NULL while restorable
+    );
+    CREATE INDEX trash_deleted ON trash(deleted);
+    """,
 ]
 
 _conn: Optional[sqlite3.Connection] = None
@@ -197,8 +217,16 @@ def _open() -> sqlite3.Connection:
             raise
     home = str(media_root())
     conn.execute("INSERT OR IGNORE INTO roots(path, home, added) VALUES (?, 1, ?)", (home, _now_iso()))
+    conn.execute("INSERT OR IGNORE INTO roots(path, home, added) VALUES (?, 0, ?)",
+                 (_projects_root(), _now_iso()))
     _conn, _conn_path = conn, path
     return conn
+
+
+def _projects_root() -> str:
+    from . import project
+
+    return str(project.projects_root())
 
 
 @contextmanager
@@ -254,7 +282,17 @@ def set_setting(key: str, value: Any) -> None:
                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, _dumps(value)))
 
 
+def ensure_projects_root() -> None:
+    """The projects root is always a root (G9) — re-added if it went missing
+    (e.g. `WZRD_PROJECTS_ROOT` changed since the database was opened)."""
+    with tx() as c:
+        c.execute("INSERT OR IGNORE INTO roots(path, home, added) VALUES (?, 0, ?)",
+                  (_projects_root(), _now_iso()))
+
+
 def roots() -> list[dict]:
+    if not query_one("SELECT 1 FROM roots WHERE path=?", (_projects_root(),)):
+        ensure_projects_root()
     return [{"path": r["path"], "home": bool(r["home"]), "added": r["added"],
              "exists": Path(r["path"]).is_dir()}
             for r in query("SELECT * FROM roots ORDER BY home DESC, path")]
@@ -272,6 +310,8 @@ def add_root(path: str) -> dict:
 def remove_root(path: str) -> dict:
     """Forget a root (its rows stay — the records are kept)."""
     p = str(Path(path).expanduser().resolve())
+    if p == _projects_root():
+        raise ValueError("the projects root is always a library root (every show's folders)")
     with tx() as c:
         c.execute("DELETE FROM roots WHERE path=? AND home=0", (p,))
     return {"roots": roots()}
@@ -321,21 +361,32 @@ def target_dir() -> Path:
     return inbox()
 
 
+_PROJECT_SUB = re.compile(r"^project/([a-z0-9][a-z0-9_-]{0,47})/?$")
+
+
 def check_dest(dest: Optional[str]) -> None:
     if dest in (None, "", "library", "project"):
         return
+    if dest.startswith("project/"):
+        if not _PROJECT_SUB.match(dest):
+            raise ValueError(f'dest "project/<folder>" takes one lowercase folder name, e.g. '
+                             f'"project/segmentation" (got {dest!r})')
+        return
     if not Path(dest).expanduser().is_absolute():
-        raise ValueError(f'dest must be "library", "project" or an absolute folder path (got {dest!r})')
+        raise ValueError(f'dest must be "library", "project", "project/<folder>" or an absolute '
+                         f'folder path (got {dest!r})')
 
 
 def dest_dir() -> Path:
     """Where this call's generator outputs go: `dest="project"` → the project's
-    generated/; an absolute folder → there; else the target folder / inbox/."""
+    generated/; `"project/<sub>"` → `<project>/<sub>/`; an absolute folder →
+    there; else the target folder / inbox/."""
     dest = current_dest.get()
-    if dest == "project":
+    sub = _PROJECT_SUB.match(dest) if dest else None
+    if dest == "project" or sub:
         from . import project
 
-        return project.kind_dir(project.GENERATED)
+        return project.kind_dir(sub.group(1) if sub else project.GENERATED)
     if dest and dest != "library":
         d = Path(dest).expanduser().resolve()
         d.mkdir(parents=True, exist_ok=True)
@@ -767,24 +818,132 @@ def rename(path: str, name: str, siblings: bool = True) -> list[dict]:
     return out
 
 
+def _trash_home(src: Path, tid: str) -> Path:
+    """Where a deleted file waits (T1): the media root's `.wzrd/trash/` when on
+    the same device (a rename), else a hidden `.wzrd-trash/` beside it."""
+    try:
+        same = src.stat().st_dev == wzrd_dir().stat().st_dev
+    except OSError:
+        same = False
+    base = wzrd_dir() / TRASH_DIR if same else src.parent / TRASH_BESIDE
+    return base / tid / src.name
+
+
 def delete(paths: list[str], siblings: bool = True) -> dict:
-    """Delete media files; their records stay (purged once no file of the
-    render is left). Never refused — a show slot using it warns on its own."""
-    deleted, ids = [], set()
+    """Soft-delete media files (T1): each moves to the trash, restorable for
+    `TRASH_TTL_S`, then flushed. Records stay; a render is `purged` once a
+    flush leaves it no file. Never refused — a show slot using it warns on its own."""
+    deleted, trashed, ids = [], [], set()
     for f in _expand(paths, siblings):
         row = query_one("SELECT render_id FROM files WHERE path=?", (str(f),))
-        f.unlink(missing_ok=True)
+        tid = identity.new_id("t_")
+        dst = _trash_home(f, tid)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        size = f.stat().st_size
+        shutil.move(str(f), str(dst))
         deleted.append(str(f))
+        trashed.append({"id": tid, "path": str(f)})
         with tx() as c:
             c.execute("UPDATE files SET missing=1, last_seen=? WHERE path=?", (time.time(), str(f)))
+            c.execute("INSERT INTO trash(id, path, trash_path, render_id, size, deleted) VALUES (?,?,?,?,?,?)",
+                      (tid, str(f), str(dst), row["render_id"] if row else None, size, time.time()))
         if row:
             ids.add(row["render_id"])
+    return {"deleted": deleted, "records_kept": len(ids), "trashed": trashed}
+
+
+# ---------------------------------------------------------------------------
+# Trash (T1)
+# ---------------------------------------------------------------------------
+def trash_list() -> dict:
+    """Restorable deleted files, newest first."""
+    rows = query("SELECT t.*, r.thumb FROM trash t LEFT JOIN renders r ON r.id = t.render_id "
+                 "WHERE t.flushed IS NULL ORDER BY t.deleted DESC")
+    return {"ttl_s": TRASH_TTL_S, "items": [{
+        "id": r["id"], "path": r["path"], "name": Path(r["path"]).name, "dir": str(Path(r["path"]).parent),
+        "render_id": r["render_id"], "size": r["size"], "deleted": r["deleted"],
+        "expires": r["deleted"] + TRASH_TTL_S, "kind": identity.media_kind(r["path"]),
+        "thumb": r["thumb"] if r["thumb"] and Path(r["thumb"]).is_file() else None,
+    } for r in rows]}
+
+
+def _free_path(path: Path) -> Path:
+    """*path*, or `<stem>_restored[_n]<ext>` beside it when taken."""
+    if not path.exists():
+        return path
+    candidate, n = path.with_name(f"{path.stem}_restored{path.suffix}"), 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}_restored_{n}{path.suffix}")
+        n += 1
+    return candidate
+
+
+def _drop_trash_dir(trash_path: Path) -> None:
+    try:
+        trash_path.parent.rmdir()  # the <id>/ folder
+        if trash_path.parent.parent.name == TRASH_BESIDE:
+            trash_path.parent.parent.rmdir()  # an emptied .wzrd-trash/ beside the file
+    except OSError:
+        pass
+
+
+def trash_restore(ids: list[str]) -> dict:
+    """Put trashed files back where they lived (a taken path gets `_restored`)
+    and re-index them; their render is live again."""
+    restored, errors = [], []
+    for tid in ids:
+        row = query_one("SELECT * FROM trash WHERE id=?", (tid,))
+        if not row:
+            errors.append(f"{tid}: not in the trash")
+            continue
+        if row["flushed"] is not None:
+            errors.append(f"{tid}: already flushed")
+            continue
+        src = Path(row["trash_path"])
+        if not src.is_file():
+            errors.append(f"{tid}: {src} is gone")
+            continue
+        dst = _free_path(Path(row["path"]))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        _drop_trash_dir(src)
+        with tx() as c:
+            c.execute("DELETE FROM trash WHERE id=?", (tid,))
+            if row["render_id"]:
+                c.execute("UPDATE renders SET purged=0, updated=? WHERE id=?", (time.time(), row["render_id"]))
+        index_file(dst, force=True)
+        restored.append({"id": tid, "path": str(dst)})
+    return {"restored": restored, "errors": errors}
+
+
+def trash_flush(ids: Optional[list[str]] = None, older_than_s: Optional[float] = None) -> dict:
+    """Unlink trashed files for good: *ids*, else every entry (only those older
+    than *older_than_s* when given). A render with no file left is `purged`."""
+    if ids is not None and not ids:
+        return {"flushed": 0}
+    sql, params = "SELECT * FROM trash WHERE flushed IS NULL", []
+    if ids is not None:
+        sql += f" AND id IN ({','.join('?' * len(ids))})"
+        params += list(ids)
+    if older_than_s is not None:
+        sql += " AND deleted <= ?"
+        params.append(time.time() - older_than_s)
+    rows = query(sql, params)
+    rids = set()
+    for r in rows:
+        p = Path(r["trash_path"])
+        p.unlink(missing_ok=True)
+        _drop_trash_dir(p)
+        with tx() as c:
+            c.execute("UPDATE trash SET flushed=? WHERE id=?", (time.time(), r["id"]))
+        if r["render_id"]:
+            rids.add(r["render_id"])
     with tx() as c:
-        for rid in ids:
+        for rid in rids:
             left = c.execute("SELECT COUNT(*) FROM files WHERE render_id=? AND missing=0", (rid,)).fetchone()[0]
             if not left:
                 c.execute("UPDATE renders SET purged=1, updated=? WHERE id=?", (time.time(), rid))
-    return {"deleted": deleted, "records_kept": len(ids)}
+    return {"flushed": len(rows)}
 
 
 def purge(folder: str, max_score: int, recursive: bool = False, dry_run: bool = False) -> dict:
@@ -798,4 +957,4 @@ def purge(folder: str, max_score: int, recursive: bool = False, dry_run: bool = 
     paths = [r["path"] for r in rows if Path(r["path"]).is_file()]
     if dry_run:
         return {"would_delete": paths}
-    return delete(paths, siblings=False) if paths else {"deleted": [], "records_kept": 0}
+    return delete(paths, siblings=False) if paths else {"deleted": [], "records_kept": 0, "trashed": []}

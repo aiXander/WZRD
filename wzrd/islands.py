@@ -614,6 +614,8 @@ def extract_color_regions(
                     'height': int(crop_h) if crop_h >= 8 else int(height),
                 },
                 'area_pixels': area_pixels,
+                'area_fraction': round(area_pixels / total_pixels, 5),
+                'color': f"#{color_hex}",
             }
 
             # --- Secondary aid output: tight crop (rescaled) ---

@@ -268,6 +268,103 @@ def test_mcp():
             assert len(r.content) == 1 and r.content[0].text.startswith("{")
 
     asyncio.run(run())
+    _show_setup()
+
+
+def _show_setup():
+    """Show setup (docs/TODO/show-setup.md): assets + `asset:` expansion,
+    rectify_surface, prompts, dest="project/<sub>", soft delete — against
+    temp library/projects roots."""
+    import asyncio
+    import json
+    import tempfile
+    from pathlib import Path
+    from fastmcp import Client
+    from fastmcp.exceptions import ToolError
+    from PIL import Image
+    from wzrd_mcp import library, project, prompts
+    from wzrd_mcp.server import mcp
+
+    _require(TEST_NIGHT_IMAGE, TEST_DAY_IMAGE)
+    tmp = Path(tempfile.mkdtemp(prefix="wzrd_setup_"))
+    saved = {k: os.environ.get(k) for k in ("WZRD_MEDIA_ROOT", "WZRD_PROJECTS_ROOT")}
+    os.environ["WZRD_MEDIA_ROOT"] = str(tmp / "media")
+    os.environ["WZRD_PROJECTS_ROOT"] = str(tmp / "projects")
+    show = "setup-t"
+
+    async def call(c, tool, args):
+        r = await c.call_tool(tool, {**args, "project": show} if tool != "set_project" else args)
+        return json.loads(r.content[0].text)
+
+    async def run():
+        async with Client(mcp) as c:
+            info = await call(c, "set_project", {"name": show, "canvas": "16:9"})
+            assert set(project.LAYOUT) <= set(info["layout"]) and info["assets"] == {}
+            photos = (await call(c, "import_photos", {"paths": [os.path.abspath(TEST_NIGHT_IMAGE),
+                                                               os.path.abspath(TEST_DAY_IMAGE)],
+                                                     "conform": False}))["photos"]
+            await call(c, "pin_asset", {"name": "photo_lit", "path": photos[0]["path"]})
+            assets = (await call(c, "pin_asset", {"name": "photo_ambient", "path": photos[1]["path"]}))["assets"]
+            assert assets["photo_lit"]["exists"] and assets["photo_lit"]["id"]
+            try:
+                await c.call_tool("rectify_surface", {"lit_photo": "asset:nope", "project": show})
+                raise AssertionError("unknown asset was accepted")
+            except ToolError as exc:
+                assert "photo_lit" in str(exc), exc
+            res = await call(c, "rectify_surface", {"lit_photo": "asset:photo_lit",
+                                                    "ambient_photo": "asset:photo_ambient"})
+            for k in ("surface_lit", "surface", "surface_ambient"):
+                assert Image.open(res[k]).size == (1376, 768), (k, Image.open(res[k]).size)
+                item = library.item(res[k])
+                assert item and item["wzrd"] and item["tool"] == "rectify_surface", item
+            rec = library.render(res["surface"])["record"]
+            assert rec["args"]["lit_photo"] == photos[0]["path"], rec["args"]  # expanded, not "asset:…"
+            assert rec["corners"] == res["corners"] == rec["args"]["corners"] and rec["manual_corners"] is False
+            assert res["align"] and not res["manual_corners"]
+            nudged = [[x + 0.005, y] for x, y in res["corners"]]
+            res2 = await call(c, "rectify_surface", {"lit_photo": "asset:photo_lit", "corners": nudged})
+            assert res2["manual_corners"] and res2["surface_ambient"] is None and res2["run"] != res["run"]
+            assert all(abs(a - b) < 1e-5 for p, q in zip(res2["corners"], nudged) for a, b in zip(p, q))
+            # prompts: the shipped WZRD default, then a project fork listed first
+            found = (await call(c, "list_prompts", {"kind": "segmentation"}))["prompts"]
+            assert found[0]["scope"] == "wzrd" and prompts.PLACEHOLDER in found[0]["prompt"]
+            await call(c, "save_prompt", {"kind": "segmentation", "name": "default", "prompt": "x {n_regions}"})
+            found = (await call(c, "list_prompts", {"kind": "segmentation"}))["prompts"]
+            assert [p["scope"] for p in found] == ["project", "wzrd"], found
+
+    try:
+        asyncio.run(run())
+        # dest="project/<sub>" and the projects root as a library root
+        library.check_dest("project/segmentation")
+        token = project.call_project.set(show)
+        library.current_dest.set("project/segmentation")
+        assert library.dest_dir() == project.project_dir(show) / "segmentation"
+        abs_dest = str(project.project_dir(show) / "segmentation")
+        library.current_dest.set(abs_dest)
+        assert str(library.dest_dir()) == abs_dest  # what a job row records as its dest
+        library.current_dest.set(None)
+        project.call_project.reset(token)
+        assert str(project.projects_root()) in {r["path"] for r in library.roots()}
+        # soft delete → restore → delete → flush
+        surf = sorted((project.project_dir(show) / "surfaces").glob("*_surface.png"))[0]
+        rid = library.item(str(surf))["render_id"]
+        out = library.delete([str(surf)], siblings=False)
+        assert not surf.exists() and out["trashed"][0]["path"] == str(surf)
+        tid = out["trashed"][0]["id"]
+        assert library.trash_list()["items"][0]["id"] == tid
+        assert library.trash_restore([tid])["restored"][0]["path"] == str(surf) and surf.is_file()
+        assert library.item(str(surf))["render_id"] == rid and not library.trash_list()["items"]
+        library.label([str(surf)], score=1)
+        tid = library.purge(str(surf.parent), max_score=1)["trashed"][0]["id"]  # delete_scored
+        assert library.trash_flush([tid]) == {"flushed": 1} and not library.trash_list()["items"]
+        assert not surf.exists() and library.render(rid)["purged"]
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── Test registry ───────────────────────────────────────────────────────────

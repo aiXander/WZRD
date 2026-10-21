@@ -210,6 +210,10 @@ pub enum TestPattern {
     Grid,
     Border,
     Corners,
+    /// The whole projector raster full white — what you photograph for the
+    /// lit surface photo (show setup). Not warped and not mastered: it covers
+    /// everything the projector can reach, so the photo finds the full throw.
+    White,
 }
 
 impl TestPattern {
@@ -219,6 +223,7 @@ impl TestPattern {
             TestPattern::Grid => "grid",
             TestPattern::Border => "border",
             TestPattern::Corners => "corners",
+            TestPattern::White => "white",
         }
     }
 
@@ -228,6 +233,7 @@ impl TestPattern {
             "grid" => Some(TestPattern::Grid),
             "border" => Some(TestPattern::Border),
             "corners" => Some(TestPattern::Corners),
+            "white" => Some(TestPattern::White),
             _ => None,
         }
     }
@@ -239,6 +245,7 @@ impl TestPattern {
             TestPattern::Grid => 1.0,
             TestPattern::Border => 2.0,
             TestPattern::Corners => 3.0,
+            TestPattern::White => 4.0,
         }
     }
 
@@ -247,6 +254,7 @@ impl TestPattern {
             1 => TestPattern::Grid,
             2 => TestPattern::Border,
             3 => TestPattern::Corners,
+            4 => TestPattern::White,
             _ => TestPattern::None,
         }
     }
@@ -1010,6 +1018,19 @@ mod tests {
 
     fn close(a: [f32; 2], b: [f32; 2], eps: f32) -> bool {
         (a[0] - b[0]).abs() < eps && (a[1] - b[1]).abs() < eps
+    }
+
+    /// The name (RPC), the stored byte (render thread) and the shader mode id
+    /// must agree for every pattern — a new variant missed in one of the
+    /// matches would silently render as `none`.
+    #[test]
+    fn test_patterns_round_trip() {
+        use TestPattern::*;
+        for p in [None, Grid, Border, Corners, White] {
+            assert_eq!(TestPattern::parse(p.as_str()), Some(p));
+            assert_eq!(TestPattern::from_u8(p.to_u8()), p);
+        }
+        assert_eq!(White.mode(), 4.0);
     }
 
     #[test]

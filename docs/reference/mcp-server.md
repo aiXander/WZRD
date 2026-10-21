@@ -51,7 +51,9 @@ one source (`skill_catalog.py` scans, `skill_tools.py` serves):
 Current skills: workflows `run-sheet` (gig S1: venue photos → canvas →
 regions → pack → clip library from recipes → show checklist; the entry
 point for a venue day, delegating to the others), `projection-story` (the
-old Mastra agent's keyframe → video → loop flow), `surface-prep`,
+old Mastra agent's keyframe → video → loop flow), `surface-prep` (photos →
+`rectify_surface` → pinned `surface_lit` / `surface`; `run-sheet` steps 2–4
+chain assets through segmentation and regions),
 `region-animation` (+ "A story on one region": keyframes from a region's
 `region_surface_image` with `aspect_ratio="auto"`, `region=` on every call,
 `to_hap(region=)` after stitching), `live-engine` (+ C5 clip bindings and
@@ -76,7 +78,8 @@ idempotent=, open_world=)` — never `@mcp.tool` by hand:
   that advertises an output schema.
 - **`logged_tool` owns logging, errors, scope and records**: call/result/error
   lines on stderr (never stdout — stdio transport), request timing, any
-  non-`ToolError` exception re-raised as `ToolError(str(exc))`, the call's
+  non-`ToolError` exception re-raised as `ToolError(str(exc))`, the
+  `asset:<name>` expansion (next section), the call's
   scope (contextvars: `project.call_project`, `library.current_dest`,
   `jobs.current_job`), a `jobs` row for render tools, and the render record
   of every output of a dict result (below). Tool bodies carry no
@@ -114,10 +117,67 @@ never carries them. The parked Modal image mounts `tools_config.json` and
 
 `project.py`: a project (a **show**) is one folder under `projects/` that
 doubles as a render-core scene directory (`scene.json`, `effects/`,
-`packs/<pack>/`, plus `surfaces/`, `generated/`, `regions/`, `video/`,
-`captures/`). Venue tools reserve their destination first
+`packs/<pack>/`). Venue tools reserve their destination first
 (`output_path`/`output_dir`) so libraries write straight into it;
-generators write to the media library instead (next section).
+generators write to the media library instead (next section), unless
+`dest="project"` (→ `generated/`) or `dest="project/<folder>"` (→ that
+folder, one slug segment — e.g. segmentation renders).
+
+**The folder map** (`project.LAYOUT`, show-setup G4) is fixed so the UI can
+list folders and whoever wrote a file, it shows up in the right place:
+`captures/` raw photos · `surfaces/` rectify runs · `segmentation/` colour
+maps · `regions/<run>/` mask runs · `styles/` · `generated/` · `video/` ·
+`packs/` · `prompts/` · `effects/`. `project.describe(name)` returns it
+(abs path + what) with the show's assets; `set_project`, `list_assets` and
+`/api/project` all reply with it. `project.set_project` creates every
+folder of the map up front (empty dirs don't count as content for the
+canvas lock), so Finder, Studio and the wizard see the same slots; the
+UI's `MediaGallery` still treats a missing folder (an older show) as empty.
+
+**Named assets** (`assets.py`, `<project>/assets.json`, contract A1): a show
+names its key files once — `ROLES` are the well-known ones the setup wizard
+pins: `photo_lit`, `photo_ambient`, `surface_lit` (rectified lit crop:
+segmentation + ControlNet input), `surface` (dark surface: Nano Banana
+`image_1`, subtraction background), `surface_ambient`, `segmentation`. One
+name → one file; the hub is the only writer (`/api/project/assets`, MCP
+`pin_asset`; temp + rename under a lock). Pinning indexes the file and
+stores its render id + fingerprint, so resolution follows a moved file:
+stored path on disk → the id's / fingerprint's current file in
+`library.db` → `exists: false`. A "Save as" copy keeps the source show's
+absolute paths, so resolution first tries the same relative path inside
+*this* show. **`asset:<name>` works as any media argument of any tool**:
+`logged_tool` expands every str arg (and str in a list arg) that starts with
+`asset:` against the call's project *before* the body runs and before the
+args are captured, so bodies and render records only ever see real paths;
+an unknown name is a `ToolError` listing the show's assets. Unpinning never
+touches the file — an agent still can't delete.
+
+**Prompt templates** (`prompts.py`, contract P1): `<kind>/<name>.json`
+(`{schema, kind, name, prompt, notes, updated, from}`) in two scopes — WZRD
+(`library/prompts/`, `WZRD_PROMPTS_ROOT` overrides, resolved like
+`WZRD_RECIPES_ROOT`) and the show (`<project>/prompts/`). Listing puts the
+show's first, `default` first per scope. Shipped: `segmentation/default`
+(the old `prompts.yaml` text, region count as `{n_regions}`) and
+`mask/default` (skill `image-prompting`'s non-reflective mask). `{n_regions}`
+is the one placeholder and the *caller* fills it with a plain replace —
+prompts may hold other braces. MCP: `list_prompts`, `save_prompt` (scope
+`"wzrd"` only on Xander's word).
+
+**`rectify_surface`** (`tools.py` wrapper → `wzrd/prepare_surface.py::rectify_surface`,
+portable): lit photo (projector full white, whole frame) + optional ambient
+photo + optional manual `corners` → one **run** in `surfaces/`:
+`<run>_lit.png` (rectified lit crop), `<run>_surface.png` (darkened ambient
+aligned to the lit crop, else the darkened lit crop), `<run>_ambient.png`
+(aligned, undarkened; absent without ambient), `run` =
+`YYYYmmdd-HHMMSS[-n]`. Always exactly the canvas (legacy show: 1920x1080),
+the whole quad rectified. Manual corners (normalised TL, TR, BR, BL in the
+lit photo — `wzrd/detect.py`'s `corners=` override) skip detection and are
+used as given, no margin; the reply's `corners` is the quad actually
+rectified, so auto → nudge → manual round-trips. Why three files, not one:
+the lit crop and the dark surface are different pins with different jobs.
+`prepare_surface` stays for old callers. `extract_color_regions` entries
+also carry `color` (the map's hex) and `area_fraction`, so a UI can show a
+swatch per region.
 
 **Which project a call uses — no per-chat memory.** A call's `project=`,
 else the show open in the app (the Studio selection's `project`), else
@@ -212,9 +272,30 @@ JSON over `library.py` / `jobs.py`, errors `{error}` with 400/500.
 rename, delete, delete_scored, signal, tags}`, `thumb?id=`, `selection`,
 `jobs` (long-poll on `version`, or `since`), `jobs/item`, `jobs/cancel`,
 `render` (`{tool, args, count}` → each a `wait=false` call of the render
-tool, `by: "app"`), `estimate`, `spend`, `recipes`. The exact shapes are the route functions — read `hub.py`.
+tool, `by: "app"`), `estimate`, `spend`, `recipes`, and for show setup:
+`project` (`?project=` → folder map, assets, roles, canvas choices,
+`has_scene`, existing shows), `project/assets` (pin / `path: null`
+unpins), `tool` (`{tool, args}` → any non-render tool run synchronously,
+its JSON back — refuses `render`-tagged tools ("use /api/render") and
+`destructiveHint` ones, so the app never needs a route per setup tool),
+`prompts` (GET/POST), `trash`, `trash/restore`, `trash/flush`. The exact
+shapes are the route functions — read `hub.py`; the webview's typed client
+for the show-setup routes is `wzrd-app/src/api/project.ts`.
 Destructive operations (delete) exist **only** here, never as MCP tools: an
 agent can't delete by construction.
+
+**Deletes are soft** (show-setup T1/G6): `library.delete` (and
+`delete_scored`/`purge`, which go through it) moves each file to
+`<media_root>/.wzrd/trash/<t_id>/<name>` — a rename on the media root's
+device, else a hidden `.wzrd-trash/` beside the file — marks its `files`
+row `missing`, and logs a `trash` row; the reply adds `trashed: [{id,
+path}]`. A hub thread (`hub.start_trash_flusher`) flushes entries older
+than `library.TRASH_TTL_S` (30 min) every 60 s, overdue ones at start.
+Flush unlinks and sets `purged` once the render has no file left; restore
+moves the file back (`_restored` before the extension if the path is
+taken) and re-indexes it — the embedded tag brings the same render id, and
+thumbnails were never deleted (they're keyed by render id). Why: Xander
+wanted accidental deletes recoverable; records were already kept (S7).
 
 **The library** (`library.py`): home `~/WZRD/media` (`WZRD_MEDIA_ROOT`),
 new renders in the Studio *target folder* (selection `target`) else
@@ -222,22 +303,25 @@ new renders in the Studio *target folder* (selection `target`) else
 `library.db`, `thumbs/<render id>.jpg` and `intermediates/<job>/`
 (TextureFlow's preview videos — scratch, not library items). Generators
 reserve paths with `library.output_path`; `dest="project"` sends one call's
-outputs to the project's `generated/`, an absolute folder sends them there.
+outputs to the project's `generated/`, `dest="project/<folder>"` to that
+project folder, an absolute folder sends them there.
 `logged_tool` resolves the folder **once, at call start** and pins it as an
 absolute path (`library.current_dest`): a `wait=false` render that finishes
 after the operator opened another Studio folder still lands where it was
 started (S1).
 
-**`library.db`** (SQLite, WAL; the v1 migration at the top of `library.py`
-is the schema; version in `PRAGMA user_version`, migrations run on open).
-The hub writes; the app reads it `mode=ro` to browse while the hub is down.
+**`library.db`** (SQLite, WAL; the migrations at the top of `library.py`
+are the schema — v1 Studio, v2 the trash; version in `PRAGMA user_version`,
+migrations run on open). The hub writes; the app reads it `mode=ro` to
+browse while the hub is down (the Rust reader ignores `user_version`).
 
 | Table | Key | Holds |
 |---|---|---|
 | `renders` | `r_<ulid>` (a WZRD render) or `fp_<fingerprint>` (a foreign file) | the creation record (JSON), denormalised `tool/created/project/region/job/parent`, labels `score` (0–9, Xander only) / `tags` / `agent_tags` / `notes`, `signals` (deck adds, plays, live seconds), `purged`, `thumb` (abs path) |
 | `files` | absolute `path` | `dir` (abs), `render_id`, `variant` (`master`/`hap`), `fp`, size/mtime, probe (`kind`, `codec`, `w/h/frames/fps/duration_s`), `last_seen`, `missing` |
 | `jobs` | `j_<ulid>` | render-tool calls: args, `by`, `pid`, `started`/`ended` (epoch s), `ok`, `error`, `outputs`, `est_usd`, `duration_s`, `cancelled`, `dest`, `size_key`, `remote`, `project` |
-| `roots`, `selection`, `settings` | | extra roots (home row `home=1`); the Studio selection `{styles, items, target, project}`; `daily_cap_usd` |
+| `roots`, `selection`, `settings` | | extra roots (home row `home=1`; the projects root is always a row too — show-setup G9, so Studio's tree and the Rust reader show every show's folders; `remove_root` refuses it); the Studio selection `{styles, items, target, project}`; `daily_cap_usd` |
+| `trash` (v2) | `t_<ulid>` | soft-deleted files: `path` (where it lived), `trash_path`, `render_id`, `size`, `deleted`, `flushed` (NULL while restorable) |
 
 **Identity lives in the file** (`identity.py`): a render's creation record
 is embedded once at creation as the `wzrd` tag — mp4/mov: format metadata
@@ -257,16 +341,19 @@ record outlives a deleted file.
   during the call, not an input, not under `.wzrd/`. Never written by tool
   bodies; `save_recipe` is exempt (recipe files aren't renders). A tool
   that knows more returns a private `_provenance` dict: `est_usd` keyed per
-  output path, `args` extras, `region`/`source_box`, `parent`, `paid`, and
-  `variant_of: {hap path: source path}` — that HAP shares the source's id.
+  output path, `args` extras, `region`/`source_box`, `parent`, `paid`,
+  `variant_of: {hap path: source path}` — that HAP shares the source's id —
+  and `record` (extra top-level record fields: `rectify_surface` stores the
+  rectified quad as `corners` + `manual_corners`, so the UI can reload a
+  trial's quad and slider args from its record).
 - **Indexing on open** (`library.list_folder`): unchanged files (same
   size + mtime) are free; new/changed ones are probed on a 4-thread pool
   and show as `pending` until the next listing. Identity order: embedded
   tag → a known fingerprint (a moved untagged file) → a legacy `.meta.json`
   sidecar (absorbed, left on disk, never written into the file) → foreign
   (`fp_…`). A row whose path vanished but whose fingerprint reappears
-  elsewhere follows the file. Vanished files get `missing = 1`; `/api`
-  delete sets `purged` once a render has no file left.
+  elsewhere follows the file. Vanished files get `missing = 1`; a trash
+  flush sets `purged` once a render has no file left.
 
 **Jobs** (`jobs.py`, MCP tools `jobs` / `cancel_job` in `studio_tools.py`):
 every render-tool call is a `jobs` row. `wait=false` runs the body as an
@@ -386,14 +473,15 @@ D16: the default is what a Finder-launched app sees). Code:
 |---|---|
 | `server.py` | FastMCP instance + instructions, `tool()` stack, config gate, module imports |
 | `skill_catalog.py` / `skill_tools.py` | skills scan + index / `load_skill`, resources provider, prompts |
-| `tools.py` | wzrd wrappers: subtraction, surface prep, regions, `texture_flow`/`textureflow_warm`, `build_layerpack`, `simulate_view` |
+| `tools.py` | wzrd wrappers: subtraction, surface prep (`rectify_surface`, `prepare_surface`), regions, `texture_flow`/`textureflow_warm`, `build_layerpack`, `simulate_view` |
 | `media_tools.py` | `view_media` (downscaled images; one contact sheet per video), `concat_videos` (→ `wzrd/concat.py`), `to_hap` / `extract_frames` + the C3 clip helpers (→ `wzrd/clips.py`), `check_frames` (→ `wzrd/check_frames.py`: numeric clip QC — flash rate, loop seam, haze, lit share, still-vs-surface shift; thresholds and their reasons in the module docstring) |
 | `google_tools.py`, `fal_tools.py` | hosted models — [hosted-models.md](hosted-models.md) |
 | `engine_tools.py` | engine authoring slice — [render-engine.md](render-engine.md) §2.7 |
-| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `project.json` + canvas, which project a call uses, `set_project`, `import_photos` |
+| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `LAYOUT`, `project.json` + canvas, which project a call uses; tools `set_project`, `import_photos`, `pin_asset`, `list_assets`, `list_prompts`, `save_prompt` |
+| `assets.py`, `prompts.py` | named project assets (`assets.json`, `asset:` expansion, resolution); prompt templates (WZRD + show scope) |
 | `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing + call scope, injected params, job rows, record hook; 15 s progress pings during remote calls (all paid tools, TextureFlow included) |
-| `hub.py` | the hub: `hub.lock`, idle exit, `/api/*` routes |
-| `library.py` | media root + roots + selection, `library.db` schema/migrations, indexing, labels, move/rename/delete, generator output routing |
+| `hub.py` | the hub: `hub.lock`, idle exit, trash flusher, `/api/*` routes |
+| `library.py` | media root + roots + selection, `library.db` schema/migrations, indexing, labels, move/rename, soft delete + trash, generator output routing (`dest`) |
 | `identity.py` | fingerprint, the embedded `wzrd` tag (read/write), probe, thumbnails, ULIDs |
 | `jobs.py` | job rows, status (lost = no `ended` + dead pid), ETA, estimators, `wait=false` detach + cancel, the daily spend cap |
 | `studio_tools.py` | the agent's view of the Studio: `jobs`, `cancel_job`, `studio_selection`, `find_renders`, `label_render`, `move_render`, `rename_render` |

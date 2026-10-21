@@ -320,6 +320,114 @@ async def prepare_surface(
     return response
 
 
+def _surface_run(folder: Path) -> str:
+    """A fresh `YYYYmmdd-HHMMSS[-n]` run id with none of its three files taken."""
+    base, n = project.stamp(), 1
+    run = base
+    while any((folder / f"{run}_{k}.png").exists() for k in ("lit", "surface", "ambient")):
+        n += 1
+        run = f"{base}-{n}"
+    return run
+
+
+_CORNERS_DOC = ("Manual quad in the lit photo: 4 normalised [x, y] (0-1), TL, TR, BR, BL — used exactly "
+                "as given (no margin). Omit = auto-detect. A result's `corners` round-trip here.")
+
+
+@tool(title="Rectify surface", tags={"surface"}, project_arg=True)
+async def rectify_surface(
+    lit_photo: str,
+    ambient_photo: Optional[str] = None,
+    corners: Annotated[
+        Optional[list[Annotated[list[float], Field(min_length=2, max_length=2)]]],
+        Field(min_length=4, max_length=4, description=_CORNERS_DOC),
+    ] = None,
+    margin: float = 0.01,
+    min_projection_fraction: float = 0.10,
+    max_brightness: float = 0.20,
+    detail_boost: float = 1.15,
+    chroma_correction: float = 0.5,
+    gradient_source: float = 0.5,
+    guide_fraction: float = 0.04,
+    ctx: Optional[Context] = None,
+) -> dict:
+    """Venue photos → the show's three surface images, one run in surfaces/: <run>_lit.png (rectified lit crop), <run>_surface.png (dark colour-corrected surface), <run>_ambient.png (aligned ambient photo).
+
+    The projector's lit quad in the lit photo (full white projected) is
+    rectified to exactly the project canvas (legacy project: 1920x1080).
+    With an ambient photo (same view, room lit) it is aligned to the lit crop
+    and darkened; without one the lit crop is darkened and surface_ambient
+    is null. Pin the keepers with pin_asset (surface_lit, surface,
+    surface_ambient); re-run with nudged `corners` when detection is off.
+
+    Args:
+        lit_photo: Photo with the projector showing full white (whole frame — import_photos(conform=false)).
+        ambient_photo: Optional photo of the same view with the room lit.
+        margin: Auto-detect only: shrink the detected quad inward by this fraction (0-0.1).
+        min_projection_fraction: Auto-detect only: the lit area's minimum share of the photo.
+        max_brightness: Darkening luminance ceiling (0.0-1.0). Lower = darker surface.
+        detail_boost: Darkening detail amplification (1 = keep).
+        chroma_correction: How much colour drops with luminance (0 = keep colour, 1 = proportional).
+        gradient_source: Tone-curve weighting: 0 = raw-luminance edges, 1 = fine texture.
+        guide_fraction: Base/detail split radius as a fraction of the short side.
+    """
+    from wzrd.prepare_surface import rectify_surface as _rectify
+
+    size = project.canvas() or (1920, 1080)
+    coros = [resolve_input_async(lit_photo, suffix=".png")]
+    if ambient_photo:
+        coros.append(resolve_input_async(ambient_photo, suffix=".png"))
+    resolved = await asyncio.gather(*coros)
+    log_progress("rectify_surface", "rectify → align → darken" if ambient_photo else "rectify → darken")
+    try:
+        res = await asyncio.to_thread(
+            _rectify, resolved[0], resolved[1] if ambient_photo else None,
+            output_size=size, corners=corners, margin=margin,
+            min_projection_fraction=min_projection_fraction, max_brightness=max_brightness,
+            detail_boost=detail_boost, guide_fraction=guide_fraction,
+            chroma_correction=chroma_correction, gradient_source=gradient_source,
+        )
+    except ValueError as exc:  # no lit quad found, bad corners
+        raise ToolError(f"{exc} — pass corners= (TL, TR, BR, BL, normalised) to set the quad by hand")
+
+    folder = project.kind_dir(project.SURFACES)
+    run = _surface_run(folder)
+    paths = {k: folder / f"{run}_{k}.png" for k in ("lit", "surface", "ambient")}
+
+    def save() -> None:
+        res["lit"].save(paths["lit"])
+        res["surface"].save(paths["surface"])
+        if res["ambient"] is not None:
+            res["ambient"].save(paths["ambient"])
+
+    await asyncio.to_thread(save)
+    lit_src = str(Path(lit_photo).expanduser().resolve()) if not lit_photo.startswith("http") else None
+    amb_src = (str(Path(ambient_photo).expanduser().resolve())
+               if ambient_photo and not ambient_photo.startswith("http") else None)
+    ambient_out = str(paths["ambient"]) if res["ambient"] is not None else None
+    parents = {str(paths["lit"]): lit_src, str(paths["surface"]): amb_src or lit_src}
+    if ambient_out:
+        parents[ambient_out] = amb_src
+    return {
+        "run": run,
+        "surface_lit": str(paths["lit"]),
+        "surface": str(paths["surface"]),
+        "surface_ambient": ambient_out,
+        "corners": res["corners"],
+        "manual_corners": res["manual_corners"],
+        "align": res["align"],
+        "size": list(res["size"]),
+        # The quad actually rectified goes into every output's record (top level
+        # and args), so a trial reloaded from an auto run still has its corners.
+        "_provenance": {
+            "parent": {k: v for k, v in parents.items() if v},
+            "args": {"corners": res["corners"], "manual_corners": res["manual_corners"]},
+            "record": {"corners": res["corners"], "manual_corners": res["manual_corners"],
+                       "run": run, "align": res["align"]},
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Regions (islands)
 # ---------------------------------------------------------------------------
@@ -342,7 +450,8 @@ async def extract_color_regions(
     background). Per region: `region_mask` (full canvas — for
     build_layerpack), `region_crop_mask` + `region_surface_image` (cut to the
     region's box — the diffusion_mask / reference for content made for that
-    region), `source_box`, `aspect_ratio`. A map at another size than the surface (or the project
+    region), `source_box`, `aspect_ratio`, `color` (the map's hex) and
+    `area_fraction` (share of the canvas). A map at another size than the surface (or the project
     canvas) is uncropped into it — uniform scale, never stretched. Each
     region's `source_box` is its box on the canvas, padded to a Nano Banana
     native aspect: render that region's keyframes/videos from its
@@ -380,7 +489,8 @@ async def extract_color_regions(
     out = Path(output_dir)
     published = []
     for r in regions:
-        entry: dict[str, Any] = {"source_box": r.get("source_box")}
+        entry: dict[str, Any] = {"source_box": r.get("source_box"), "color": r.get("color"),
+                                 "area_fraction": r.get("area_fraction")}
         if "standard_aspect" in r:
             entry["aspect_ratio"] = r["standard_aspect"]
         elif r.get("source_box"):

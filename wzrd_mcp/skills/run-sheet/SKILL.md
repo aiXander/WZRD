@@ -29,15 +29,16 @@ has open.
 
 ## 2. Photos → the surface
 
-Ask what the photos are: one shot from the projector's position, or a
-night/day pair (a white frame projected at night + the same view by day).
+The operator aims the projector, opens zoom/lens to cover as much surface
+as possible, projects full white and photographs it from the projector's
+position (**lit** photo); ideally the same view with the room lit
+(**ambient** photo). The app's Show setup does the same steps — whoever
+runs them, the results land in the same folders and asset names.
 
-- One shot: `import_photos()` (newest from ~/Downloads, AirDrop lands there)
-  or `import_photos(paths=[…])` — upright and conformed to the canvas.
-- Night/day pair: `import_photos(paths=[night, day], conform=False)`.
-
-Then follow skill `surface-prep` to the masked dark surface. Check: you
-`view_media`'d the surface and the operator agrees it matches the room.
+Follow skill `surface-prep`: import both whole-frame, pin `photo_lit` /
+`photo_ambient`, `rectify_surface`, pin `surface_lit` and `surface`.
+Check: `list_assets()` shows both and the operator agrees the surface
+matches the room.
 
 ## 3. Regions
 
@@ -47,24 +48,31 @@ the ceiling, each wall section, a pillar.
 1. Agree the region list with the operator and give each a short semantic
    id they'll say out loud: `fabric_left`, `fabric_mid`, `ceiling`,
    `wall_back`.
-2. Segmentation map: `nano_banana` with the "color segmentation map"
-   template from skill `image-prompting`, `image_urls=[surface]`,
-   `aspect_ratio="auto"`, naming every region in the prompt.
-   `view_media` it beside the surface: borders on real edges.
-3. `extract_color_regions(image=<map>, surface_image=<surface>)`. Match each
-   returned region to its id by looking at its `region_surface_image`.
+2. Segmentation map: `list_prompts("segmentation")` — the show's own
+   template first, else WZRD's `default`; replace `{n_regions}` with the
+   region count (plain text replace), and name the regions in it. Then
+   `nano_banana(prompt, image_urls=["asset:surface_lit"],
+   aspect_ratio="auto", dest="project/segmentation")` — 2–4 at once with
+   `wait=false` is fine. `view_media` each beside the surface: borders on
+   real edges. A prompt change that worked → `save_prompt("segmentation",
+   …)` (scope `"wzrd"` only on the operator's word).
+3. `pin_asset("segmentation", <best map>)`, then
+   `extract_color_regions(image="asset:segmentation",
+   surface_image="asset:surface")`. Match each returned region (its `color`
+   and `area_fraction` help) to its id by looking at its
+   `region_surface_image`.
 
 Check: one region per agreed surface, none missing, no slivers (raise
 `min_area_fraction` if there are).
 
 ## 4. Layer pack
 
-`build_layerpack(masks=<region_mask per region>, surface_image=<surface>,
+`build_layerpack(masks=<region_mask per region>, surface_image="asset:surface",
 mask_ids=<the ids, same order>, tags={layers: {id: {label, tags}}, groups:
-[…]}, pack_name="<venue>")`. Group what moves together (`fabrics`,
-`walls`). It writes the starter `scene.json` too. Check: the reply lists
-every id; the operator opens the project from the app's project menu and
-sees the regions on the surface map.
+[…]}, source_capture="asset:photo_lit", pack_name="<venue>")`. Group what
+moves together (`fabrics`, `walls`). It writes the starter `scene.json`
+too. Check: the reply lists every id; the operator opens the project from
+the app's project menu and sees the regions on the surface map.
 
 Copy the clip effects into the project so the clips can be played with:
 `cp -R library/effects/* <project_dir>/effects/` (repo root; the project dir

@@ -61,6 +61,9 @@ medium lists.
 
 ## Templates
 
+The saved versions (WZRD defaults + the show's own forks) are
+`list_prompts("mask")` / `list_prompts("segmentation")`; prefer those.
+
 **Mask non-reflective areas** (surface prep): `image_urls=[surface]`, prompt:
 "Keep the surface in image_1 exactly as it is, pixel for pixel, and replace
 every area that cannot reflect projector light — sky, open space behind the

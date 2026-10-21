@@ -105,7 +105,13 @@ export type EffectInput = {
   widget?: string | null;
 };
 export type Catalog = Record<string, { kind: string; inputs: EffectInput[] }>;
-export type Toast = { id: number; text: string; tone: 'info' | 'warn' | 'bad' | 'ok' };
+export type Toast = {
+  id: number;
+  text: string;
+  tone: 'info' | 'warn' | 'bad' | 'ok';
+  /** A button in the toast (e.g. Undo after a delete); clicking it runs + drops the toast. */
+  action?: { label: string; run: () => void };
+};
 export type Route = 'studio' | 'prepare' | 'align' | 'perform' | 'debug';
 
 export type LogLine = {
@@ -183,7 +189,7 @@ interface Store {
   setLiveLook: (n: string | null) => void;
 
   toasts: Toast[];
-  toast: (text: string, tone?: Toast['tone']) => void;
+  toast: (text: string, tone?: Toast['tone'], opts?: { action?: Toast['action']; ms?: number }) => void;
   dropToast: (id: number) => void;
 
   showHelp: boolean;
@@ -384,10 +390,11 @@ export const useStore = create<Store>((set) => ({
   setLiveLook: (n) => set({ liveLook: n }),
 
   toasts: [],
-  toast: (text, tone = 'info') => {
+  toast: (text, tone = 'info', opts) => {
     const id = ++toastSeq;
-    set((s) => ({ toasts: [...s.toasts.slice(-3), { id, text, tone }] }));
-    window.setTimeout(() => useStore.getState().dropToast(id), tone === 'bad' ? 6000 : 3200);
+    set((s) => ({ toasts: [...s.toasts.slice(-3), { id, text, tone, action: opts?.action }] }));
+    const ms = opts?.ms ?? (opts?.action ? 10000 : tone === 'bad' ? 6000 : 3200);
+    window.setTimeout(() => useStore.getState().dropToast(id), ms);
   },
   dropToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 

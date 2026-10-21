@@ -32,9 +32,10 @@ struct FinalPass {
     // the additive thesis — an alignment aid, not a show setting.
     background: vec4<f32>,
     // §3.6 test pattern: (mode, line thickness in source uv, grid cells, _).
-    // mode 0 none / 1 grid / 2 border / 3 corners. Generated in *source*
-    // space so it warps with the content and reveals misalignment against
-    // physical edges.
+    // mode 0 none / 1 grid / 2 border / 3 corners / 4 white. The line
+    // patterns are generated in *source* space so they warp with the content
+    // and reveal misalignment against physical edges; white floods the whole
+    // raster (unwarped, unmastered) for the lit surface photo.
     pattern: vec4<f32>,
     // §2.8 output transform, fit: (offset.xy, 1/scale.xy) — the composite's
     // rect inside warp-source uv. Identity (0, 0, 1, 1) = stretch.
@@ -131,7 +132,7 @@ fn shade(uv: vec2<f32>) -> vec4<f32> {
         let c_design = textureSample(design_tex, composite_sampler, uv);
         c = mix(c, c_design, uniforms.adjust.z);
     }
-    if (uniforms.pattern.x > 0.5) {
+    if (uniforms.pattern.x > 0.5 && uniforms.pattern.x < 3.5) {
         c = vec4<f32>(
             test_pattern(uv, uniforms.pattern.x, uniforms.pattern.y, uniforms.pattern.z),
             1.0,
@@ -143,6 +144,12 @@ fn shade(uv: vec2<f32>) -> vec4<f32> {
     let luma = dot(c.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
     let rgb = mix(vec3<f32>(luma), c.rgb, uniforms.adjust.y) * uniforms.adjust.x;
 
+    // White test pattern: every pixel the projector can light, at full
+    // output — no warp rect, no masters, no background. Decided last so the
+    // samples above stay in uniform control flow.
+    if (uniforms.pattern.x > 3.5) {
+        return vec4<f32>(1.0);
+    }
     if (!inside) {
         return vec4<f32>(uniforms.background.rgb, 1.0);
     }

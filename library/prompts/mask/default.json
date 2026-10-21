@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "kind": "mask",
+  "name": "default",
+  "prompt": "Keep the surface in image_1 exactly as it is, pixel for pixel, and replace every area that cannot reflect projector light — sky, open space behind the structure, glass, distant background — with pure black (#000000). Same framing and aspect ratio as image_1. ACTIVELY AVOID THESE: no relighting, no texture changes, no soft gradients at the mask edge.",
+  "notes": "Mask non-reflective areas (skill image-prompting). image_1 = the dark surface (asset surface); aspect_ratio=\"auto\".",
+  "updated": "2026-10-16T12:00:00",
+  "from": null
+}
