@@ -35,6 +35,23 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
+def _textureflow_spec_at_start() -> None:
+    """Say which TextureFlow spec texture_flow was built from, warn about saved
+    recipes it doesn't cover, and refresh the cache from the deployed app's
+    spec() in the background (used from the next start; never blocks)."""
+    from . import tf_spec
+    from ._log import _emit
+
+    cur = tf_spec.current()
+    _emit(f"TextureFlow spec v{cur.spec.get('version')} from {cur.source} "
+          f"(target {tf_spec.target()[1]}/{tf_spec.target()[0]})")
+    try:
+        tf_spec.check_recipes()
+    except Exception as exc:  # noqa: BLE001 — a broken recipe folder must not stop the hub
+        _emit(f"⚠ recipe check failed: {exc!r}")
+    tf_spec.refresh_in_background()
+
+
 def main() -> None:
     _load_dotenv()
 
@@ -55,6 +72,8 @@ def main() -> None:
     _log.DEBUG = args.debug
 
     from .server import mcp
+
+    _textureflow_spec_at_start()
 
     if args.stdio:
         # Desktop owns the process and speaks JSON-RPC over our stdout, so

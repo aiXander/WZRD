@@ -14,27 +14,60 @@ WZRD only calls it by name from the MCP. Nothing in this repo deploys anything t
 
 Both take the same contract: `TextureFlow.render(args, files) -> {request_id, outputs: {output_video,
 first_pass_video, control_signal_preview, mapping_motion_preview} → {filename, bytes, mime}, params,
-timings}`, plus `set_warm(minutes)`. Defaults and validation live server-side in `api.yaml`.
+timings}`, plus `set_warm(minutes)`. Defaults and validation live server-side in the lab's
+`tflab/spec.yaml`, which `textureflow` also publishes (`spec()`, below); `wzrd-textureflow` validates
+against its own frozen `api.yaml` (today the same 20 args + `output_codec`).
 
 **Every Modal CLI call needs `--env wzrd`** (the profile default is `gigabrain`) and every lookup
 `environment_name="wzrd"`; without it the lookup silently lands in the wrong environment and fails. The
 `textureflow-models` weights volume and `textureflow-outputs` (every render's files under `<request_id>/`)
 are shared by both apps; the lab's `comfyui_app/app.py::download_models` is the only writer of the weights.
 
+## The spec-driven tool (`wzrd_mcp/tf_spec.py`)
+
+The endpoint owns its inputs. The lab's `tflab/spec.yaml` holds every arg's type, default, range,
+choices (+ `choice_notes`), a UI `label`, an agent-facing `description` (what it does visually, traps),
+a model `summary` and a semver `version`; the deployed `textureflow` serves it from a CPU function
+`spec()` → `{app, git_sha, spec}` (breaking-change rule: the lab's `docs/reference/deploy.md`).
+
+- **At import** `tools.py` builds `texture_flow` from `tf_spec.current()`: one `Optional[T] = None`
+  param per spec arg (array → `list[str]`, media → `str`), WZRD's own hand-written args (`region`,
+  `allow_over_cap`, `hap`, `recipe`, `backend`, `ctx`; `project`/`dest`/`wait` injected by `tool()`)
+  merged in; docstring = spec `summary` + WZRD's `_TF_INTRO` (media library, recipes, backends) +
+  `Args:` rendered by `tf_spec.describe` — description, then `One of: "a" (note), …`, `Range lo-hi, step
+  s.`, `Default d.` from the structured fields. `_TF_NOTES` adds WZRD meaning (`images`: required unless
+  a recipe supplies them). Seeded 2026-10-21; schema diffed against the old hand-written tool: same 27
+  names, types, defaults, `additionalProperties: false` — only descriptions changed.
+- **Source order, never blocking on Modal:** the cache `~/WZRD/media/.wzrd/textureflow_spec/<app>.json`
+  (the last `spec()` reply of `$TEXTUREFLOW_APP`) → the committed snapshot `wzrd_mcp/textureflow_spec.json`.
+  A malformed cache logs and falls back. The fallback `wzrd-textureflow` has no `spec()`: it always uses
+  the snapshot.
+- **Refresh:** `__main__` logs which spec loaded, runs `check_recipes()` (one warning per saved-recipe arg
+  the spec doesn't know), and starts `refresh_in_background()` (daemon thread: `modal.Function.from_name(
+  app, "spec", environment_name=env).remote()` → atomic cache write). A changed spec is logged and **takes
+  effect on the next hub start** (no live re-registration). `NotFoundError` = an app without `spec()`.
+- **Snapshot upkeep:** after a lab spec change ships, `uv run python -m wzrd_mcp.tf_spec --snapshot`
+  (from the deployed app) or `--snapshot <lab>/tflab/spec.yaml`, and commit it. `python -m wzrd_mcp.tf_spec`
+  prints what's loaded.
+- **Studio:** `GET /api/textureflow/spec` (= `tf_spec.public()`: the loaded spec + `source`, `app`,
+  `target`). `RenderPanel.tsx` reads its knobs' ranges, steps and defaults from it (length, motion, shape
+  strength inside the curated 0.35–0.65 sweet spot, region size snap, draft `n_steps` = the minimum);
+  until it loads, TextureFlow can't be started.
+- Test: `python test.py textureflow` §9 + `spec_sources` (schema = spec + WZRD args, recipe arg dropped
+  with a warning, cache vs snapshot, refresh, fallback app).
+
 ## The WZRD client
 
 `wzrd_mcp/tools.py`:
 - **`texture_flow`** — `modal.Cls.from_name($TEXTUREFLOW_APP or "textureflow", "TextureFlow",
-  environment_name=$WZRD_MODAL_ENV or "wzrd")().render`. Every arg defaults to `None` and **only
-  caller-set args are sent**, so api.yaml stays the single source of defaults. Media args: an http(s) URL
+  environment_name=$WZRD_MODAL_ENV or "wzrd")().render`. Every spec arg defaults to `None` and **only
+  caller-set args are sent**, so the server stays the single source of defaults. Media args: an http(s) URL
   passes through; a local path is read into `files` under its basename (deduped `name_2.ext`, photos made
   upright first). `output_video` lands in the media library (`library.output_path`, `~/WZRD/media`, Studio
   target folder else `inbox/`) with an engine HAP clip beside it; the three previews go to
   `.wzrd/intermediates/<job>/`; the reply is those paths plus `seed`, `params`, `request_id`, `timings`.
   Cost = `timings.total_s` (+ `restore_s` on cold starts) × `_TF_USD_PER_S` (RTX PRO 6000 list price),
-  checked against the daily spend cap first. The docstring spells out server defaults and the `denoise` /
-  ESRGAN / OpenPose behaviour for calling agents — keep it in sync with the lab's `reference/api.yaml`
-  (it lists the `preprocessor1` choices by hand). `recipe=<name>` fills unset args and style images from a
+  checked against the daily spend cap first. Args and their docs are generated (above). `recipe=<name>` fills unset args and style images from a
   saved look in `library/recipes/` (merge rules: [mcp-server.md](mcp-server.md) "Style recipes").
 - **Two backends, picked per call — `backend="modal" | "local"`** (default `$TEXTUREFLOW_BACKEND`, unset =
   `modal`; never sent to the server, like `region`). **No auto-routing and no fallback, ever** (Xander's

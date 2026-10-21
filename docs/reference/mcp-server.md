@@ -103,6 +103,13 @@ idempotent=, open_world=)` — never `@mcp.tool` by hand:
   FastMCP 4 publishes `additionalProperties: false` on every input schema.
 - **Docstring `Args:`** are lifted by FastMCP into per-parameter schema
   descriptions; keep them one line, contract only.
+- **Generated tools.** `texture_flow` is the one tool whose signature and
+  docstring are built at import from data (the endpoint's arg spec,
+  `tf_spec.py`): a `**kwargs` wrapper with a generated `__signature__`,
+  `__annotations__` and `__doc__`, passed through `tool()` like any other.
+  FastMCP 4.1 rejects a `**kwargs` *signature*, but reads `__signature__`,
+  so the override is all it sees. [textureflow.md](textureflow.md) "The
+  spec-driven tool".
 
 ## Operator gate: `tools_config.json`
 
@@ -456,7 +463,10 @@ D16: the default is what a Finder-launched app sees). Code:
   slugified lowercase; written via a temp dir + rename; an existing name
   needs `overwrite=true`.
 - **`texture_flow(recipe=…)`**: `apply_recipe` merges recipe args as
-  defaults under the caller's non-null args (`images` too) and refuses a
+  defaults under the caller's non-null args (`images` too), drops recipe
+  args the TextureFlow spec doesn't know (renamed/removed since the recipe
+  was saved; a `warnings` entry in the reply + a log line; the hub also
+  logs every such recipe arg at start, `tf_spec.check_recipes`) and refuses a
   shaped recipe (`use_controlnet1` / `denoise < 1`) without a
   `control_input` — that would render near-black. `images` is optional
   only with a recipe. The *merged* args go into the record (`_provenance`
@@ -488,6 +498,7 @@ D16: the default is what a Finder-launched app sees). Code:
 | `studio_tools.py` | the agent's view of the Studio: `jobs`, `cancel_job`, `studio_selection`, `find_renders`, `label_render`, `move_render`, `rename_render` |
 | `provenance.py` | render records for every output (`record_outputs`), legacy sidecar reads, `region=` → pack layer box |
 | `recipe_tools.py` | style recipe library: `list_recipes`, `save_recipe`, `apply_recipe` (the `texture_flow(recipe=)` merge) |
+| `tf_spec.py`, `textureflow_spec.json` | TextureFlow's published arg spec: cache → committed snapshot, background refresh from the app's `spec()`, the generated `texture_flow` params/docs, unknown-arg checks — [textureflow.md](textureflow.md) |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |
 | `file_io.py`, `auth.py`, `modal_app.py`, `upload.py` | input resolution; parked cloud path |
 

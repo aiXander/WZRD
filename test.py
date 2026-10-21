@@ -275,7 +275,9 @@ def test_textureflow():
     """texture_flow's backend switch: the default Modal path (Modal mocked) and
     backend="local" against a fake job server speaking the local wire contract
     v1 (health, multipart submit, long-poll, result + files, cancel, 400, 401,
-    unreachable, timeout, server-side error), plus textureflow_warm."""
+    unreachable, timeout, server-side error), plus textureflow_warm, and the
+    spec the tool is generated from (tf_spec: cache vs snapshot, background
+    refresh, recipe args the spec doesn't know)."""
     import asyncio
     import json
     import subprocess
@@ -286,13 +288,13 @@ def test_textureflow():
     from aiohttp import web
     from fastmcp import Client
     from fastmcp.exceptions import ToolError
-    from wzrd_mcp import jobs, library
+    from wzrd_mcp import jobs, library, tf_spec
     from wzrd_mcp.server import mcp
 
     _require(TEST_DAY_IMAGE)
     tmp = Path(tempfile.mkdtemp(prefix="wzrd_tf_"))
     env_keys = ("WZRD_MEDIA_ROOT", "WZRD_PROJECTS_ROOT", "TEXTUREFLOW_BACKEND", "TEXTUREFLOW_APP",
-                "WZRD_MODAL_ENV", "TEXTUREFLOW_LOCAL_URL", "TEXTUREFLOW_LOCAL_TOKEN")
+                "WZRD_MODAL_ENV", "TEXTUREFLOW_LOCAL_URL", "TEXTUREFLOW_LOCAL_TOKEN", "WZRD_RECIPES_ROOT")
     saved_env = {k: os.environ.get(k) for k in env_keys}
     for k in env_keys[2:]:
         os.environ.pop(k, None)
@@ -580,12 +582,60 @@ def test_textureflow():
                         await refused(c, tool, args, "unreachable", "desktop on", dead)
                         assert time.perf_counter() - t0 < 3.0, (dead, time.perf_counter() - t0)
                 assert srv["requests"] == n
+
+                # 9. the spec: the schema is the spec's args + WZRD's own; a recipe arg
+                # the spec doesn't know is dropped with a warning, not sent.
+                snap = json.loads(tf_spec.SNAPSHOT_PATH.read_text())["spec"]
+                tool = next(t for t in await c.list_tools() if t.name == "texture_flow")
+                own = {"region", "allow_over_cap", "hap", "recipe", "backend", "project", "dest", "wait"}
+                assert set(tool.inputSchema["properties"]) == set(snap["parameters"]) | own, tool.inputSchema
+                assert "Range 320-1280, step 32. Default 640." in tool.inputSchema["properties"]["width"]["description"]
+                rdir = tmp / "recipes" / "old-look"
+                rdir.mkdir(parents=True)
+                (rdir / "recipe.json").write_text(json.dumps(
+                    {"schema": 1, "name": "old-look", "images": [style], "args": {"n_steps": 4, "cfg_scale": 3}}))
+                os.environ["WZRD_RECIPES_ROOT"] = str(tmp / "recipes")
+                modal.Cls.from_name = FakeCls
+                res_r = await call(c, "texture_flow", {"recipe": "old-look", **base["draft"]})
+                sent_r = modal_calls[-1][1]
+                assert "cfg_scale" not in sent_r and sent_r["n_steps"] == 4, sent_r
+                assert "cfg_scale" in res_r["warnings"][0], res_r.get("warnings")
+                modal.Cls.from_name = no_modal
         finally:
             mute.close()
             await runner.cleanup()
 
+    def spec_sources():
+        """Cache (per app) beats the snapshot; a bad cache or an app without one
+        falls back; refresh writes the cache and never raises."""
+        loaded, fetch = tf_spec._current, tf_spec.fetch
+        try:
+            assert tf_spec._load().source == "snapshot"
+            snap = json.loads(tf_spec.SNAPSHOT_PATH.read_text())
+            newer = {**snap, "git_sha": "abc1234", "spec": {**snap["spec"], "version": "1.1.0"}}
+            tf_spec.fetch = lambda app, env: newer
+            tf_spec.refresh_in_background().join(10)
+            cached = tf_spec.cache_path("textureflow")
+            assert json.loads(cached.read_text()) == newer
+            got = tf_spec._load()
+            assert got.source == f"cache {cached}" and got.spec["version"] == "1.1.0", got.source
+            os.environ["TEXTUREFLOW_APP"] = "wzrd-textureflow"  # the fallback: no spec(), no cache
+            assert tf_spec._load().source == "snapshot"
+            del os.environ["TEXTUREFLOW_APP"]
+
+            def gone(app, env):
+                raise RuntimeError("Function not found")
+            tf_spec.fetch = gone
+            tf_spec.refresh_in_background().join(10)  # logs, keeps the cache
+            assert json.loads(cached.read_text()) == newer
+            cached.write_text("{not json")
+            assert tf_spec._load().source == "snapshot"
+        finally:
+            tf_spec._current, tf_spec.fetch = loaded, fetch
+
     try:
         asyncio.run(run())
+        spec_sources()
     finally:
         modal.Cls.from_name, modal.Function.from_name = saved_modal
         for k, v in saved_env.items():

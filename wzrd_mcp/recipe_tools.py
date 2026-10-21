@@ -39,6 +39,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
 from . import library, project
+from ._log import log_progress
 from .provenance import THUMB_SUFFIX, legacy_sidecar
 from .server import tool
 
@@ -78,11 +79,25 @@ def load_recipe(name: str) -> dict:
     return recipe
 
 
-def apply_recipe(name: str, args: dict) -> dict:
+def apply_recipe(name: str, args: dict, warnings: Optional[list[str]] = None) -> dict:
     """TextureFlow args for a call with `recipe=name`: the recipe's args and
-    style images as defaults, the caller's args (already non-null) win."""
+    style images as defaults, the caller's args (already non-null) win.
+
+    Recipe args the endpoint's spec doesn't know (renamed or removed since
+    the recipe was saved) are dropped, with a message in `warnings`, instead
+    of letting the server reject the whole render."""
+    from . import tf_spec
+
     recipe = load_recipe(name)
-    merged = {**recipe.get("args", {}), **args}
+    saved = dict(recipe.get("args", {}))
+    dropped = tf_spec.unknown(saved)
+    if dropped:
+        msg = (f"recipe {name!r}: dropped {dropped} — the TextureFlow spec "
+               f"(v{tf_spec.current().spec.get('version')}) has no such args; re-save the recipe")
+        log_progress("texture_flow", msg)
+        if warnings is not None:
+            warnings.append(msg)
+    merged = {**{k: v for k, v in saved.items() if k not in dropped}, **args}
     merged.setdefault("images", recipe["images"])
     if not merged.get("images"):
         raise ToolError(f"recipe {name!r} has no style images — pass images=")

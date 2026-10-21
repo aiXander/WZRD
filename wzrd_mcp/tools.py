@@ -21,7 +21,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from . import jobs, library, project, provenance, textureflow_local
+from . import jobs, library, project, provenance, textureflow_local, tf_spec
 from ._keepalive import with_keepalive
 from ._log import log_progress
 from .file_io import resolve_input_async
@@ -567,13 +567,14 @@ async def reproject_video(
 # falls back to the frozen ComfyUI-graph app (textureflow-lab `comfyui_app/`, kept
 # deployed as the rollback). Local files travel as bytes in `files`, URLs pass
 # through, the returned mp4 bytes land in the project's generated/ folder.
-# Only caller-set args are sent: the server owns the defaults (api.yaml) and
-# all validation. `backend="local"` renders the same call on Xander's desktop
+# The tool is generated from the endpoint's published arg spec (`tf_spec`:
+# the deployed app's `spec()`, cached, else the vendored snapshot), merged
+# with WZRD's own args below. Only caller-set args are sent: the server owns
+# the defaults and all validation. `backend="local"` renders the same call on Xander's desktop
 # GPU instead (`textureflow_local.py`, $0); the caller always picks — no
 # auto-routing, no fallback. Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
-_TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap", "hap", "recipe", "backend")  # never sent to the server
 _TF_BACKENDS = ("modal", "local")
 _TF_USD_PER_S = 3.03 / 3600  # Modal RTX PRO 6000 list price (textureflow-lab deploy.py GPU)
 _TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~3–4 min warm)
@@ -629,95 +630,53 @@ def _tf_estimate(args: dict) -> float:
 jobs.ESTIMATORS["texture_flow"] = _tf_estimate
 
 
-def _tf_target() -> tuple[str, str]:
-    return os.getenv("TEXTUREFLOW_APP", "textureflow"), os.getenv("WZRD_MODAL_ENV", "wzrd")
+_tf_target = tf_spec.target
 
 
-@tool(title="TextureFlow animation", tags={"generate", "textureflow"}, open_world=True,
-      project_arg=True, render=True)
-async def texture_flow(
-    images: Optional[list[str]] = None,
-    n_seconds: Optional[float] = None,
-    width: Optional[int] = None,
-    height: Optional[int] = None,
-    base_model: Optional[str] = None,
-    use_controlnet1: Optional[bool] = None,
-    control_input: Optional[str] = None,
-    diffusion_mask: Optional[str] = None,
-    preprocessor1: Optional[str] = None,
-    controlnet_strength1: Optional[float] = None,
-    denoise: Optional[float] = None,
-    control_input_fit_strategy: Optional[str] = None,
-    map_shape_input_to_ip_masks: Optional[bool] = None,
-    mapping_mode: Optional[str] = None,
-    n_steps: Optional[int] = None,
-    motion_scale: Optional[float] = None,
-    use_upscale: Optional[bool] = None,
-    upscale_resolution: Optional[int] = None,
-    upscale_esrgan: Optional[bool] = None,
-    seed: Optional[int] = None,
-    output_codec: Optional[str] = None,
+# WZRD-owned part of the tool description (between the spec's summary and the Args).
+_TF_INTRO = """\
+Runs on WZRD's own Modal GPU (default) or, with backend="local", on Xander's
+desktop GPU (slower, $0). Load skill `textureflow` for settings. A saved look
+from the library (list_recipes) renders with recipe="<name>".
+
+Omit an argument to get the server default. A cold Modal GPU adds ~1 min
+(textureflow_warm before a show). Media args take a local path or URL.
+The mp4 lands in the media library (dest=); the preview videos
+(first_pass_video, control_signal_preview, mapping_motion_preview) are
+scratch under the library's .wzrd/intermediates/."""
+
+# Docs of WZRD's own args (hand-written params of `_texture_flow`), and notes
+# appended to spec args where WZRD changes their meaning.
+_TF_OWN_DOCS = {
+    "region": 'Optional pack layer id this render is for (e.g. "fabric_left"). Recorded in the render\'s record with that layer\'s box (resolved against this call\'s project).',
+    "allow_over_cap": "Only after Xander OKs it: run even though it takes the project past its spend cap.",
+    "hap": "Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.",
+    "recipe": "A style recipe name (list_recipes): its style images and settings become the defaults; every argument you pass wins. Add width/height (the region's aspect), and control_input or diffusion_mask for the target.",
+    "backend": '"modal" (WZRD\'s Modal GPU, paid, counts toward the spend cap) or "local" (Xander\'s desktop RTX 3090: $0, same args, outputs and seed handling, renders anything Modal can; the desktop must be on — if it\'s off the call fails in ~2 s). Omitted = $TEXTUREFLOW_BACKEND, else "modal". Xander picks it; never switch backends on your own or retry a failed call on the other one.',
+}
+_TF_NOTES = {"images": "Required unless a recipe supplies them."}
+
+
+async def _texture_flow(
     region: Optional[str] = None,
     allow_over_cap: bool = False,
     hap: bool = True,
     recipe: Optional[str] = None,
     backend: Optional[str] = None,
     ctx: Optional[Context] = None,
+    **spec_args: Any,
 ) -> dict:
-    """Render an abstract, morphing, seamlessly flowing animation from 1-6 style images (TextureFlow: SD1.5 + AnimateDiff + IP-Adapter + ControlNet, on WZRD's own Modal GPU).
-
-    For textures, VJ loops, animated logos and per-region fills. It cannot tell
-    a story and takes no keyframes: style images drive textures and colors but
-    never appear verbatim. Load skill `textureflow` for settings. A saved
-    look from the library (list_recipes) renders with recipe="<name>".
-
-    Omit an argument to get the server default. On Modal (the default
-    backend) defaults render full-HD upscaled (~3–4 min warm); for tests set
-    use_upscale=false AND upscale_esrgan=false (~30 s at 384x384). A cold
-    Modal GPU adds ~1 min (textureflow_warm before a show). backend="local"
-    renders the same call on Xander's desktop GPU (slower, $0). Media args
-    take a local path or URL.
-    The mp4 lands in the media library (dest=); the preview videos
-    (first_pass_video, control_signal_preview, mapping_motion_preview) are
-    scratch under the library's .wzrd/intermediates/.
-
-    Args:
-        images: 1-6 style images driving content, textures and colors. Required unless a recipe supplies them.
-        n_seconds: Length in seconds (2-24, default 6). ~3 s per style image.
-        width: Pixels (320-1280, step 32, default 640). High values are slow and can duplicate content.
-        height: Pixels (320-1280, step 32, default 640).
-        base_model: "SD15/juggernaut_reborn.safetensors" (realistic, default), "SD15/darkSushiMixMix_225D.safetensors" (creative, soft pastel), "SD15/protogenV22Anime_protogenV22.safetensors" (anime, flat colors).
-        use_controlnet1: Enable shape guidance from control_input (default false).
-        control_input: Image/GIF/video giving shape (logo, surface photo, motion clip, QR). Also the img2img start when denoise < 1, and what shows through black diffusion_mask areas — even with use_controlnet1=false.
-        diffusion_mask: Image/video mask: white = animated, black = keeps the shape input (stays black only when there is no control_input). Edge is grown and blurred. Use for region/island videos.
-        preprocessor1: With use_controlnet1: "Scribble_XDoG_Preprocessor" (default, rough shape), "CannyEdgePreprocessor" (strong edges), "DepthAnythingV2Preprocessor" (depth), "AnyLineArtPreprocessor_aux" (lineart), "OpenposePreprocessor" (needs a visible person, else no guidance), "none" (luminance/QR mode).
-        controlnet_strength1: 0.0-1.0, default 0.45. Subtle 0.35-0.45, strong 0.45-0.65; higher tends to look bad.
-        denoise: 0.1-1.0, default 1.0 (fresh render; shape only via controlnet). Below 1 = img2img from control_input, so its colors and layout carry over (0.7-0.9 "AI-skins" a photo or surface). NEVER < 1 without a control_input: the start is black, so the video comes out near-black. Coarse at low n_steps (at 4 steps, 0.81-0.99 all render the same).
-        control_input_fit_strategy: "fill / crop" (default), "stretch", "pad".
-        map_shape_input_to_ip_masks: Map style images onto the flat color clusters of the shape input (only for flat single-color regions). Overrides mapping_mode.
-        mapping_mode: Motion pattern: concentric_circles_inwards/outwards (default outwards), concentric_rectangles_inwards/outwards, rotating_segments_clockwise/counter_clockwise (avoid unless asked), pushing_segments_clockwise/counter_clockwise, vertical_stripes_left/right, horizontal_stripes_up/down.
-        n_steps: LCM steps (4-14, default 8). Runtime scales linearly.
-        motion_scale: Motion strength (0.7-1.4, default 1.1). 0.9 subtle, 1.25 lively; >1.3 rarely good.
-        use_upscale: HD latent-upscale second pass (default true).
-        upscale_resolution: Long side for the latent upscale (1024-1536, step 64, default 1280).
-        upscale_esrgan: ESRGAN to 1920 px long side (default true; sharp/realistic, less ideal for organic looks). Runs even with use_upscale=false.
-        seed: 0-2147483647. Omit for random; the used seed is returned, pass it back to reproduce.
-        output_codec: "h264" (default) or "hevc10" (smaller, higher fidelity, not decodable everywhere).
-        region: Optional pack layer id this render is for (e.g. "fabric_left"). Recorded in the render's record with that layer's box (resolved against this call's project).
-        allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
-        hap: Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.
-        recipe: A style recipe name (list_recipes): its style images and settings become the defaults; every argument you pass wins. Add width/height (the region's aspect), and control_input or diffusion_mask for the target.
-        backend: "modal" (WZRD's Modal GPU, paid, counts toward the spend cap) or "local" (Xander's desktop RTX 3090: $0, same args, outputs and seed handling, renders anything Modal can; the desktop must be on — if it's off the call fails in ~2 s). Omitted = $TEXTUREFLOW_BACKEND, else "modal". Xander picks it; never switch backends on your own or retry a failed call on the other one.
-    """
-    # First statement on purpose: locals() is exactly the tool's parameters here.
-    args = {k: v for k, v in locals().items() if k not in _TF_LOCAL_ARGS and v is not None}
+    """The body of `texture_flow`; its signature + docstring are generated (`_tf_tool`)."""
+    args = {k: v for k, v in spec_args.items() if v is not None}
+    images = args.get("images")
     backend = _tf_backend(backend)
+    warnings: list[str] = []
     if recipe:
         from .recipe_tools import apply_recipe
 
-        args = apply_recipe(recipe, args)
+        args = apply_recipe(recipe, args, warnings)
     elif not images:
-        raise ToolError("texture_flow needs images= (1-6 style images) or recipe=")
+        raise ToolError("texture_flow needs images= (style images) or recipe=")
     sent = dict(args)  # local paths, before packing — what the record keeps
     region_info = provenance.region_meta(region) if region else {}
     # Local: the health check (≈ 2 s) runs before the spend check, so a
@@ -768,7 +727,33 @@ async def texture_flow(
         "args": {**(sent if recipe else {}), "seed": res["params"].get("seed"), "model": model},
         **region_info,
     }
+    if warnings:
+        response["warnings"] = warnings
     return await attach_clip(response, "output_video", hap)
+
+
+def _tf_tool():
+    """`texture_flow` = `_texture_flow` with the spec's args as its parameters and docs (`tf_spec`)."""
+    import inspect
+
+    spec = tf_spec.current().spec
+    own = list(inspect.signature(_texture_flow, eval_str=True).parameters.values())[:-1]  # minus **spec_args
+    skip = {p.name for p in own}
+    params = tf_spec.parameters(spec, skip) + own
+
+    async def texture_flow(**kwargs):
+        return await _texture_flow(**kwargs)
+
+    texture_flow.__signature__ = inspect.Signature(params, return_annotation=dict)
+    texture_flow.__annotations__ = {**{p.name: p.annotation for p in params}, "return": dict}
+    lines = tf_spec.args_doc(spec, _TF_NOTES, skip) + [f"{k}: {v}" for k, v in _TF_OWN_DOCS.items()]
+    texture_flow.__doc__ = (spec["summary"].strip() + "\n\n" + _TF_INTRO + "\n\nArgs:\n"
+                            + "\n".join(f"    {line}" for line in lines))
+    return tool(title="TextureFlow animation", tags={"generate", "textureflow"}, open_world=True,
+                project_arg=True, render=True)(texture_flow)
+
+
+texture_flow = _tf_tool()
 
 
 @tool(title="Keep TextureFlow GPU warm", tags={"generate", "textureflow"}, idempotent=True, open_world=True)

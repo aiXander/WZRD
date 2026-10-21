@@ -93,11 +93,12 @@ full-frame TextureFlow render can usually be projected as-is: preview it with
   use the region crop's aspect ratio from `extract_color_regions`.
 - **Fast iteration**: `use_upscale=false` AND `upscale_esrgan=false`, 384-512
   px, `n_steps=4-6` (~30 s warm). Finals: upscales on (~6 min warm).
-- **Motion**: `motion_scale` 0.9 subtle … 1.25 lively. `mapping_mode` picks the
-  motion pattern (`horizontal_stripes_up` reads well in demos; avoid
-  `rotating_segments_counter_clockwise` unless asked).
-- **Model**: juggernaut (realistic, default), darkSushiMix (soft, pastel,
-  creative), protogen (anime, flat color).
+- **Motion**: `motion_scale` sets how much moves, `mapping_mode` the pattern
+  (`horizontal_stripes_up` reads well in demos). Ranges, defaults and what each
+  choice looks like are in the tool's own arg docs — they come from the
+  endpoint, so trust them over anything remembered.
+- **Model**: `base_model` — juggernaut for realistic surfaces, darkSushiMix for
+  soft creative looks, protogen for flat-color graphics.
 - `denoise < 1` without a `control_input` renders near-black — always pair them.
 - Keep the returned `seed` to reproduce a render you like.
 - **Backend**: `backend="local"` renders on Xander's desktop GPU ($0, slower,

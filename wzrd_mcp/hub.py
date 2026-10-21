@@ -350,6 +350,15 @@ async def _recipes(request, body):
     return await _thread(recipes_table, _q(request, "name"))
 
 
+@api("/api/textureflow/spec")
+async def _textureflow_spec(request, body):
+    """The TextureFlow arg spec texture_flow was built from (tf_spec: cache or
+    snapshot) — the Render panel reads its knobs' ranges and defaults here."""
+    from . import tf_spec
+
+    return tf_spec.public()
+
+
 # -- show setup: project info + named assets (A1) ----------------------------
 def _show(name: Optional[str]) -> str:
     from . import project

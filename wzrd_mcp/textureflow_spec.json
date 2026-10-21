@@ -1,0 +1,246 @@
+{
+ "app": "textureflow",
+ "git_sha": null,
+ "spec": {
+  "name": "TextureFlow",
+  "version": "1.0.0",
+  "summary": "Render an abstract, morphing, seamlessly looping animation from style images (TextureFlow: SD1.5 + AnimateDiff-LCM + IP-Adapter + ControlNet).\n\nFor textures, VJ loops, animated logos, animated QR codes and per-region fills. It cannot tell a story and\ntakes no keyframes: style images drive textures and colors but never appear verbatim. A control_input\n(shape image, GIF or video) can add shape or motion guidance; without one it almost always looks good,\nwith one it needs more tuning. Defaults render full-HD upscaled (~3\u20134 min on a warm GPU); for tests set\nuse_upscale=false AND upscale_esrgan=false (~30 s at 384x384).",
+  "parameters": {
+   "images": {
+    "type": "array",
+    "items": {
+     "type": "image"
+    },
+    "min_length": 1,
+    "max_length": 6,
+    "required": true,
+    "label": "Style images",
+    "description": "Style images driving content, textures and colors (through IP-Adapter). ~3 s of video per style image."
+   },
+   "n_seconds": {
+    "type": "float",
+    "default": 6.0,
+    "minimum": 2.0,
+    "maximum": 24.0,
+    "step": 0.5,
+    "required": true,
+    "label": "Length (s)",
+    "description": "Video length in seconds. ~3 s per style image."
+   },
+   "width": {
+    "type": "integer",
+    "default": 640,
+    "minimum": 320,
+    "maximum": 1280,
+    "step": 32,
+    "required": true,
+    "label": "Width",
+    "description": "Generation width in pixels. High values are slow and can duplicate content (multiple faces etc.)."
+   },
+   "height": {
+    "type": "integer",
+    "default": 640,
+    "minimum": 320,
+    "maximum": 1280,
+    "step": 32,
+    "required": true,
+    "label": "Height",
+    "description": "Generation height in pixels. High values are slow and can duplicate content."
+   },
+   "base_model": {
+    "type": "string",
+    "default": "SD15/juggernaut_reborn.safetensors",
+    "choices": [
+     "SD15/juggernaut_reborn.safetensors",
+     "SD15/darkSushiMixMix_225D.safetensors",
+     "SD15/protogenV22Anime_protogenV22.safetensors"
+    ],
+    "choice_notes": {
+     "SD15/juggernaut_reborn.safetensors": "realistic",
+     "SD15/darkSushiMixMix_225D.safetensors": "creative, soft pastel",
+     "SD15/protogenV22Anime_protogenV22.safetensors": "anime, flat colors"
+    },
+    "required": true,
+    "label": "Base model",
+    "description": "The SD1.5 checkpoint; each has its own aesthetic."
+   },
+   "use_controlnet1": {
+    "type": "boolean",
+    "default": false,
+    "label": "Use shape input",
+    "description": "Enable ControlNet shape guidance from control_input."
+   },
+   "control_input": {
+    "anyOf": [
+     {
+      "type": "image"
+     },
+     {
+      "type": "video"
+     }
+    ],
+    "label": "Shape input",
+    "description": "Image/GIF/video giving shape (logo, surface photo, motion clip, QR). Also the img2img start when denoise < 1, and what shows through black diffusion_mask areas \u2014 even with use_controlnet1=false."
+   },
+   "preprocessor1": {
+    "type": "string",
+    "default": "Scribble_XDoG_Preprocessor",
+    "choices": [
+     "Scribble_XDoG_Preprocessor",
+     "CannyEdgePreprocessor",
+     "DepthAnythingV2Preprocessor",
+     "AnyLineArtPreprocessor_aux",
+     "OpenposePreprocessor",
+     "none"
+    ],
+    "choice_notes": {
+     "Scribble_XDoG_Preprocessor": "rough shape, usually the best video",
+     "CannyEdgePreprocessor": "strong edges, small details",
+     "DepthAnythingV2Preprocessor": "perceived depth, ignores edges",
+     "AnyLineArtPreprocessor_aux": "lineart",
+     "OpenposePreprocessor": "needs a visible person, else no guidance",
+     "none": "luminance / QR mode, keeps dark and bright regions"
+    },
+    "label": "Shape guidance",
+    "description": "With use_controlnet1, the kind of guidance extracted from control_input."
+   },
+   "controlnet_strength1": {
+    "type": "float",
+    "default": 0.45,
+    "minimum": 0.0,
+    "maximum": 1.0,
+    "step": 0.01,
+    "label": "Shape strength",
+    "description": "ControlNet guidance strength: enforces the shape input's shapes while allowing other colors and textures. Subtle 0.35-0.45, strong 0.45-0.65; higher tends to look bad."
+   },
+   "denoise": {
+    "type": "float",
+    "default": 1.0,
+    "minimum": 0.1,
+    "maximum": 1.0,
+    "step": 0.01,
+    "label": "AI strength (denoise)",
+    "description": "1 = a fresh render (shape only via ControlNet). Below 1 = img2img from control_input, so its colors and layout carry over (0.7-0.9 \"AI-skins\" a photo or surface). NEVER < 1 without a control_input: the start is black, so the video comes out near-black. Coarse at low n_steps (at 4 steps, 0.81-0.99 all render the same)."
+   },
+   "control_input_fit_strategy": {
+    "type": "string",
+    "default": "fill / crop",
+    "choices": [
+     "stretch",
+     "fill / crop",
+     "pad"
+    ],
+    "choice_notes": {
+     "stretch": "distorts the shape input",
+     "fill / crop": "cuts off edges",
+     "pad": "can cause artefacts"
+    },
+    "label": "Fit strategy",
+    "description": "How control_input is resized to width x height."
+   },
+   "map_shape_input_to_ip_masks": {
+    "type": "boolean",
+    "default": false,
+    "label": "Map shape onto style regions",
+    "description": "Map the style images onto the flat color clusters of the shape input (only for inputs made of flat, single-color regions). Overrides mapping_mode."
+   },
+   "mapping_mode": {
+    "type": "string",
+    "default": "concentric_circles_outwards",
+    "choices": [
+     "concentric_circles_inwards",
+     "concentric_circles_outwards",
+     "concentric_rectangles_inwards",
+     "concentric_rectangles_outwards",
+     "rotating_segments_clockwise",
+     "rotating_segments_counter_clockwise",
+     "pushing_segments_clockwise",
+     "pushing_segments_counter_clockwise",
+     "vertical_stripes_left",
+     "vertical_stripes_right",
+     "horizontal_stripes_up",
+     "horizontal_stripes_down"
+    ],
+    "choice_notes": {
+     "rotating_segments_clockwise": "avoid unless asked",
+     "rotating_segments_counter_clockwise": "avoid unless asked"
+    },
+    "label": "Style mapping",
+    "description": "The motion pattern that moves the style images through the video. Ignored with map_shape_input_to_ip_masks."
+   },
+   "n_steps": {
+    "type": "integer",
+    "default": 8,
+    "minimum": 4,
+    "maximum": 14,
+    "step": 1,
+    "label": "Steps",
+    "description": "LCM denoising steps. Runtime scales linearly; fewer = faster drafts, more = sometimes slightly better."
+   },
+   "motion_scale": {
+    "type": "float",
+    "default": 1.1,
+    "minimum": 0.7,
+    "maximum": 1.4,
+    "step": 0.01,
+    "label": "Motion",
+    "description": "Motion strength. 0.9 subtle, 1.25 lively; above 1.3 rarely good."
+   },
+   "use_upscale": {
+    "type": "boolean",
+    "default": true,
+    "label": "Latent upscale",
+    "description": "HD latent-upscale second diffusion pass. Off for fast, cheap drafts."
+   },
+   "upscale_resolution": {
+    "type": "integer",
+    "default": 1280,
+    "minimum": 1024,
+    "maximum": 1536,
+    "step": 64,
+    "label": "Upscale size",
+    "description": "Long side of the latent upscale (with use_upscale)."
+   },
+   "upscale_esrgan": {
+    "type": "boolean",
+    "default": true,
+    "label": "ESRGAN",
+    "description": "ESRGAN to 1920 px long side: sharp, realistic, less ideal for organic looks. Runs even with use_upscale=false."
+   },
+   "diffusion_mask": {
+    "anyOf": [
+     {
+      "type": "image"
+     },
+     {
+      "type": "video"
+     }
+    ],
+    "label": "Diffusion mask",
+    "description": "Image/video mask: white = animated, black = keeps the shape input (stays black only when there is no control_input). Edge is grown and blurred. Use for region/island videos."
+   },
+   "seed": {
+    "type": "integer",
+    "default": "random",
+    "minimum": 0,
+    "maximum": 2147483647,
+    "label": "Seed",
+    "description": "Omit for random; the used seed is returned, pass it back to reproduce."
+   },
+   "output_codec": {
+    "type": "string",
+    "default": "h264",
+    "choices": [
+     "h264",
+     "hevc10"
+    ],
+    "choice_notes": {
+     "h264": "plays everywhere",
+     "hevc10": "10-bit HEVC, smaller and higher fidelity, not decodable everywhere"
+    },
+    "label": "Codec",
+    "description": "Codec of the two diffusion outputs (output_video, first_pass_video)."
+   }
+  }
+ }
+}
