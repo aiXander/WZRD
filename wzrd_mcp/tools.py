@@ -569,8 +569,8 @@ async def reproject_video(
 # ---------------------------------------------------------------------------
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
 _TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap", "hap", "recipe")  # never sent to the server
-_TF_USD_PER_S = 1.95 / 3600  # Modal L40S list price
-_TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~6 min warm)
+_TF_USD_PER_S = 3.03 / 3600  # Modal RTX PRO 6000 list price (deploy/textureflow/app.py GPU)
+_TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~3–4 min warm)
 _TF_EST_QUICK_USD = 0.03  # pre-call guess, no upscale passes
 
 
@@ -655,7 +655,7 @@ async def texture_flow(
     look from the library (list_recipes) renders with recipe="<name>".
 
     Omit an argument to get the server default. Defaults render full-HD
-    upscaled (~6 min warm); for tests set use_upscale=false AND
+    upscaled (~3–4 min warm); for tests set use_upscale=false AND
     upscale_esrgan=false (~30 s at 384x384). A cold GPU adds ~1 min
     (textureflow_warm before a show). Media args take a local path or URL.
     The mp4 lands in the media library (dest=); the preview videos
@@ -726,7 +726,7 @@ async def texture_flow(
         response[key] = path
     response.update(seed=res["params"].get("seed"), params=res["params"],
                     request_id=res["request_id"], timings=res["timings"])
-    # Cost = billed container seconds on the L40S, all on the main output.
+    # Cost = billed container seconds on the endpoint's GPU, all on the main output.
     t = res["timings"]
     seconds = (t.get("total_s") or 0) + ((t.get("restore_s") or 0) if t.get("cold_start") else 0)
     main = response.get("output_video")
@@ -746,7 +746,7 @@ async def textureflow_warm(minutes: float = 60, ctx: Optional[Context] = None) -
 
     Calling again moves the deadline; minutes=0 cools down now. The timer runs
     on Modal, so it scales back to zero even if this machine goes offline.
-    An idle warm L40S costs ~$2/hour — cool down when done.
+    An idle warm GPU (RTX PRO 6000) costs ~$3/hour — cool down when done.
 
     Args:
         minutes: How long to stay warm from now (0-720). 0 = scale to zero now.

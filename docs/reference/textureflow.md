@@ -21,7 +21,7 @@ from `wzrd/` or `wzrd_mcp/`. The WZRD MCP's `texture_flow` and
 
 ## Modal objects (workspace `aixander`, environment `wzrd`)
 
-App `wzrd-textureflow`; class `TextureFlow` (L40S, one render per container,
+App `wzrd-textureflow`; class `TextureFlow` (RTX PRO 6000, one render per container,
 `max_containers=3`, scale-to-zero after 300 s, 1 h timeout, GPU memory
 snapshot); `set_warm` + `cool_down` (CPU) and Dict `textureflow-warm` (the warm
 deadline); volumes
@@ -106,7 +106,7 @@ unrelated.
 - **Show-day warmth** (`set_warm(minutes)` → `min_containers=1`; 0 = now back
   to zero): the deadline lives in Dict `textureflow-warm` and a spawned
   `cool_down` function sleeps on Modal until it passes, then resets
-  `min_containers=0` — so a closed laptop can't leave an L40S on (≈ $2/h idle).
+  `min_containers=0` — so a closed laptop can't leave a GPU on (≈ $3/h idle on the RTX PRO 6000).
   Calling again moves the deadline; capped at 12 h; a redeploy also resets it.
 - **`libcairo2-dev pkg-config build-essential` are required**: `pycairo` (via
   controlnet_aux → svglib) has no Linux wheel; without them controlnet_aux's
@@ -237,7 +237,7 @@ the short-lived `deploy/textureflow/tf_pipeline.py` (2026-10-20). Facts about th
   `use_upscale`/`upscale_esrgan` false; the server defaults would make each
   draft a ~5-min full-HD render.
 
-## Performance (L40S)
+## Performance (L40S, measured before the 2026-10-21 move to RTX PRO 6000 — ≈ 1.5–1.7× faster there)
 
 Smoke args (3 style images, 2.5 s, 384², 4 steps, upscale off), client wall for
 one `render.remote()`, measured 2026-10-09 on the deployed app:
@@ -262,5 +262,14 @@ defaults** (640², 6 s, 8 steps, latent upscale 1280 + ESRGAN → 1920²) 290–
 | 512², no upscale | **26 s** | 54 s |
 | 512² → latent 1024 + ESRGAN | **92 s** | 128–137 s |
 
-L40S is 1.4–2× faster and cheaper, so it stays. Never Blackwell (the 2025-era
-nodes don't run there).
+**GPU = RTX PRO 6000 (Blackwell) since 2026-10-21** (Xander: "move the default to what you recommend;
+for gigs we switch manually"). The lab's sweep on a 15 s HD render: **RTX PRO 6000 209 s / $0.18 per render**
+vs L40S 358 s / $0.19, A100-40 331 s / $0.19, H100 252 s / $0.28 — fastest *and* cheapest (details:
+`textureflow-lab/docs/reference/benchmarks.md`). Blackwell needs `BLACKWELL_PATCHES` (applied in
+`install_nodes` right after the clones; the build fails loudly if a pack bump makes it stop applying):
+DepthAnythingV2's DINOv2 calls xformers attention in fp32 and xformers 0.0.35 has no fp32 kernel for
+sm_100/sm_120, so that call falls back to plain attention there (older GPUs unchanged). For a gig on another
+card: `TextureFlow.with_options(gpu="H100")` from a client, or change `GPU` + redeploy.
+Verified after the deploy (2026-10-21): the GPU memory snapshot is taken and restores on RTX PRO 6000
+(restore 0.66 s; a cold smoke call 39 s end to end, render 21.8 s vs 25–32 s on L40S), and the deployed
+output matches the lab's RTX PRO 6000 render exactly (first pass / previews SSIM 1.000).

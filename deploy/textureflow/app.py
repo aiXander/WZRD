@@ -42,7 +42,10 @@ COMFY = "/root/ComfyUI"
 WEIGHTS = "/weights"
 OUTPUTS = "/outputs"
 PORT = 8188
-GPU = "L40S"
+# RTX PRO 6000 (Blackwell, 96 GB): fastest *and* cheapest per render in the lab's 2026-10-21 sweep
+# (15 s HD: 209 s / $0.18 vs L40S 358 s / $0.19). Needs BLACKWELL_PATCHES (applied in install_nodes).
+# Gigs can still pick another card per call: TextureFlow.with_options(gpu="H100").
+GPU = "RTX-PRO-6000"
 BOOT_TIMEOUT_S = 120
 # Node-pack requirements resolve as of the March 2026 Eden deploy, not today.
 EXCLUDE_NEWER = "2026-03-17T23:59:59Z"
@@ -110,7 +113,7 @@ else:  # in a container the image is hydrated by id; the definition is not rebui
 # Image
 # ---------------------------------------------------------------------------
 
-def install_nodes(nodes: dict[str, str], requirements: bool = True) -> None:
+def install_nodes(nodes: dict[str, str], requirements: bool = True, patches: dict | None = None) -> None:
     """git clone + checkout each pinned pack, then (`requirements=True`, the
     unlocked path) its requirements under the torch constraints. Mirrors
     eve/comfyui.py install_custom_node minus retries; like eve, a failing
@@ -133,7 +136,27 @@ def install_nodes(nodes: dict[str, str], requirements: bool = True) -> None:
     helper = Path(COMFY) / "custom_nodes/ControlFlowUtils/helper.py"
     if helper.exists():
         helper.write_text(helper.read_text().replace("DEBUG_MODE = True", "DEBUG_MODE = False"))
+    for rel, (before, after) in (patches or {}).items():
+        f = Path(COMFY) / "custom_nodes" / rel
+        text = f.read_text()
+        if before not in text:
+            raise RuntimeError(f"Blackwell patch no longer applies to {rel} (pack bumped?)")
+        f.write_text(text.replace(before, after))
     print(f"[nodes] requirements that failed to install: {failed or 'none'}", flush=True)
+
+
+# Blackwell (sm_100/sm_120): xformers 0.0.35's only fp32 attention kernel is built for <= sm_90, and
+# DepthAnythingV2's DINOv2 runs in fp32 -> "No operator found for memory_efficient_attention_forward".
+# Fall back to the plain attention there; older GPUs keep xformers (bit-identical). Same patch as
+# textureflow-lab's vendor/ tree (its vendor/VENDOR.md).
+BLACKWELL_PATCHES = {
+    "comfyui_controlnet_aux/src/custom_controlnet_aux/depth_anything_v2/dinov2_layers/attention.py": (
+        "        if not XFORMERS_AVAILABLE:\n            assert attn_bias is None",
+        "        import torch\n\n"
+        "        no_fp32_kernel = x.is_cuda and x.dtype == torch.float32 and torch.cuda.get_device_capability(x.device)[0] >= 10\n"
+        "        if not XFORMERS_AVAILABLE or no_fp32_kernel:\n            assert attn_bias is None",
+    ),
+}
 
 
 # Every Python dep after torch comes from requirements.lock (exact pins, so a
@@ -166,7 +189,8 @@ image = image.run_commands(
     f"git -C {COMFY} checkout -q {SNAPSHOT['comfyui']}",
     *([] if LOCKED else [
         f"uv pip install --system -r {COMFY}/requirements.txt -c /root/constraints.txt --exclude-newer {EXCLUDE_NEWER}"]),
-).run_function(install_nodes, kwargs={"nodes": SNAPSHOT["custom_nodes"], "requirements": not LOCKED})
+).run_function(install_nodes, kwargs={"nodes": SNAPSHOT["custom_nodes"], "requirements": not LOCKED,
+                                      "patches": BLACKWELL_PATCHES})  # kwargs = part of the layer hash
 if not LOCKED:  # Eve's late pins, applied after the nodes (some packs rely on them).
     image = image.run_commands(
         "uv pip install --system -c /root/constraints.txt diffusers==0.31.0 moviepy==1.0.3"
