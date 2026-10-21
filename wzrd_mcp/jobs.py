@@ -12,7 +12,8 @@ process and replies as soon as the call is **submitted** — the tool passed
 its checks (`check_spend`, or an explicit `submitted()`) — or finishes,
 whichever comes first. A tool that starts a remote call registers it with
 `set_remote` so `cancel` can stop the remote side too (Modal
-`FunctionCall.cancel`, FAL `cancel`); Nano Banana has no remote handle, so
+`FunctionCall.cancel`, FAL `cancel`, the local TextureFlow server's
+`/cancel`); Nano Banana has no remote handle, so
 cancelling only drops the request.
 """
 
@@ -296,6 +297,11 @@ async def _cancel_remote(remote: Optional[str]) -> Optional[str]:
         endpoint, _, request_id = rest.rpartition("|")
         await asyncio.to_thread(fal_client.cancel, endpoint, request_id)
         return "fal"
+    if kind == "local":  # texture_flow(backend="local"): the desktop job server
+        from . import textureflow_local
+
+        await textureflow_local.cancel(rest)
+        return "local"
     return None
 
 

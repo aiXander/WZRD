@@ -51,7 +51,7 @@ async def jobs(
 
 @tool(title="Cancel render job", tags={"studio", "jobs"}, open_world=True)
 async def cancel_job(job: str, ctx: Optional[Context] = None) -> dict:
-    """Stop a running render: the remote GPU / API call is cancelled (TextureFlow on Modal, Kling on FAL) and the job reads cancelled, with no output.
+    """Stop a running render: the remote GPU / API call is cancelled (TextureFlow on Modal or the local desktop, Kling on FAL) and the job reads cancelled, with no output.
 
     Nano Banana has no remote cancel: its request is dropped, but Google may
     still bill it. Only cancel what the operator asked to stop, or your own

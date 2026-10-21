@@ -100,6 +100,9 @@ full-frame TextureFlow render can usually be projected as-is: preview it with
   creative), protogen (anime, flat color).
 - `denoise < 1` without a `control_input` renders near-black — always pair them.
 - Keep the returned `seed` to reproduce a render you like.
+- **Backend**: `backend="local"` renders on Xander's desktop GPU ($0, slower,
+  same args/outputs) only when he asks for it and the desktop is on; default
+  is Modal. A local call that fails (desktop off) is never retried on Modal.
 
 ## Before a live session
 

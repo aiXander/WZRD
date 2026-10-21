@@ -271,6 +271,339 @@ def test_mcp():
     _show_setup()
 
 
+def test_textureflow():
+    """texture_flow's backend switch: the default Modal path (Modal mocked) and
+    backend="local" against a fake job server speaking the local wire contract
+    v1 (health, multipart submit, long-poll, result + files, cancel, 400, 401,
+    unreachable, timeout, server-side error), plus textureflow_warm."""
+    import asyncio
+    import json
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    import modal
+    from aiohttp import web
+    from fastmcp import Client
+    from fastmcp.exceptions import ToolError
+    from wzrd_mcp import jobs, library
+    from wzrd_mcp.server import mcp
+
+    _require(TEST_DAY_IMAGE)
+    tmp = Path(tempfile.mkdtemp(prefix="wzrd_tf_"))
+    env_keys = ("WZRD_MEDIA_ROOT", "WZRD_PROJECTS_ROOT", "TEXTUREFLOW_BACKEND", "TEXTUREFLOW_APP",
+                "WZRD_MODAL_ENV", "TEXTUREFLOW_LOCAL_URL", "TEXTUREFLOW_LOCAL_TOKEN")
+    saved_env = {k: os.environ.get(k) for k in env_keys}
+    for k in env_keys[2:]:
+        os.environ.pop(k, None)
+    os.environ["WZRD_MEDIA_ROOT"] = str(tmp / "media")
+    os.environ["WZRD_PROJECTS_ROOT"] = str(tmp / "projects")
+    saved_modal = (modal.Cls.from_name, modal.Function.from_name)
+    mp4 = tmp / "tiny.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=8", "-t", "1",
+                    "-pix_fmt", "yuv420p", str(mp4)], check=True)
+    video = mp4.read_bytes()
+    names = ("output_video", "first_pass_video", "control_signal_preview", "mapping_motion_preview")
+    timings = {"prep_s": 0.1, "queue_s": 0.0, "render_s": 20.0, "total_s": 21.0, "cold_start": False,
+               "boot_s": None, "restore_s": None}
+    base = {"draft": dict(use_upscale=False, upscale_esrgan=False)}
+    style = os.path.abspath(TEST_DAY_IMAGE)
+    rendered = set(names) | {"seed", "params", "request_id", "timings", "clip", "job"}
+
+    # -- Modal, mocked -----------------------------------------------------
+    modal_calls: list = []
+
+    def no_modal(*a, **kw):
+        raise AssertionError(f"Modal was called: {a} {kw}")
+
+    class FakeCall:
+        object_id = "fc-test"
+
+        def __init__(self, args, files):
+            self.args, self.files = args, files
+            self.get, self.cancel = self, self
+
+        async def aio(self):  # get.aio() / cancel.aio()
+            return {"request_id": "req-modal", "params": {"seed": 1111, **self.args},
+                    "info": {"app": "textureflow"}, "timings": timings,
+                    "outputs": {n: {"filename": f"{n}.mp4", "bytes": video, "mime": "video/mp4"}
+                                for n in names}}
+
+    class FakeSpawn:
+        async def aio(self, args, files):
+            modal_calls.append(("render", args, files))
+            return FakeCall(args, files)
+
+    class FakeCls:
+        def __init__(self, *a, **kw):
+            modal_calls.append(("cls", a, kw))
+
+        def __call__(self):
+            self.render = type("R", (), {"spawn": FakeSpawn()})()
+            return self
+
+    class FakeWarm:
+        def __init__(self, *a, **kw):
+            modal_calls.append(("fn", a, kw))
+            self.remote = self
+
+        async def aio(self, minutes):
+            return {"warm": True, "minutes": minutes}
+
+    # -- the fake local job server (wire contract v1) ----------------------
+    TOKEN, GPU = "s3cret", "NVIDIA GeForce RTX 3090"
+    srv = {"jobs": {}, "submits": [], "cancels": [], "requests": 0, "worker": "ready"}
+
+    @web.middleware
+    async def auth(request, handler):
+        srv["requests"] += 1
+        if request.headers.get("Authorization") != f"Bearer {TOKEN}":
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return await handler(request)
+
+    async def health(request):
+        return web.json_response({"ok": True, "gpu": GPU, "busy": False, "queue": 0, "worker": srv["worker"],
+                                  "commit": "abc123", "vram_free_gb": 23.1})
+
+    async def submit(request):
+        args, files = None, {}
+        reader = await request.multipart()
+        async for part in reader:
+            if part.name == "args":
+                assert part.headers.get("Content-Type") == "application/json", part.headers
+                args = json.loads(await part.text())
+            else:
+                assert part.name == "file", part.name
+                files[part.filename] = bytes(await part.read())
+        if args.get("n_steps") == 99:
+            return web.json_response({"error": "n_steps: 99 is outside 4-14"}, status=400)
+        jid = f"lj{len(srv['jobs']) + 1}"
+        script = {666: "hold", 13: "fail"}.get(args.get("seed"), "ok")
+        down = srv["worker"] == "down"  # accepted, but failed at once
+        srv["jobs"][jid] = {"state": "error" if down else "queued", "script": script, "polls": 0,
+                            "args": args, "changed": asyncio.Event(),
+                            "error": "render worker is down" if down else None}
+        srv["submits"].append({"job_id": jid, "args": args, "files": files})
+        return web.json_response({"job_id": jid, "queue_position": 0})
+
+    def status_doc(jid, job):
+        running = job["state"] == "running"
+        return {"job_id": jid, "state": job["state"], "stage": "sampling" if running else None,
+                "step": job["polls"] if running else None, "total": 3 if running else None,
+                "queue_position": 0 if job["state"] in ("queued", "running") else None,
+                "error": (job["error"] or "CUDA out of memory") if job["state"] == "error" else None}
+
+    async def status(request):
+        jid = request.match_info["jid"]
+        job = srv["jobs"].get(jid)
+        if not job:
+            return web.json_response({"error": "unknown job"}, status=404)
+        assert 0 <= float(request.query.get("wait", 0)) <= 60
+        if job["state"] in ("queued", "running"):
+            if job["script"] == "hold" and job["state"] == "running":
+                try:  # long-poll until something changes (cancel), capped short for the test
+                    await asyncio.wait_for(job["changed"].wait(), 1.0)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(0.02)
+                job["polls"] += 1
+                job["state"] = ("running" if job["polls"] < 3 or job["script"] == "hold"
+                                else "error" if job["script"] == "fail" else "done")
+        return web.json_response(status_doc(jid, job))
+
+    async def result(request):
+        jid = request.match_info["jid"]
+        job = srv["jobs"][jid]
+        if job["state"] != "done":
+            return web.json_response({"error": "not done", "state": job["state"]}, status=409)
+        return web.json_response({
+            "request_id": f"req-{jid}", "params": {"seed": 4242, **job["args"]},
+            "info": {"app": "textureflow-local", "gpu": GPU},
+            "timings": {**timings, "queue_s": 1.5, "cold_start": True},
+            "outputs": {n: {"filename": f"{n}.mp4", "mime": "video/mp4",
+                            "url": f"/v1/jobs/{jid}/files/{n}"} for n in names}})
+
+    async def files(request):
+        assert request.match_info["name"] in names
+        return web.Response(body=video, content_type="video/mp4")
+
+    async def cancel(request):
+        jid = request.match_info["jid"]
+        job = srv["jobs"][jid]
+        srv["cancels"].append(jid)
+        if job["state"] == "queued":
+            job["state"] = "cancelled"
+        elif job["state"] == "running":  # answers "running"; cancelled once the worker stops
+            async def stop():
+                await asyncio.sleep(0.1)
+                job["state"] = "cancelled"
+                job["changed"].set()
+            asyncio.get_running_loop().create_task(stop())
+        return web.json_response({"job_id": jid, "state": job["state"]})
+
+    app = web.Application(middlewares=[auth])
+    app.add_routes([web.get("/v1/health", health), web.post("/v1/render", submit),
+                    web.get("/v1/jobs/{jid}", status), web.get("/v1/jobs/{jid}/result", result),
+                    web.get("/v1/jobs/{jid}/files/{name}", files),
+                    web.post("/v1/jobs/{jid}/cancel", cancel)])
+
+    async def call(c, tool, args):
+        r = await c.call_tool(tool, args)
+        return json.loads(r.content[0].text)
+
+    async def refused(c, tool, args, *needles):
+        try:
+            await c.call_tool(tool, args)
+        except ToolError as exc:
+            for n in needles:
+                assert n in str(exc), (n, str(exc))
+            return str(exc)
+        raise AssertionError(f"{tool}({args}) was accepted")
+
+    async def run():
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
+
+        async def silent(reader, writer):  # accepts, never answers: the 2 s health timeout
+            await asyncio.sleep(30)
+        mute = await asyncio.start_server(silent, "127.0.0.1", 0)
+        mute_url = f"http://127.0.0.1:{mute.sockets[0].getsockname()[1]}"
+        try:
+            async with Client(mcp) as c:
+                await call(c, "set_project", {"name": "tf-t"})
+
+                # 1. backend unset → today's Modal call, exactly.
+                modal.Cls.from_name, modal.Function.from_name = FakeCls, FakeWarm
+                res_m = await call(c, "texture_flow", {"images": [style], **base["draft"], "project": "tf-t"})
+                assert modal_calls[0] == ("cls", ("textureflow", "TextureFlow"), {"environment_name": "wzrd"})
+                _, sent_m, files_m = modal_calls[1]
+                assert set(sent_m) == {"images", "use_upscale", "upscale_esrgan"}, sent_m
+                assert rendered | {"spend"} <= set(res_m), set(res_m)
+                rec = library.render(res_m["output_video"])["record"]
+                assert rec["est_usd"] > 0 and rec["args"]["model"] == "textureflow (TextureFlow)", rec
+                assert "backend" not in rec["args"], rec["args"]
+                assert library.query_one("SELECT remote FROM jobs WHERE id=?", (res_m["job"],))["remote"] == "modal|fc-test"
+                assert srv["requests"] == 0
+                warm = await call(c, "textureflow_warm", {"minutes": 5})
+                assert warm == {"warm": True, "minutes": 5} and modal_calls[-1] == (
+                    "fn", ("textureflow", "set_warm"), {"environment_name": "wzrd"}), (warm, modal_calls[-1])
+                assert jobs.estimate("texture_flow", base["draft"]) > 0
+                assert jobs.estimate("texture_flow", {"backend": "local"}) == 0
+
+                # 2. local: never Modal; missing config / bad backend are clear errors.
+                modal.Cls.from_name = modal.Function.from_name = no_modal
+                await refused(c, "texture_flow", {"images": [style], "backend": "local"}, "TEXTUREFLOW_LOCAL_URL")
+                await refused(c, "texture_flow", {"images": [style], "backend": "gpu"}, "'modal'", "'local'")
+                os.environ["TEXTUREFLOW_LOCAL_URL"] = url
+                await refused(c, "texture_flow", {"images": [style], "backend": "local"}, "TEXTUREFLOW_LOCAL_TOKEN")
+                os.environ["TEXTUREFLOW_LOCAL_TOKEN"] = "wrong"
+                await refused(c, "texture_flow", {"images": [style], "backend": "local"}, "401", "TEXTUREFLOW_LOCAL_TOKEN")
+                os.environ["TEXTUREFLOW_LOCAL_TOKEN"] = TOKEN
+
+                # 3. local happy path: same args + files on the wire, same response, $0.
+                res_l = await call(c, "texture_flow", {"images": [style], **base["draft"], "backend": "local",
+                                                       "project": "tf-t"})
+                sub = srv["submits"][-1]
+                assert sub["args"] == sent_m and sub["files"] == files_m, (sub["args"], sent_m)
+                assert set(res_l) == set(res_m) - {"spend"}, set(res_l) ^ set(res_m)
+                assert res_l["seed"] == 4242 and res_l["timings"]["queue_s"] == 1.5
+                assert all(Path(res_l[n]).read_bytes() == video for n in names[1:])  # previews: untagged copies
+                assert Path(res_l["output_video"]).stat().st_size > 0 and Path(res_l["clip"]).is_file()
+                rec = library.render(res_l["output_video"])["record"]
+                assert rec["est_usd"] == 0 and rec["args"]["model"] == f"textureflow-local (TextureFlow, {GPU})", rec
+                assert rec["args"]["backend"] == "local" and rec["args"]["seed"] == 4242
+                row = library.query_one("SELECT remote, est_usd FROM jobs WHERE id=?", (res_l["job"],))
+                assert row["remote"] == f"local|{sub['job_id']}" and row["est_usd"] == 0, dict(row)
+
+                # 4. TEXTUREFLOW_BACKEND=local is the default; backend="modal" still overrides it.
+                os.environ["TEXTUREFLOW_BACKEND"] = "local"
+                n = len(srv["submits"])
+                await call(c, "texture_flow", {"images": [style], **base["draft"]})
+                assert len(srv["submits"]) == n + 1
+                modal.Cls.from_name = FakeCls
+                await call(c, "texture_flow", {"images": [style], **base["draft"], "backend": "modal"})
+                assert len(srv["submits"]) == n + 1 and modal_calls[-1][0] == "render"
+                modal.Cls.from_name = no_modal
+                del os.environ["TEXTUREFLOW_BACKEND"]
+
+                # 5. validation (400) passes the server's text through; nothing queued.
+                n = len(srv["jobs"])
+                msg = await refused(c, "texture_flow", {"images": [style], "n_steps": 99, "backend": "local"})
+                assert msg == "n_steps: 99 is outside 4-14" and len(srv["jobs"]) == n, msg
+                # a render that fails on the desktop
+                await refused(c, "texture_flow", {"images": [style], "seed": 13, "backend": "local"},
+                              "CUDA out of memory")
+
+                # 6. cancel_job stops the desktop render; the job reads cancelled.
+                started = await call(c, "texture_flow", {"images": [style], "seed": 666, "backend": "local",
+                                                         "wait": False})
+                job = started["job"]
+                for _ in range(200):
+                    row = library.query_one("SELECT remote FROM jobs WHERE id=?", (job,))
+                    if row["remote"] and srv["jobs"][row["remote"].split("|")[1]]["state"] == "running":
+                        break
+                    await asyncio.sleep(0.02)
+                jid = row["remote"].split("|")[1]
+                out = await call(c, "cancel_job", {"job": job})
+                assert out["status"] == "cancelled" and out["remote_cancel"] == "local", out
+                for _ in range(50):
+                    if srv["jobs"][jid]["state"] == "cancelled":
+                        break
+                    await asyncio.sleep(0.02)
+                assert srv["cancels"] == [jid] and srv["jobs"][jid]["state"] == "cancelled"
+                assert await jobs._cancel_remote(f"local|{jid}") == "local"  # a lost job's path
+
+                # 7. warm on local: a health check, Modal untouched.
+                warm = await call(c, "textureflow_warm", {"backend": "local", "minutes": 30})
+                assert warm == {"warm": True, "backend": "local", "gpu": GPU, "worker": "ready",
+                                "busy": False, "queue": 0}, warm
+                # worker booting = up (the job queues); down = accepted, failed on the first poll.
+                srv["worker"] = "booting"
+                await call(c, "texture_flow", {"images": [style], **base["draft"], "backend": "local"})
+                srv["worker"] = "down"
+                assert (await call(c, "textureflow_warm", {"backend": "local"}))["warm"] is False
+                await refused(c, "texture_flow", {"images": [style], "backend": "local"}, "render worker is down")
+                srv["worker"] = "ready"
+
+                # 8. desktop off (refused) / not answering (timeout): fast, clear, nothing sent.
+                n = srv["requests"]
+                for dead in (f"http://127.0.0.1:{_free_port()}", mute_url):
+                    os.environ["TEXTUREFLOW_LOCAL_URL"] = dead
+                    for tool, args in (("texture_flow", {"images": [style], "backend": "local"}),
+                                       ("textureflow_warm", {"backend": "local"})):
+                        t0 = time.perf_counter()
+                        await refused(c, tool, args, "unreachable", "desktop on", dead)
+                        assert time.perf_counter() - t0 < 3.0, (dead, time.perf_counter() - t0)
+                assert srv["requests"] == n
+        finally:
+            mute.close()
+            await runner.cleanup()
+
+    try:
+        asyncio.run(run())
+    finally:
+        modal.Cls.from_name, modal.Function.from_name = saved_modal
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _free_port():
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def _show_setup():
     """Show setup (docs/TODO/show-setup.md): assets + `asset:` expansion,
     rectify_surface, prompts, dest="project/<sub>", soft delete — against
@@ -383,6 +716,7 @@ TESTS = {
     "check_frames": test_check_frames,
     "clips": test_clips,
     "mcp": test_mcp,
+    "textureflow": test_textureflow,
 }
 
 

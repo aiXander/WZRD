@@ -21,7 +21,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from . import jobs, library, project, provenance
+from . import jobs, library, project, provenance, textureflow_local
 from ._keepalive import with_keepalive
 from ._log import log_progress
 from .file_io import resolve_input_async
@@ -568,10 +568,13 @@ async def reproject_video(
 # deployed as the rollback). Local files travel as bytes in `files`, URLs pass
 # through, the returned mp4 bytes land in the project's generated/ folder.
 # Only caller-set args are sent: the server owns the defaults (api.yaml) and
-# all validation. Contract: docs/reference/textureflow.md.
+# all validation. `backend="local"` renders the same call on Xander's desktop
+# GPU instead (`textureflow_local.py`, $0); the caller always picks — no
+# auto-routing, no fallback. Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
-_TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap", "hap", "recipe")  # never sent to the server
+_TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap", "hap", "recipe", "backend")  # never sent to the server
+_TF_BACKENDS = ("modal", "local")
 _TF_USD_PER_S = 3.03 / 3600  # Modal RTX PRO 6000 list price (textureflow-lab deploy.py GPU)
 _TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~3–4 min warm)
 _TF_EST_QUICK_USD = 0.03  # pre-call guess, no upscale passes
@@ -608,7 +611,17 @@ def _tf_pack_media(args: dict) -> dict[str, bytes]:
     return files
 
 
+def _tf_backend(backend: Optional[str] = None) -> str:
+    """The backend a call renders on: its `backend=`, else $TEXTUREFLOW_BACKEND, else Modal."""
+    name = (backend or os.getenv("TEXTUREFLOW_BACKEND") or "modal").strip().lower()
+    if name not in _TF_BACKENDS:
+        raise ToolError(f"texture_flow: backend={name!r} — use 'modal' (default) or 'local' (the desktop GPU)")
+    return name
+
+
 def _tf_estimate(args: dict) -> float:
+    if _tf_backend(args.get("backend")) == "local":
+        return 0.0  # our own GPU: free, never held against the spend cap
     quick = args.get("use_upscale") is False and args.get("upscale_esrgan") is False
     return _TF_EST_QUICK_USD if quick else _TF_EST_FULL_USD
 
@@ -648,6 +661,7 @@ async def texture_flow(
     allow_over_cap: bool = False,
     hap: bool = True,
     recipe: Optional[str] = None,
+    backend: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
     """Render an abstract, morphing, seamlessly flowing animation from 1-6 style images (TextureFlow: SD1.5 + AnimateDiff + IP-Adapter + ControlNet, on WZRD's own Modal GPU).
@@ -657,10 +671,12 @@ async def texture_flow(
     never appear verbatim. Load skill `textureflow` for settings. A saved
     look from the library (list_recipes) renders with recipe="<name>".
 
-    Omit an argument to get the server default. Defaults render full-HD
-    upscaled (~3–4 min warm); for tests set use_upscale=false AND
-    upscale_esrgan=false (~30 s at 384x384). A cold GPU adds ~1 min
-    (textureflow_warm before a show). Media args take a local path or URL.
+    Omit an argument to get the server default. On Modal (the default
+    backend) defaults render full-HD upscaled (~3–4 min warm); for tests set
+    use_upscale=false AND upscale_esrgan=false (~30 s at 384x384). A cold
+    Modal GPU adds ~1 min (textureflow_warm before a show). backend="local"
+    renders the same call on Xander's desktop GPU (slower, $0). Media args
+    take a local path or URL.
     The mp4 lands in the media library (dest=); the preview videos
     (first_pass_video, control_signal_preview, mapping_motion_preview) are
     scratch under the library's .wzrd/intermediates/.
@@ -691,11 +707,11 @@ async def texture_flow(
         allow_over_cap: Only after Xander OKs it: run even though it takes the project past its spend cap.
         hap: Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.
         recipe: A style recipe name (list_recipes): its style images and settings become the defaults; every argument you pass wins. Add width/height (the region's aspect), and control_input or diffusion_mask for the target.
+        backend: "modal" (WZRD's Modal GPU, paid, counts toward the spend cap) or "local" (Xander's desktop RTX 3090: $0, same args, outputs and seed handling, renders anything Modal can; the desktop must be on — if it's off the call fails in ~2 s). Omitted = $TEXTUREFLOW_BACKEND, else "modal". Xander picks it; never switch backends on your own or retry a failed call on the other one.
     """
     # First statement on purpose: locals() is exactly the tool's parameters here.
     args = {k: v for k, v in locals().items() if k not in _TF_LOCAL_ARGS and v is not None}
-    import modal
-
+    backend = _tf_backend(backend)
     if recipe:
         from .recipe_tools import apply_recipe
 
@@ -704,16 +720,27 @@ async def texture_flow(
         raise ToolError("texture_flow needs images= (1-6 style images) or recipe=")
     sent = dict(args)  # local paths, before packing — what the record keeps
     region_info = provenance.region_meta(region) if region else {}
-    provenance.check_spend(_tf_estimate(args), allow_over_cap)
+    # Local: the health check (≈ 2 s) runs before the spend check, so a
+    # desktop that is off fails here — even a wait=false caller sees it.
+    local = await textureflow_local.health() if backend == "local" else None
+    provenance.check_spend(_tf_estimate({**args, "backend": backend}), allow_over_cap)
 
     files = await asyncio.to_thread(_tf_pack_media, args)
-    app_name, env = _tf_target()
     mb = sum(len(b) for b in files.values()) / 1e6
-    log_progress("texture_flow", f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
-    tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
-    call = await tf.render.spawn.aio(args=args, files=files)
-    jobs.set_remote(f"modal|{call.object_id}", call.cancel.aio)
-    res = await with_keepalive(call.get.aio(), ctx, "TextureFlow")
+    if local is not None:
+        log_progress("texture_flow", f"Rendering on local {local.get('gpu')} ({len(files)} local file(s), {mb:.1f} MB)...")
+        res = await textureflow_local.render(args, files, ctx)
+        model = f"textureflow-local (TextureFlow, {res.get('info', {}).get('gpu') or local.get('gpu')})"
+    else:
+        import modal
+
+        app_name, env = _tf_target()
+        log_progress("texture_flow", f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
+        tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
+        call = await tf.render.spawn.aio(args=args, files=files)
+        jobs.set_remote(f"modal|{call.object_id}", call.cancel.aio)
+        res = await with_keepalive(call.get.aio(), ctx, "TextureFlow")
+        model = f"{app_name} (TextureFlow)"
 
     # The main video is the library item; the previews are scratch beside the job.
     response: dict = {}
@@ -729,31 +756,40 @@ async def texture_flow(
         response[key] = path
     response.update(seed=res["params"].get("seed"), params=res["params"],
                     request_id=res["request_id"], timings=res["timings"])
-    # Cost = billed container seconds on the endpoint's GPU, all on the main output.
+    # Cost = billed container seconds on the endpoint's GPU, all on the main
+    # output; a local render costs nothing.
     t = res["timings"]
     seconds = (t.get("total_s") or 0) + ((t.get("restore_s") or 0) if t.get("cold_start") else 0)
     main = response.get("output_video")
+    paid = local is None
     response["_provenance"] = {
-        "paid": True,
-        "est_usd": {str(Path(main).resolve()): seconds * _TF_USD_PER_S} if main else {},
-        "args": {**(sent if recipe else {}), "seed": res["params"].get("seed"),
-                 "model": f"{app_name} (TextureFlow)"},
+        "paid": paid,
+        "est_usd": {str(Path(main).resolve()): seconds * _TF_USD_PER_S} if main and paid else {},
+        "args": {**(sent if recipe else {}), "seed": res["params"].get("seed"), "model": model},
         **region_info,
     }
     return await attach_clip(response, "output_video", hap)
 
 
 @tool(title="Keep TextureFlow GPU warm", tags={"generate", "textureflow"}, idempotent=True, open_world=True)
-async def textureflow_warm(minutes: float = 60, ctx: Optional[Context] = None) -> dict:
+async def textureflow_warm(minutes: float = 60, backend: Optional[str] = None,
+                           ctx: Optional[Context] = None) -> dict:
     """Keep one TextureFlow GPU container running so renders skip the cold start (normally +15-20 s; the first after a redeploy take 2-3 min).
 
     Calling again moves the deadline; minutes=0 cools down now. The timer runs
     on Modal, so it scales back to zero even if this machine goes offline.
     An idle warm GPU (RTX PRO 6000) costs ~$3/hour — cool down when done.
+    backend="local" only checks that the desktop GPU is reachable (it is
+    always warm while its service runs; minutes is ignored, Modal untouched).
 
     Args:
         minutes: How long to stay warm from now (0-720). 0 = scale to zero now.
+        backend: "modal" (default: $TEXTUREFLOW_BACKEND, else "modal") or "local" (the desktop; must be on).
     """
+    if _tf_backend(backend) == "local":
+        info = await textureflow_local.health()
+        return {"warm": info.get("worker") != "down", "backend": "local",
+                **{k: info.get(k) for k in ("gpu", "worker", "busy", "queue")}}
     import modal
 
     app_name, env = _tf_target()

@@ -398,7 +398,8 @@ it onto the job), so a parallel batch can't overshoot. Paid tools call
 call; their result carries `spend: "$x of $cap today"` and a warning from
 80 %. Pre-estimates vs recorded cost: Nano Banana tier price × images
 (recorded: token usage), Kling list price × seconds, TextureFlow $0.20 /
-$0.03 without upscales (recorded: billed container seconds × the endpoint GPU's list price, `_TF_USD_PER_S`: $3.03/h RTX PRO 6000).
+$0.03 without upscales (recorded: billed container seconds × the endpoint GPU's list price, `_TF_USD_PER_S`: $3.03/h RTX PRO 6000;
+`backend="local"` — the desktop GPU — is $0 and unpaid, [textureflow.md](textureflow.md)).
 Prices: [hosted-models.md](hosted-models.md). `project.json`'s old
 `spend_cap_usd` is ignored.
 

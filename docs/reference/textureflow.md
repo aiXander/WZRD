@@ -36,9 +36,26 @@ are shared by both apps; the lab's `comfyui_app/app.py::download_models` is the 
   ESRGAN / OpenPose behaviour for calling agents — keep it in sync with the lab's `reference/api.yaml`
   (it lists the `preprocessor1` choices by hand). `recipe=<name>` fills unset args and style images from a
   saved look in `library/recipes/` (merge rules: [mcp-server.md](mcp-server.md) "Style recipes").
+- **Two backends, picked per call — `backend="modal" | "local"`** (default `$TEXTUREFLOW_BACKEND`, unset =
+  `modal`; never sent to the server, like `region`). **No auto-routing and no fallback, ever** (Xander's
+  decision): a failed local call is never retried on Modal. `local` = the job server on Xander's desktop
+  RTX 3090 over Tailscale (`TEXTUREFLOW_LOCAL_URL`, `TEXTUREFLOW_LOCAL_TOKEN`; server + its wire contract v1
+  live in the lab, `docs/TODO/job-server.md` there). Client: `wzrd_mcp/textureflow_local.py` — `GET /v1/health`
+  (2 s; off/silent → ToolError "unreachable — is the desktop on?", before the spend check, nothing sent
+  anywhere) → multipart submit (`args` JSON part + one `file` part per `files` key) → long-poll status
+  (stage → `log_progress` + MCP progress, under `with_keepalive`) → result → download each output `url` into
+  `bytes`, giving **Modal's exact `render` dict**, so the library write / previews / record / HAP code is
+  shared. Same args, outputs, `params.seed`, timings keys (`queue_s` = real local queue wait,
+  `restore_s` null). Local is $0: `_tf_estimate` (and `jobs.ESTIMATORS`, so `/api/estimate`) → 0,
+  `paid: False`, `est_usd {}`, no `spend` line, record `args.model = "textureflow-local (TextureFlow, <gpu>)"`.
+  A 400 passes the server's validation text through verbatim; a worker that is `down` accepts the job and
+  fails it on the first poll; `booting` counts as up. Cancel: `jobs.set_remote("local|<job id>")` →
+  `POST /v1/jobs/<id>/cancel` (also for lost jobs, `jobs._cancel_remote`). Test: `python test.py textureflow`
+  (Modal mocked + a fake aiohttp job server).
 - **`textureflow_warm(minutes)`** — calls the deployed `set_warm`: keeps one GPU container up until a
   deadline that a Modal-side `cool_down` enforces (so a closed laptop can't leave a GPU on, ≈ $3/h idle);
-  0 = cool down now; capped at 12 h.
+  0 = cool down now; capped at 12 h. `backend="local"` only health-checks the desktop (always warm while
+  its service runs): `{"warm": worker != "down", "backend": "local", gpu, worker, busy, queue}`, Modal untouched.
 - The `run-sheet` and `textureflow` skills render drafts with `use_upscale`/`upscale_esrgan` false; the
   server defaults would make each draft a ~5-min full-HD render. **ESRGAN runs whenever `upscale_esrgan`
   is true, even with `use_upscale=false`.**
