@@ -564,8 +564,8 @@ async def reproject_video(
 # TextureFlow — our own Modal app `textureflow` (env `wzrd`), deployed from the
 # textureflow-lab repo (`deploy.py`; CI redeploys it on every push to its main),
 # so renders always run the lab's latest pipeline. `TEXTUREFLOW_APP=wzrd-textureflow`
-# falls back to the frozen ComfyUI-graph app in deploy/textureflow/ (kept deployed
-# as the rollback). Local files travel as bytes in `files`, URLs pass
+# falls back to the frozen ComfyUI-graph app (textureflow-lab `comfyui_app/`, kept
+# deployed as the rollback). Local files travel as bytes in `files`, URLs pass
 # through, the returned mp4 bytes land in the project's generated/ folder.
 # Only caller-set args are sent: the server owns the defaults (api.yaml) and
 # all validation. Contract: docs/reference/textureflow.md.

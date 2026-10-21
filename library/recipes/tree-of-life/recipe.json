@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "tree-of-life",
   "when_to_use": "Example look (the TextureFlow smoke render): lush painterly tree-of-life in red, orange and deep blue, gentle outward concentric motion. Full-frame colour, so it washes a whole wall — best as a fill for one fabric or ceiling region.",
-  "notes": "Seeded from deploy/textureflow's smoke test (Eden's reference args, seed 42, juggernaut, 384x384, no upscale) — not tuned for a venue yet. Draft settings: n_steps 4, upscales off; for a final drop the n_steps/upscale args or pass n_steps=8. The bright sky in the style images becomes lit background: on a dark wall consider darker style images.",
+  "notes": "Seeded from the TextureFlow smoke test (Eden's reference args, seed 42, juggernaut, 384x384, no upscale) — not tuned for a venue yet. Draft settings: n_steps 4, upscales off; for a final drop the n_steps/upscale args or pass n_steps=8. The bright sky in the style images becomes lit background: on a dark wall consider darker style images.",
   "prompt": null,
   "images": [
     "style_1.jpg",
@@ -16,7 +16,7 @@
     "upscale_esrgan": false
   },
   "source": {
-    "clip": "deploy/textureflow/test_results/smoke/output_video.mp4 (gitignored; SMOKE_ARGS in deploy/textureflow/app.py)",
+    "clip": "textureflow-lab comfyui_app/test_results/smoke/output_video.mp4 (gitignored; SMOKE_ARGS in comfyui_app/app.py)",
     "project": null,
     "seed": 42,
     "size": [

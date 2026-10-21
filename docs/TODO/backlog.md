@@ -32,17 +32,3 @@ Promote an item into a real plan if it grows past a few hours.
   "make playable". DXV3 is DXT1/DXT5 under Resolume's own compression;
   ffmpeg's `dxv.c` (~1,200 lines) is the reference to port, and after
   decompression it reuses HAP's BC upload path. Reverses D2 deliberately.
-
-## TextureFlow endpoint (`deploy/textureflow/`)
-
-- **Modernize the pinned stack (optional).** Only if the pinned stack rots or
-  new nodes are wanted. Edit the graph by hand in both JSONs, or in the
-  deployed `ui` web server (needs Modal proxy-auth headers in the browser);
-  re-vendor. Landscape (Oct 2026): ComfyUI core v0.39 with a V3 node API;
-  AnimateDiff-Evolved / Advanced-ControlNet v1.6 need a modern core;
-  **IPAdapter_plus is maintenance-only** (riskiest pack); eden_comfy_pipelines
-  has a "Modernize" commit (2026-09-25). Cheap win any time: swap the five
-  1.45 GB ControlNet `.pth` for `comfyanonymous/ControlNet-v1-1_fp16_safetensors`
-  (update `api.yaml`'s remap + nodes 134/182). Bumping a node pack means
-  refreshing `requirements.lock` — procedure in
-  [reference/textureflow.md](../reference/textureflow.md).
