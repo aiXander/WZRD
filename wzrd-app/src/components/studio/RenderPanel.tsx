@@ -5,12 +5,15 @@
 //
 // - TextureFlow: a recipe (its style images + settings are the defaults;
 //   what's set here wins), or the style tray's images; the target region
-//   sets the aspect (long side 640, step 32) and is recorded as "made for";
-//   length / motion / seed; Draft (4 steps, no upscale, ≈ 30 s) or Final.
-//   Optional shape input (`control_input`, an AssetPicker over the open
-//   show's named assets — `surface_lit` / `surface` first) with "Use as
-//   shape" → ControlNet (`use_controlnet1` + `controlnet_strength1`
-//   0.35–0.65), and a `diffusion_mask`. Sent only when set (show-setup M1).
+//   sets the aspect (long side = the default width, snapped to the width
+//   step) and is recorded as "made for"; length / motion / seed; Draft
+//   (fewest steps, no upscale, ≈ 30 s) or Final. Optional shape input
+//   (`control_input`, an AssetPicker over the open show's named assets —
+//   `surface_lit` / `surface` first) with "Use as shape" → ControlNet
+//   (`use_controlnet1` + `controlnet_strength1`), and a `diffusion_mask`.
+//   Sent only when set (show-setup M1). Every range / default / step comes
+//   from the endpoint's arg spec (`/api/textureflow/spec`); the form stays
+//   a curated subset of it.
 // - Image (Nano Banana): a prompt + the tray as references.
 // - Video (Kling v2.5): a prompt + the focused still as the start frame,
 //   5 or 10 s.
@@ -20,12 +23,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   estimateRender,
+  getTextureflowSpec,
   listRecipes,
   mediaUrl,
   startRender,
   type Estimate,
   type Recipe,
   type RenderTool,
+  type TfParam,
+  type TfSpec,
 } from '../../api/hub';
 import { refreshJobs, useHub } from '../../state/hub';
 import { regionName } from '../../state/scene';
@@ -43,14 +49,27 @@ const TOOL: Record<Kind, RenderTool> = {
   video: 'kling_v25_image_to_video',
 };
 
-/** A region's box → TextureFlow width/height: its aspect, long side 640,
- *  multiples of 32, each side ≥ 320 (the tool's range). */
-function sizeFor(bbox: [number, number, number, number] | null | undefined): { width: number; height: number } | null {
-  if (!bbox) return null;
+// The shape-strength fader's curated sweet spot (the spec's own advice:
+// subtle 0.35–0.45, strong 0.45–0.65), kept inside the spec's range.
+const CN_SWEET = [0.35, 0.65] as const;
+
+/** A numeric spec field (`default`, `minimum`, …) of one TextureFlow arg. */
+const num = (p: TfParam | undefined, key: 'default' | 'minimum' | 'maximum' | 'step'): number =>
+  Number(p?.[key]);
+
+/** A region's box → TextureFlow width/height: its aspect, long side = the
+ *  spec's default width, snapped to its step and range. */
+function sizeFor(
+  bbox: [number, number, number, number] | null | undefined,
+  spec: TfSpec | null,
+): { width: number; height: number } | null {
+  const pw = spec?.parameters.width;
+  if (!bbox || !pw) return null;
   const w = Math.max(1, bbox[2] - bbox[0]);
   const h = Math.max(1, bbox[3] - bbox[1]);
-  const snap = (v: number) => Math.min(1280, Math.max(320, Math.round(v / 32) * 32));
-  return w >= h ? { width: snap(640), height: snap((640 * h) / w) } : { width: snap((640 * w) / h), height: snap(640) };
+  const [lo, hi, step, long] = [num(pw, 'minimum'), num(pw, 'maximum'), num(pw, 'step') || 1, num(pw, 'default')];
+  const snap = (v: number) => Math.min(hi, Math.max(lo, lo + Math.round((v - lo) / step) * step));
+  return w >= h ? { width: snap(long), height: snap((long * h) / w) } : { width: snap((long * w) / h), height: snap(long) };
 }
 
 export function RenderPanel() {
@@ -62,8 +81,10 @@ export function RenderPanel() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [recipe, setRecipe] = useState<string>('');
   const [region, setRegion] = useState<string>('');
-  const [seconds, setSeconds] = useState(6);
-  const [motion, setMotion] = useState(1.1);
+  const [tfSpec, setTfSpec] = useState<TfSpec | null>(null);
+  // null = the spec's default (TextureFlow), until the operator moves the knob.
+  const [secondsSet, setSeconds] = useState<number | null>(null);
+  const [motionSet, setMotion] = useState<number | null>(null);
   const [seed, setSeed] = useState('');
   const [final, setFinal] = useState(false);
   const [prompt, setPrompt] = useState('');
@@ -74,7 +95,7 @@ export function RenderPanel() {
   const [overCap, setOverCap] = useState(false);
   const [controlInput, setControlInput] = useState<string | null>(null);
   const [useShape, setUseShape] = useState(true);
-  const [cnStrength, setCnStrength] = useState(0.45);
+  const [cnStrengthSet, setCnStrength] = useState<number | null>(null);
   const [diffusionMask, setDiffusionMask] = useState<string | null>(null);
   const showDir = useStore((s) => s.project?.dir);
   const show = showDir ? showDir.replace(/\/+$/, '').split('/').pop() ?? null : null;
@@ -84,7 +105,17 @@ export function RenderPanel() {
     listRecipes()
       .then((r) => setRecipes(r.recipes))
       .catch((e) => console.warn('recipes', e));
+    getTextureflowSpec()
+      .then(setTfSpec)
+      .catch((e) => console.warn('textureflow spec', e));
   }, [hubUp]);
+
+  const P = tfSpec?.parameters;
+  const seconds = secondsSet ?? (kind === 'video' ? 5 : num(P?.n_seconds, 'default'));
+  const motion = motionSet ?? num(P?.motion_scale, 'default');
+  const cnLo = Math.max(CN_SWEET[0], num(P?.controlnet_strength1, 'minimum'));
+  const cnHi = Math.min(CN_SWEET[1], num(P?.controlnet_strength1, 'maximum'));
+  const cnStrength = cnStrengthSet ?? num(P?.controlnet_strength1, 'default');
 
   const focused = itemByPath(focus);
   const startFrame = focused?.kind === 'image' ? focused.path : null;
@@ -93,14 +124,14 @@ export function RenderPanel() {
   const args = useMemo((): Record<string, unknown> | null => {
     const common: Record<string, unknown> = region ? { region } : {};
     if (kind === 'flow') {
-      if (!recipe && styles.length === 0) return null;
+      if (!P || (!recipe && styles.length === 0)) return null;
       const a: Record<string, unknown> = { ...common, n_seconds: seconds, motion_scale: motion };
       if (recipe) a.recipe = recipe;
       if (styles.length) a.images = styles.slice(0, 6);
-      const size = sizeFor(regionLayer?.bbox);
+      const size = sizeFor(regionLayer?.bbox, tfSpec);
       if (size) Object.assign(a, size);
       if (seed.trim()) a.seed = Number(seed);
-      if (!final) Object.assign(a, { n_steps: 4, use_upscale: false, upscale_esrgan: false });
+      if (!final) Object.assign(a, { n_steps: num(P.n_steps, 'minimum'), use_upscale: false, upscale_esrgan: false });
       if (controlInput) {
         a.control_input = controlInput;
         if (useShape) Object.assign(a, { use_controlnet1: true, controlnet_strength1: Math.round(cnStrength * 100) / 100 });
@@ -114,7 +145,7 @@ export function RenderPanel() {
     }
     if (!startFrame) return null;
     return { ...common, prompt: prompt.trim(), image_url: startFrame, duration: seconds >= 8 ? '10' : '5' };
-  }, [kind, recipe, styles, region, regionLayer, seconds, motion, seed, final, prompt, startFrame, controlInput, useShape, cnStrength, diffusionMask]);
+  }, [kind, recipe, styles, region, regionLayer, seconds, motion, seed, final, prompt, startFrame, controlInput, useShape, cnStrength, diffusionMask, P, tfSpec]);
 
   // The estimate follows the form (debounced).
   const argsKey = JSON.stringify([kind, args, count]);
@@ -157,6 +188,8 @@ export function RenderPanel() {
     kind === 'flow'
       ? args
         ? null
+        : !P
+        ? 'Loading the TextureFlow spec from the hub…'
         : 'Pick a recipe or drop style images in the tray'
       : !prompt.trim()
       ? 'Write a prompt'
@@ -225,19 +258,19 @@ export function RenderPanel() {
           {kind === 'flow' && regionLayer && (
             <span className="text-[10px] text-fg3">
               {(() => {
-                const s = sizeFor(regionLayer.bbox);
+                const s = sizeFor(regionLayer.bbox, tfSpec);
                 return s ? `${s.width}×${s.height} (the region's aspect)` : '';
               })()}
             </span>
           )}
         </Field>
         {kind !== 'image' && (
-          <Field label={`Length · ${seconds} s`}>
+          <Field label={`Length · ${Number.isFinite(seconds) ? seconds : '…'} s`}>
             <input
               type="range"
-              min={kind === 'video' ? 5 : 2}
-              max={kind === 'video' ? 10 : 24}
-              step={kind === 'video' ? 5 : 1}
+              min={kind === 'video' ? 5 : num(P?.n_seconds, 'minimum')}
+              max={kind === 'video' ? 10 : num(P?.n_seconds, 'maximum')}
+              step={kind === 'video' ? 5 : num(P?.n_seconds, 'step')}
               value={seconds}
               onChange={(e) => setSeconds(Number(e.target.value))}
               className="w-full accent-[rgb(var(--deck))]"
@@ -246,12 +279,12 @@ export function RenderPanel() {
         )}
         {kind === 'flow' && (
           <>
-            <Field label={`Motion · ${motion.toFixed(2)}`}>
+            <Field label={`Motion · ${Number.isFinite(motion) ? motion.toFixed(2) : '…'}`}>
               <input
                 type="range"
-                min={0.7}
-                max={1.4}
-                step={0.05}
+                min={num(P?.motion_scale, 'minimum')}
+                max={num(P?.motion_scale, 'maximum')}
+                step={num(P?.motion_scale, 'step')}
                 value={motion}
                 onChange={(e) => setMotion(Number(e.target.value))}
                 className="w-full accent-[rgb(var(--deck))]"
@@ -277,16 +310,16 @@ export function RenderPanel() {
                       {useShape && (
                         <Fader
                           value={cnStrength}
-                          min={0.35}
-                          max={0.65}
-                          step={0.01}
-                          defaultValue={0.45}
+                          min={cnLo}
+                          max={cnHi}
+                          step={num(P?.controlnet_strength1, 'step')}
+                          defaultValue={num(P?.controlnet_strength1, 'default')}
                           onChange={setCnStrength}
                           label="strength"
                           format={(v) => v.toFixed(2)}
                           size="sm"
                           className="flex-1 min-w-0"
-                          title="Subtle 0.35–0.45, strong 0.45–0.65; higher tends to look bad"
+                          title={P?.controlnet_strength1?.description}
                         />
                       )}
                     </div>

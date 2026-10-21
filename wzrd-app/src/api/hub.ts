@@ -231,6 +231,21 @@ export type Recipe = {
 };
 export const listRecipes = () => hubCall<{ root: string; recipes: Recipe[] }>('GET', '/api/recipes');
 
+/** One TextureFlow arg as the endpoint publishes it (textureflow-lab `tflab/spec.yaml`). */
+export type TfParam = {
+  type?: string;
+  default?: unknown;
+  minimum?: number;
+  maximum?: number;
+  step?: number;
+  choices?: string[];
+  label?: string;
+  description?: string;
+};
+/** The spec `texture_flow` was built from (the hub's cache of the app's `spec()`, else its snapshot). */
+export type TfSpec = { app: string | null; version: string; source: string; parameters: Record<string, TfParam> };
+export const getTextureflowSpec = () => hubCall<TfSpec>('GET', '/api/textureflow/spec');
+
 // ---------- media URLs ----------
 
 /** A URL the page can load an absolute library path from (thumbnail, mp4). */
