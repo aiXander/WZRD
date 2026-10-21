@@ -561,15 +561,18 @@ async def reproject_video(
 
 
 # ---------------------------------------------------------------------------
-# TextureFlow — our own Modal app `wzrd-textureflow` (env `wzrd`, source in
-# deploy/textureflow/). Local files travel as bytes in `files`, URLs pass
+# TextureFlow — our own Modal app `textureflow` (env `wzrd`), deployed from the
+# textureflow-lab repo (`deploy.py`; CI redeploys it on every push to its main),
+# so renders always run the lab's latest pipeline. `TEXTUREFLOW_APP=wzrd-textureflow`
+# falls back to the frozen ComfyUI-graph app in deploy/textureflow/ (kept deployed
+# as the rollback). Local files travel as bytes in `files`, URLs pass
 # through, the returned mp4 bytes land in the project's generated/ folder.
 # Only caller-set args are sent: the server owns the defaults (api.yaml) and
 # all validation. Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
 _TF_LOCAL_ARGS = ("ctx", "region", "allow_over_cap", "hap", "recipe")  # never sent to the server
-_TF_USD_PER_S = 3.03 / 3600  # Modal RTX PRO 6000 list price (deploy/textureflow/app.py GPU)
+_TF_USD_PER_S = 3.03 / 3600  # Modal RTX PRO 6000 list price (textureflow-lab deploy.py GPU)
 _TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~3–4 min warm)
 _TF_EST_QUICK_USD = 0.03  # pre-call guess, no upscale passes
 
@@ -614,7 +617,7 @@ jobs.ESTIMATORS["texture_flow"] = _tf_estimate
 
 
 def _tf_target() -> tuple[str, str]:
-    return os.getenv("TEXTUREFLOW_APP", "wzrd-textureflow"), os.getenv("WZRD_MODAL_ENV", "wzrd")
+    return os.getenv("TEXTUREFLOW_APP", "textureflow"), os.getenv("WZRD_MODAL_ENV", "wzrd")
 
 
 @tool(title="TextureFlow animation", tags={"generate", "textureflow"}, open_world=True,

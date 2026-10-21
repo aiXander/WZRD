@@ -1,5 +1,8 @@
 # TextureFlow on Modal (`wzrd-textureflow`)
 
+> **Not the live endpoint any more (2026-10-21).** WZRD renders on app `textureflow`, deployed from the
+> textureflow-lab repo (`deploy.py`). This app stays deployed as the fallback (`TEXTUREFLOW_APP=wzrd-textureflow`).
+
 Eden-free GPU endpoint for the TextureFlow ComfyUI graph. Workspace `aixander`,
 environment **`wzrd`** — every command passes `--env wzrd` (the profile default
 is `gigabrain`). Full contract + traps: `docs/reference/textureflow.md`.

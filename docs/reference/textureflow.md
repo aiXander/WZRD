@@ -19,6 +19,13 @@ from `wzrd/` or `wzrd_mcp/`. The WZRD MCP's `texture_flow` and
 | `test_inputs/` | Smoke style images, generated matrix inputs (shape/mask/regions pngs + mp4s, uppercase-ext copies), `person.jpg` (public-domain Wikimedia "Pyei Sandy.jpg", the pose case's shape input), and `reference/` = Eden's 2026-03-17 renders (`*_00001` = the smoke args, seed 42). |
 | `test_results/` | **NEVER run the full ::matrix without Xander's explicit permission (57 GPU renders, real money); use ::smoke or a narrow --only subset.** Gitignored. Every smoke/matrix output + `result.json` + `matrix-<stamp>.json`; `matrix --out <dir>` / `smoke --out <dir>` write into a subfolder instead of over the last run. |
 
+> **Live endpoint since 2026-10-21: app `textureflow`, deployed from the textureflow-lab repo**
+> (`~/Documents/GitHub/Gigabrain/VJ/textureflow-lab/deploy.py`, its `docs/reference/deploy.md`). Same
+> `render` / `set_warm` contract, but it runs the lab's plain-Python pipeline over its vendored node tree,
+> and the lab's CI redeploys it on every push to the lab's `main`. Its warm deadline lives in Dict
+> `textureflow-app-warm`. Everything below describes the old app `wzrd-textureflow` (this repo's
+> `deploy/textureflow/`), which stays deployed, idle, as the rollback: `TEXTUREFLOW_APP=wzrd-textureflow`.
+
 ## Modal objects (workspace `aixander`, environment `wzrd`)
 
 App `wzrd-textureflow`; class `TextureFlow` (RTX PRO 6000, one render per container,
@@ -218,7 +225,7 @@ the short-lived `deploy/textureflow/tf_pipeline.py` (2026-10-20). Facts about th
 ## The WZRD client
 
 `wzrd_mcp/tools.py`:
-- **`texture_flow`** — `modal.Cls.from_name($TEXTUREFLOW_APP or "wzrd-textureflow",
+- **`texture_flow`** — `modal.Cls.from_name($TEXTUREFLOW_APP or "textureflow",
   "TextureFlow", environment_name=$WZRD_MODAL_ENV or "wzrd")().render.remote.aio`.
   Every arg defaults to `None` and **only caller-set args are sent**, so api.yaml
   stays the single source of defaults (the old client's own defaults disagreed).
