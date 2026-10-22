@@ -609,7 +609,7 @@ def test_textureflow():
                 tool = next(t for t in await c.list_tools() if t.name == "texture_flow")
                 own = {"region", "allow_over_cap", "hap", "recipe", "backend", "project", "dest", "wait"}
                 assert set(tool.inputSchema["properties"]) == set(snap["parameters"]) | own, tool.inputSchema
-                assert "Range 320-1280, step 32. Default 640." in tool.inputSchema["properties"]["width"]["description"]
+                assert "Range 256-3840, step 2. Default 1920." in tool.inputSchema["properties"]["output_width"]["description"]
                 rdir = tmp / "recipes" / "old-look"
                 rdir.mkdir(parents=True)
                 (rdir / "recipe.json").write_text(json.dumps(

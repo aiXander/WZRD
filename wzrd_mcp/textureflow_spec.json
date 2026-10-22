@@ -1,10 +1,10 @@
 {
  "app": "textureflow",
- "git_sha": null,
+ "git_sha": "6da2cff46ad8fc03007b1e3bfd1a555f1add8125",
  "spec": {
   "name": "TextureFlow",
-  "version": "1.0.0",
-  "summary": "Render an abstract, morphing, seamlessly looping animation from style images (TextureFlow: SD1.5 + AnimateDiff-LCM + IP-Adapter + ControlNet).\n\nFor textures, VJ loops, animated logos, animated QR codes and per-region fills. It cannot tell a story and\ntakes no keyframes: style images drive textures and colors but never appear verbatim. A control_input\n(shape image, GIF or video) can add shape or motion guidance; without one it almost always looks good,\nwith one it needs more tuning. Defaults render full-HD upscaled (~3\u20134 min on a warm GPU); for tests set\nuse_upscale=false AND upscale_esrgan=false (~30 s at 384x384).",
+  "version": "2.3.0",
+  "summary": "Render an abstract, morphing, seamlessly looping animation from style images (TextureFlow: SD1.5 + AnimateDiff-LCM + IP-Adapter + ControlNet).\n\nFor textures, VJ loops, animated logos, animated QR codes and per-region fills. It cannot tell a story and\ntakes no keyframes: style images drive textures and colors but never appear verbatim. A control_input\n(shape image, GIF or video) can add shape or motion guidance; without one it almost always looks good,\nwith one it needs more tuning. Defaults render full-HD upscaled (~3\u20134 min on a warm GPU). With upscaling off the\noutput size itself is generated, so for tests set use_upscale=false AND upscale_esrgan=false AND a small output\nsize (~30 s at 384x384).",
   "parameters": {
    "images": {
     "type": "array",
@@ -27,25 +27,40 @@
     "label": "Length (s)",
     "description": "Video length in seconds. ~3 s per style image."
    },
-   "width": {
+   "output_width": {
     "type": "integer",
-    "default": 640,
-    "minimum": 320,
-    "maximum": 1280,
-    "step": 32,
+    "default": 1920,
+    "minimum": 256,
+    "maximum": 3840,
+    "step": 2,
     "required": true,
-    "label": "Width",
-    "description": "Generation width in pixels. High values are slow and can duplicate content (multiple faces etc.)."
+    "label": "Output width",
+    "description": "Exact width of output_video in pixels, e.g. a projector or surface size; set together with output_height. Every stage renders at the output's shape (any aspect ratio looks as good as 16:9) and the result is stretched to exactly this size. How big the first (generating) pass is: with use_upscale, density sets it; without, it is the output size itself (half per side when upscale_esrgan is on). That pixel count sets content scale: a big output without use_upscale renders many small forms and is slow."
    },
-   "height": {
+   "output_height": {
     "type": "integer",
-    "default": 640,
-    "minimum": 320,
-    "maximum": 1280,
-    "step": 32,
+    "default": 1080,
+    "minimum": 256,
+    "maximum": 3840,
+    "step": 2,
     "required": true,
-    "label": "Height",
-    "description": "Generation height in pixels. High values are slow and can duplicate content."
+    "label": "Output height",
+    "description": "Exact height of output_video in pixels; set together with output_width (see there)."
+   },
+   "density": {
+    "type": "float",
+    "default": 0.33,
+    "minimum": 0.1,
+    "maximum": 1.0,
+    "step": 0.01,
+    "label": "Density",
+    "description": "Only with use_upscale: megapixels of the first (generating) pass, at the output's shape. Sets content scale, not quality: forms are drawn at a fixed pixel size, so more megapixels = more, smaller forms (leaves, faces, repeats). Suggested: 0.15-0.25 for few big bold forms or flat colour-region layouts, 0.3-0.4 balanced (0.33 at 16:9 = 768x432), 0.5-0.6 for intricate detail or a busy line/scribble input. Render time grows about linearly with it."
+   },
+   "prompt": {
+    "type": "string",
+    "default": "",
+    "label": "Text prompt",
+    "description": "Optional text prompt added on top of the style images' guidance. Leave it empty unless you have a specific reason: prompts are hit or miss, can override the style images strongly and can have a big impact on output quality; empty usually looks best. If you use one, keep it short and about material, texture or mood (\"molten glass\", \"bioluminescent\", \"dark background\"), not scenes or people, and compare it against an empty-prompt render with the same seed before keeping it. Plain text only (no (word:1.2) weighting); longer than about 70 words is cut off."
    },
    "base_model": {
     "type": "string",
@@ -159,23 +174,104 @@
      "vertical_stripes_left",
      "vertical_stripes_right",
      "horizontal_stripes_up",
-     "horizontal_stripes_down"
+     "horizontal_stripes_down",
+     "crossfade",
+     "flow_noise"
     ],
     "choice_notes": {
      "rotating_segments_clockwise": "avoid unless asked",
-     "rotating_segments_counter_clockwise": "avoid unless asked"
+     "rotating_segments_counter_clockwise": "avoid unless asked",
+     "crossfade": "no regions; the whole frame fades through the style images in order and back over the loop",
+     "flow_noise": "organic blobs of each style that drift and wander over the loop; spreads every style's texture all over the frame, more chaotic and hit or miss than the band patterns"
     },
     "label": "Style mapping",
-    "description": "The motion pattern that moves the style images through the video. Ignored with map_shape_input_to_ip_masks."
+    "description": "The motion pattern that moves the style images through the video, or crossfade: every style image in turn fills the whole frame, fading into the next and back to the first so the loop stays seamless (how long each style stays pure: style_hold), or flow_noise: drifting organic blobs instead of bands (a different, less predictable look; the render seed shapes the blobs). Ignored with map_shape_input_to_ip_masks."
+   },
+   "ip_adapter_weight_type": {
+    "type": "string",
+    "default": "linear",
+    "choices": [
+     "linear",
+     "ease in",
+     "ease out",
+     "ease in-out",
+     "reverse in-out",
+     "weak input",
+     "weak output",
+     "style transfer",
+     "composition",
+     "strong style transfer"
+    ],
+    "choice_notes": {
+     "linear": "the classic look, every layer equally",
+     "ease in": "strongest in the coarse (early) layers, fading toward fine detail",
+     "ease out": "weak in the coarse layers, strongest on fine detail",
+     "ease in-out": "strongest in the middle layers",
+     "reverse in-out": "strongest in the coarse and the fine layers, weak in between",
+     "weak input": "coarse layers at 20 %",
+     "weak output": "fine-detail layers at 20 %",
+     "style transfer": "colours and textures of the style images, less of their layout",
+     "composition": "only the style images' layout, little of their colours (weak overall)",
+     "strong style transfer": "like style transfer, stronger"
+    },
+    "label": "Style weighting",
+    "description": "How the style images' IP-Adapter influence is spread over the model's layers (IP-Adapter weight_type). Changes how much the style images shape layout vs colour and texture; anything but linear is a different look, so compare it against linear at the same seed before keeping it."
+   },
+   "style_softness": {
+    "type": "float",
+    "default": 0.2,
+    "minimum": 0.0,
+    "maximum": 0.5,
+    "step": 0.05,
+    "label": "Style border softness",
+    "description": "How gradually one style region fades into the next, as a fraction of the frame's shorter side. 0 = hard, cut-out borders between styles; higher = wide, soft bands where neighbouring styles blend. No effect with mapping_mode crossfade (no regions)."
+   },
+   "style_blend": {
+    "type": "string",
+    "default": "tokens",
+    "choices": [
+     "tokens",
+     "attention"
+    ],
+    "choice_notes": {
+     "tokens": "borders read as a smooth transition from one material into the next",
+     "attention": "the classic look; at borders the two styles overlap like a double exposure"
+    },
+    "label": "Style blending",
+    "description": "How neighbouring styles mix where their regions overlap (how wide that overlap is: style_softness), and during a crossfade. Region interiors look the same either way."
+   },
+   "style_paths": {
+    "type": "string",
+    "default": "",
+    "label": "Per-region style paths",
+    "description": "Lets each style region change material over the loop. Regions are separated by commas; '>' chains the style images a region cycles through and back (1-based, in the order of images). '1>2, 3>4, 5' = three regions: the first goes style 1 \u2192 2 \u2192 1, the second 3 \u2192 4 \u2192 3, the third holds style 5. The regions move with mapping_mode (or follow the shape with map_shape_input_to_ip_masks). Empty = the usual one region per style image. Creative and busy: try it after a plain render looks right. Ignored with mapping_mode crossfade."
+   },
+   "style_hold": {
+    "type": "float",
+    "default": 0.5,
+    "minimum": 0.0,
+    "maximum": 0.9,
+    "step": 0.05,
+    "label": "Style hold",
+    "description": "With mapping_mode crossfade or style_paths: how much of each style's turn it stays pure before fading into the next. 0 = always mid-fade (the in-betweens read mostly as the style being left); higher = longer pure stretches and quicker fades. No effect otherwise."
    },
    "n_steps": {
     "type": "integer",
-    "default": 8,
+    "default": 10,
     "minimum": 4,
     "maximum": 14,
     "step": 1,
     "label": "Steps",
     "description": "LCM denoising steps. Runtime scales linearly; fewer = faster drafts, more = sometimes slightly better."
+   },
+   "nag_scale": {
+    "type": "float",
+    "default": 5.0,
+    "minimum": 1.0,
+    "maximum": 10.0,
+    "step": 0.1,
+    "label": "Guidance strength",
+    "description": "How hard every diffusion step pushes toward the style images and away from the negative (a black image + \"no faces / people\" text), via NAG (Normalized Attention Guidance) inside the attention layers. 1 = no guidance: smooth, soft and waxy. About 3 brings back crisp, saturated detail; above about 4 the effect saturates, because NAG caps how far each feature may move. Same render time at any value."
    },
    "motion_scale": {
     "type": "float",
@@ -186,26 +282,35 @@
     "label": "Motion",
     "description": "Motion strength. 0.9 subtle, 1.25 lively; above 1.3 rarely good."
    },
+   "loop_noise": {
+    "type": "float",
+    "default": 0.0,
+    "minimum": 0.0,
+    "maximum": 1.0,
+    "step": 0.05,
+    "label": "Loop noise",
+    "description": "An aesthetic dial, not a quality one: ties the diffusion's starting noise of all frames together into one smooth pattern that drifts once around the loop. 0 = independent noise per frame, the classic lively, morphing look. Higher = a more static video: the content changes less over the loop, so the control_input's shape stays put and shows through more clearly (you can often lower controlnet_strength1 in return); the image also gets denser and busier, with more fine detail and harder contrast. Around 0.5 is the sweet spot; from about 0.75 it turns cluttered and jittery. Changes the composition like a different seed does."
+   },
    "use_upscale": {
     "type": "boolean",
     "default": true,
     "label": "Latent upscale",
-    "description": "HD latent-upscale second diffusion pass. Off for fast, cheap drafts."
+    "description": "HD latent-upscale second diffusion pass; density then sets the first pass. Off, the output size itself is generated (half per side with upscale_esrgan), so pair it with a small output size for fast, cheap drafts."
    },
    "upscale_resolution": {
     "type": "integer",
-    "default": 1280,
+    "default": 1024,
     "minimum": 1024,
     "maximum": 1536,
     "step": 64,
     "label": "Upscale size",
-    "description": "Long side of the latent upscale (with use_upscale)."
+    "description": "Size of the latent upscale pass (with use_upscale): the pixel count of a 16:9 frame this wide, at the output's shape (never fewer pixels than the first pass)."
    },
    "upscale_esrgan": {
     "type": "boolean",
     "default": true,
     "label": "ESRGAN",
-    "description": "ESRGAN to 1920 px long side: sharp, realistic, less ideal for organic looks. Runs even with use_upscale=false."
+    "description": "\u00d72 upscaler net (2x-NomosUni compact) before the final stretch to the output size: crisp detail, cheap. Runs even with use_upscale=false, where it halves the generated size per side."
    },
    "diffusion_mask": {
     "anyOf": [
@@ -227,6 +332,15 @@
     "label": "Seed",
     "description": "Omit for random; the used seed is returned, pass it back to reproduce."
    },
+   "auto_levels": {
+    "type": "float",
+    "default": 1.0,
+    "minimum": 0.0,
+    "maximum": 1.0,
+    "step": 0.05,
+    "label": "Auto levels",
+    "description": "Automatic contrast stretch of the whole loop. 1 = full dynamic range (deep blacks, bright highlights: what additive projection wants, no grey veil on the wall), 0 = the raw render, which tends to look lifted, hazy and washed (a valid look), values in between = partly. Adapts per clip, so a render that already has deep blacks barely changes."
+   },
    "output_codec": {
     "type": "string",
     "default": "h264",
@@ -240,6 +354,27 @@
     },
     "label": "Codec",
     "description": "Codec of the two diffusion outputs (output_video, first_pass_video)."
+   },
+   "rife_multiplier": {
+    "type": "integer",
+    "default": 4,
+    "minimum": 2,
+    "maximum": 6,
+    "step": 1,
+    "label": "Frame interpolation",
+    "description": "RIFE frame interpolation of output_video: its frame rate is 8 fps times this (3 = 24 fps, 4 = 32 fps). Same loop length and motion speed; more in-between frames make it smoother when slowed down live. Each step up adds frames, so a little more render time and a larger file."
+   },
+   "draft": {
+    "type": "boolean",
+    "default": false,
+    "label": "Draft",
+    "description": "Render only the first (generating) pass, at exactly the size the same args would give the final's first pass, and skip the latent upscale pass and ESRGAN: output_video is that first pass, frame-interpolated, at its own small size (not stretched to the output size). Keep every other arg as you want the final, because a draft IS the final's first pass (same seed, same composition), unlike a low-res render. Pick the drafts you like, then finish each one with finish_from. Render time is roughly half of a full render's."
+   },
+   "finish_from": {
+    "type": "string",
+    "default": "",
+    "label": "Finish from",
+    "description": "The request_id of an earlier render (a draft, or a full render to re-finish with other upscale settings): runs only the finish stage (auto levels, latent upscale pass, ESRGAN, frame interpolation, encode) from its saved first pass, without sampling it again. Send no images or other inputs: everything that shapes the first pass comes from that render, and sending one of those args with a different value is an error. Only use_upscale, upscale_resolution, upscale_esrgan, output_width / output_height, density, auto_levels, output_codec and rife_multiplier may be set, and only while the first pass keeps its size (same output aspect ratio, same density, use_upscale as drafted). Drafts are kept 24 hours, on the backend that rendered them (info.draft.expires_at in each response); an expired or unknown id is an error."
    }
   }
  }
