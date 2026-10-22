@@ -348,11 +348,14 @@ record outlives a deleted file.
   during the call, not an input, not under `.wzrd/`. Never written by tool
   bodies; `save_recipe` is exempt (recipe files aren't renders). A tool
   that knows more returns a private `_provenance` dict: `est_usd` keyed per
-  output path, `args` extras, `region`/`source_box`, `parent`, `paid`,
+  output path, `args` extras, `region`/`source_box`, `parent` (a path, or a
+  render id — a TextureFlow finish names its draft's), `paid`,
   `variant_of: {hap path: source path}` — that HAP shares the source's id —
   and `record` (extra top-level record fields: `rectify_surface` stores the
   rectified quad as `corners` + `manual_corners`, so the UI can reload a
-  trial's quad and slider args from its record).
+  trial's quad and slider args from its record; `texture_flow` stores
+  `textureflow` = the server's `request_id`, backend, stage and draft bundle,
+  [textureflow.md](textureflow.md)).
 - **Indexing on open** (`library.list_folder`): unchanged files (same
   size + mtime) are free; new/changed ones are probed on a 4-thread pool
   and show as `pending` until the next listing. Identity order: embedded

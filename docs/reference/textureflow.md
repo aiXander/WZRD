@@ -1,6 +1,6 @@
 # TextureFlow — the WZRD side
 
-TextureFlow (SD1.5 + AnimateDiff-LCM + IP-Adapter + ControlNet, optional latent/ESRGAN upscale, RIFE ×3 →
+TextureFlow (SD1.5 + AnimateDiff-LCM + IP-Adapter + ControlNet, optional latent/ESRGAN upscale, RIFE ×4 →
 a looping video) renders on our own Modal account (workspace `aixander`, environment **`wzrd`**). **All
 endpoint code lives in the separate `textureflow-lab` repo** (`~/Documents/GitHub/Gigabrain/VJ/textureflow-lab`);
 WZRD only calls it by name from the MCP. Nothing in this repo deploys anything to Modal.
@@ -51,7 +51,7 @@ a model `summary` and a semver `version`; the deployed `textureflow` serves it f
   prints what's loaded.
 - **Studio:** `GET /api/textureflow/spec` (= `tf_spec.public()`: the loaded spec + `source`, `app`,
   `target`). `RenderPanel.tsx` reads its knobs' ranges, steps and defaults from it (length, motion, shape
-  strength inside the curated 0.35–0.65 sweet spot, region size snap, draft `n_steps` = the minimum);
+  strength inside the curated 0.35–0.65 sweet spot, region size snap, whether Draft can send `draft`);
   until it loads, TextureFlow can't be started.
 - Test: `python test.py textureflow` §9 + `spec_sources` (schema = spec + WZRD args, recipe arg dropped
   with a warning, cache vs snapshot, refresh, fallback app).
@@ -89,9 +89,34 @@ a model `summary` and a semver `version`; the deployed `textureflow` serves it f
   deadline that a Modal-side `cool_down` enforces (so a closed laptop can't leave a GPU on, ≈ $3/h idle);
   0 = cool down now; capped at 12 h. `backend="local"` only health-checks the desktop (always warm while
   its service runs): `{"warm": worker != "down", "backend": "local", gpu, worker, busy, queue}`, Modal untouched.
-- The `run-sheet` and `textureflow` skills render drafts with `use_upscale`/`upscale_esrgan` false; the
-  server defaults would make each draft a ~5-min full-HD render. **ESRGAN runs whenever `upscale_esrgan`
-  is true, even with `use_upscale=false`.**
+- **Draft → pick → finish** (lab spec 2.2.0: args `draft` + `finish_from`; server side = the lab's
+  `docs/reference/deploy.md` "Draft bundles"). A draft (`draft=true`, the final's args) renders only the
+  final's first pass; every 2.2.0 render (draft or full) leaves a bundle on the backend that rendered it for
+  24 h, and `texture_flow(finish_from=<request_id>)` runs only the upscale / ESRGAN / RIFE steps from it.
+  WZRD's side, all in `_texture_flow`:
+  - **The id is kept.** The mp4 is named `texture_flow_<request_id>.mp4` (the id carries the timestamp), and
+    every record gets `record.textureflow = {request_id, backend, stage (full|draft|finish), draft: {id,
+    expires_at} | null, params (resolved args incl. seed), finished_from?}` (via `_provenance.record`).
+    The reply adds `draft` / `finished_from` / `finish_warnings` when the server sends them. Pre-2.2.0
+    servers send no `info.stage` / `info.draft`: stage `full`, `draft: null`, nothing else changes.
+  - **A finish** takes no `images` / `control_input` / `diffusion_mask` / `recipe` (refused); the source is
+    looked up by `json_extract(record, '$.textureflow.request_id')` (`_tf_source`). It runs on the
+    **source record's backend** (a contradicting `backend=` is refused; no record → the usual default), its
+    record's `parent` = the draft's render id (`provenance` accepts a render id, so it survives a deleted
+    draft mp4), and its record `args` = the draft's args + the finish args, so More like this and the
+    Settings list work. Estimates (`jobs.ESTIMATORS`): draft ≈ $0.10, finish ≈ $0.10 (full − first pass),
+    full $0.20, quick $0.03; a local finish $0.
+  - The tool's docstring gains a draft → finish paragraph (`_TF_FINISH_INTRO`) only when the loaded spec
+    has `finish_from`; before that the args don't exist in the tool at all (they arrive with the spec, on
+    the hub restart after the lab deploys 2.2.0).
+  - Studio: the Render panel's Draft sends `draft: true` (spec ≥ 2.2.0, else the old low-steps/no-upscale
+    draft); a draft's record gets **Upscale · N h** (→ `finish_from`) or, once expired, **re-draft** (same
+    args + seed + `draft`). [operator-ui.md](operator-ui.md) "Render panel".
+  - Test: `python test.py textureflow` §1 (pre-2.2.0 record) and §10 (a 2.2.0 tool: Modal + local draft →
+    finish, routing, refusals, lineage after the draft's mp4 is deleted).
+- Without `draft` (spec < 2.2.0), quick tests are `use_upscale`/`upscale_esrgan` false; the server defaults
+  would make each a full-HD render. **ESRGAN runs whenever `upscale_esrgan` is true, even with
+  `use_upscale=false`.**
 
 ## Show-day traps
 

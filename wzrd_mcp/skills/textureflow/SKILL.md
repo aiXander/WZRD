@@ -154,16 +154,16 @@ remembered.
    upscales on, steps, style settings) plus `draft=true`, `wait=false` each.
    A draft IS the final's first pass (same composition), at about half a
    full render's time; its video comes out at the small first-pass size.
-2. `check_frames` + `view_media` them; pick (or let the operator pick in Studio).
+2. `check_frames` + `view_media` them; pick (or let the operator pick in
+   Studio: a draft's record has an **Upscale** button that finishes it).
 3. Finish each pick: `texture_flow(finish_from=<its request_id>)` — no
    images or other inputs. Only the finish args (upscale settings, output
    size at the same aspect, `auto_levels`, `output_codec`, `rife_multiplier`)
    may be set; anything that shapes the first pass (incl. `density`) must
    stay. A full render can be re-finished the same way.
 4. Drafts expire 24 h after rendering and live only on the backend that
-   rendered them (finish with the same `backend`). Expired → re-render with
-   the same args and seed. If the tool still demands `images` for a finish,
-   WZRD's finish support isn't built yet — tell the operator.
+   rendered them (WZRD sends the finish there, from the draft's render
+   record). Expired → re-render with the same args and seed.
 
 **Without drafts**: quick tests = `use_upscale=false` AND
 `upscale_esrgan=false`, a small output size at the target aspect, low

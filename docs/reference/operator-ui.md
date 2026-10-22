@@ -270,22 +270,29 @@ the hub's own side (routes, `library.db` schema, jobs) is
   (`RenderPanel.tsx`, tab remembered in `localStorage wzrd.studio.side`):
   TextureFlow (recipe from `/api/recipes`; the tray's styles override the
   recipe's), Image (`nano_banana`) and Video (`kling_v25_image_to_video`,
-  5/10 s). "Made for" region → size = the region's aspect, long side 640
-  (step 32) and `region` in the args; TextureFlow's **Shape input**
+  5/10 s). "Made for" region → size = the region's aspect, long side = the
+  spec's default (`output_width`/`output_height` since spec 2.0; `width`/`height`
+  on older specs) and `region` in the args; TextureFlow's **Shape input**
   (`AssetPicker` over the open show's assets, `surface_lit` / `surface`
   first → `control_input`) with "Use as shape (ControlNet)" (→
   `use_controlnet1` + `controlnet_strength1`, fader 0.35–0.65, default
   0.45) and **Mask** (→ `diffusion_mask`), each sent only when set (those
   two rows use a `<div>` group, not `Field`'s `<label>` — a label forwards
-  every click inside it to its first button); Draft = `n_steps 4`, no upscale;
-  count 1–12. `/api/estimate` (debounced) shows ≈ cost vs today's spend;
+  every click inside it to its first button); Draft = the final's settings +
+  `draft: true` when the spec has `draft` (≥ 2.2.0: the final's own first pass,
+  ≈ half the time), else minimum `n_steps`, no upscale; count 1–12. `/api/estimate` (debounced) shows ≈ cost vs today's spend;
   over the cap → confirm → `allow_over_cap`. Go = `POST /api/render`
   (`wait=false` jobs, `by: app`), landing in the open folder — the hub
   pins it at submit. Job tiles carry ✕ = `/api/jobs/cancel`.
   **More like this ×N** (record footer, for texture_flow / nano_banana /
   kling) re-runs the **job's submitted args** (`library_record.job_args`
   — the record's own args carry provenance-only keys like `model` that
-  the tool rejects) minus `seed`. **Make playable** (record footer, or the
+  the tool rejects) minus `seed` (a TextureFlow finish: its record's args,
+  which hold the draft's settings, minus `finish_from`). **Upscale · N h**
+  (`FinishDraft`, on a texture_flow record whose `record.textureflow.stage`
+  is `draft`) → `texture_flow({finish_from: request_id})`; past
+  `draft.expires_at` it becomes **Draft expired · re-draft** (same args +
+  seed + `draft`). Contract: [textureflow.md](textureflow.md). **Make playable** (record footer, or the
   folder's "Make playable (n)" for every video without a HAP sibling)
   queues `to_hap`; the `.mov` lands beside the source. `+ Deck <name>`
   adds to the open show's active deck (see "Clip decks").

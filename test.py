@@ -275,9 +275,11 @@ def test_textureflow():
     """texture_flow's backend switch: the default Modal path (Modal mocked) and
     backend="local" against a fake job server speaking the local wire contract
     v1 (health, multipart submit, long-poll, result + files, cancel, 400, 401,
-    unreachable, timeout, server-side error), plus textureflow_warm, and the
+    unreachable, timeout, server-side error), plus textureflow_warm, the
     spec the tool is generated from (tf_spec: cache vs snapshot, background
-    refresh, recipe args the spec doesn't know)."""
+    refresh, recipe args the spec doesn't know), and draft → finish (spec
+    2.2.0's draft / finish_from: request_id in the record + filename, the
+    finish on the draft's backend, lineage)."""
     import asyncio
     import json
     import subprocess
@@ -290,6 +292,7 @@ def test_textureflow():
     from fastmcp.exceptions import ToolError
     from wzrd_mcp import jobs, library, tf_spec
     from wzrd_mcp.server import mcp
+    from wzrd_mcp import tools  # after the server (import order)
 
     _require(TEST_DAY_IMAGE)
     tmp = Path(tempfile.mkdtemp(prefix="wzrd_tf_"))
@@ -311,6 +314,17 @@ def test_textureflow():
     base = {"draft": dict(use_upscale=False, upscale_esrgan=False)}
     style = os.path.abspath(TEST_DAY_IMAGE)
     rendered = set(names) | {"seed", "params", "request_id", "timings", "clip", "job"}
+    rids = iter(range(1, 1000))
+
+    def tf_info(args: dict, rid: str, **extra) -> dict:
+        """`info` as the server sends it: spec ≥ 2.2.0 servers (args carry draft / finish_from)
+        add the stage + the bundle; older ones send neither (WZRD must cope with both)."""
+        if not ({"draft", "finish_from"} & set(args)):
+            return extra
+        src = args.get("finish_from") or rid
+        info = {**extra, "stage": "finish" if args.get("finish_from") else "draft" if args.get("draft") else "full",
+                "draft": {"id": src, "expires_at": "2099-01-01T00:00:00Z", "bytes": 1}}
+        return {**info, "finished_from": src} if args.get("finish_from") else info
 
     # -- Modal, mocked -----------------------------------------------------
     modal_calls: list = []
@@ -326,8 +340,9 @@ def test_textureflow():
             self.get, self.cancel = self, self
 
         async def aio(self):  # get.aio() / cancel.aio()
-            return {"request_id": "req-modal", "params": {"seed": 1111, **self.args},
-                    "info": {"app": "textureflow"}, "timings": timings,
+            rid = f"tf-modal-{next(rids)}"
+            return {"request_id": rid, "params": {"seed": 1111, **self.args},
+                    "info": tf_info(self.args, rid, app="textureflow"), "timings": timings,
                     "outputs": {n: {"filename": f"{n}.mp4", "bytes": video, "mime": "video/mp4"}
                                 for n in names}}
 
@@ -421,7 +436,7 @@ def test_textureflow():
             return web.json_response({"error": "not done", "state": job["state"]}, status=409)
         return web.json_response({
             "request_id": f"req-{jid}", "params": {"seed": 4242, **job["args"]},
-            "info": {"app": "textureflow-local", "gpu": GPU},
+            "info": tf_info(job["args"], f"req-{jid}", app="textureflow-local", gpu=GPU),
             "timings": {**timings, "queue_s": 1.5, "cold_start": True},
             "outputs": {n: {"filename": f"{n}.mp4", "mime": "video/mp4",
                             "url": f"/v1/jobs/{jid}/files/{n}"} for n in names}})
@@ -489,6 +504,11 @@ def test_textureflow():
                 rec = library.render(res_m["output_video"])["record"]
                 assert rec["est_usd"] > 0 and rec["args"]["model"] == "textureflow (TextureFlow)", rec
                 assert "backend" not in rec["args"], rec["args"]
+                # a pre-2.2.0 server: the id is kept and names the file, no bundle
+                assert rec["textureflow"] == {"request_id": res_m["request_id"], "backend": "modal", "stage": "full",
+                                              "draft": None, "params": res_m["params"]}, rec["textureflow"]
+                assert Path(res_m["output_video"]).name == f"texture_flow_{res_m['request_id']}.mp4"
+                assert "draft" not in res_m
                 assert library.query_one("SELECT remote FROM jobs WHERE id=?", (res_m["job"],))["remote"] == "modal|fc-test"
                 assert srv["requests"] == 0
                 warm = await call(c, "textureflow_warm", {"minutes": 5})
@@ -601,6 +621,55 @@ def test_textureflow():
                 assert "cfg_scale" not in sent_r and sent_r["n_steps"] == 4, sent_r
                 assert "cfg_scale" in res_r["warnings"][0], res_r.get("warnings")
                 modal.Cls.from_name = no_modal
+
+                # 10. draft → pick → finish against a spec-2.2.0 tool (the arg spec gains draft +
+                # finish_from; the tool is re-generated from it, as a hub restart would).
+                spec22 = json.loads(json.dumps(snap))
+                spec22["parameters"]["draft"] = {"type": "boolean", "default": False, "description": "Draft."}
+                spec22["parameters"]["finish_from"] = {"type": "string", "default": "", "description": "Finish."}
+                tf_spec._current = tf_spec.Loaded({"app": "textureflow", "git_sha": "t", "spec": spec22}, "test")
+                tools._tf_tool()
+                tool = next(t for t in await c.list_tools() if t.name == "texture_flow")
+                assert {"draft", "finish_from"} <= set(tool.inputSchema["properties"])
+                assert "or finish_from is set" in tool.inputSchema["properties"]["images"]["description"]
+                modal.Cls.from_name = FakeCls
+                draft = await call(c, "texture_flow", {"images": [style], "draft": True, "project": "tf-t"})
+                assert modal_calls[-1][1] == {"images": [Path(style).name], "draft": True}, modal_calls[-1][1]
+                rid = draft["request_id"]
+                assert draft["draft"] == {"id": rid, "expires_at": "2099-01-01T00:00:00Z"}, draft.get("draft")
+                assert Path(draft["output_video"]).name == f"texture_flow_{rid}.mp4"
+                d_rec = library.render(draft["output_video"])
+                assert d_rec["record"]["textureflow"]["stage"] == "draft" and d_rec["record"]["args"]["draft"] is True
+                assert jobs.estimate("texture_flow", {"images": [style], "draft": True}) == tools._TF_EST_DRAFT_USD
+                assert jobs.estimate("texture_flow", {"finish_from": rid}) == tools._TF_EST_FINISH_USD
+                # the finish: one string, no files; lineage + the draft's settings in its record
+                fin = await call(c, "texture_flow", {"finish_from": rid, "upscale_esrgan": False})
+                assert modal_calls[-1][1:] == ({"finish_from": rid, "upscale_esrgan": False}, {}), modal_calls[-1]
+                f_rec = library.render(fin["output_video"])
+                assert f_rec["parent"] == d_rec["id"], (f_rec["parent"], d_rec["id"])
+                tf = f_rec["record"]["textureflow"]
+                assert tf["stage"] == "finish" and tf["finished_from"] == rid and tf["backend"] == "modal", tf
+                assert f_rec["record"]["args"]["images"] == [style] and "draft" not in f_rec["record"]["args"]
+                assert fin["finished_from"] == rid
+                await refused(c, "texture_flow", {"finish_from": rid, "images": [style]}, "finish_from takes no images")
+                # a local draft finishes on the desktop, whatever the default backend; Modal is never asked
+                modal.Cls.from_name = no_modal
+                os.environ["TEXTUREFLOW_LOCAL_URL"] = url  # §8 left a dead one
+                ldraft = await call(c, "texture_flow", {"images": [style], "draft": True, "backend": "local"})
+                lrid = ldraft["request_id"]
+                assert library.render(ldraft["output_video"])["record"]["textureflow"]["backend"] == "local"
+                assert jobs.estimate("texture_flow", {"finish_from": lrid}) == 0
+                lfin = await call(c, "texture_flow", {"finish_from": lrid})
+                assert srv["submits"][-1]["args"] == {"finish_from": lrid} and srv["submits"][-1]["files"] == {}
+                assert library.render(lfin["output_video"])["parent"] == library.render(ldraft["output_video"])["id"]
+                await refused(c, "texture_flow", {"finish_from": lrid, "backend": "modal"}, "backend='local'")
+                # the draft's mp4 deleted: the finish still links to it by render id
+                Path(draft["output_video"]).unlink()
+                library.index_file(draft["output_video"])
+                modal.Cls.from_name = FakeCls
+                fin2 = await call(c, "texture_flow", {"finish_from": rid})
+                assert library.render(fin2["output_video"])["parent"] == d_rec["id"]
+                modal.Cls.from_name = no_modal
         finally:
             mute.close()
             await runner.cleanup()
@@ -633,10 +702,14 @@ def test_textureflow():
         finally:
             tf_spec._current, tf_spec.fetch = loaded, fetch
 
+    loaded = tf_spec.current()
     try:
         asyncio.run(run())
+        tf_spec._current = loaded
+        tools._tf_tool()  # back to the loaded spec's tool
         spec_sources()
     finally:
+        tf_spec._current = loaded
         modal.Cls.from_name, modal.Function.from_name = saved_modal
         for k, v in saved_env.items():
             if v is None:

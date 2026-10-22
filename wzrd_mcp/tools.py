@@ -572,13 +572,19 @@ async def reproject_video(
 # with WZRD's own args below. Only caller-set args are sent: the server owns
 # the defaults and all validation. `backend="local"` renders the same call on Xander's desktop
 # GPU instead (`textureflow_local.py`, $0); the caller always picks — no
-# auto-routing, no fallback. Contract: docs/reference/textureflow.md.
+# auto-routing, no fallback. Draft → pick → finish (spec 2.2.0): `draft=true`
+# renders only the final's first pass; `finish_from=<request_id>` finishes one
+# from the bundle the server kept (24 h, on the backend that rendered it), so
+# every record keeps `record.textureflow` (request_id, backend, stage, draft).
+# Contract: docs/reference/textureflow.md.
 # ---------------------------------------------------------------------------
 _TF_MEDIA = ("images", "control_input", "diffusion_mask")
 _TF_BACKENDS = ("modal", "local")
 _TF_USD_PER_S = 3.03 / 3600  # Modal RTX PRO 6000 list price (textureflow-lab deploy.py GPU)
 _TF_EST_FULL_USD = 0.20  # pre-call guess, defaults (~3–4 min warm)
 _TF_EST_QUICK_USD = 0.03  # pre-call guess, no upscale passes
+_TF_EST_DRAFT_USD = 0.10  # pre-call guess, draft=true: the final's first pass ≈ half a full render
+_TF_EST_FINISH_USD = 0.10  # pre-call guess, finish_from: the full render minus its first pass
 
 
 def _tf_pack_media(args: dict) -> dict[str, bytes]:
@@ -620,9 +626,40 @@ def _tf_backend(backend: Optional[str] = None) -> str:
     return name
 
 
+def _tf_source(request_id: str) -> Optional[dict]:
+    """The library's render whose server `request_id` is *request_id* (a draft to finish):
+    `{id, path, record}` (`path` = its mp4 if still on disk, else None), or None when no
+    record here has it (rendered from another machine, or before records kept the id)."""
+    row = library.query_one(
+        "SELECT id, record FROM renders WHERE kind='wzrd' AND tool='texture_flow' "
+        "AND json_extract(record, '$.textureflow.request_id')=? ORDER BY created DESC LIMIT 1", (request_id,))
+    if not row:
+        return None
+    f = library.query_one("SELECT path FROM files WHERE render_id=? AND variant='master' AND missing=0 "
+                          "ORDER BY mtime DESC LIMIT 1", (row["id"],))
+    return {"id": row["id"], "path": f["path"] if f else None, "record": library._loads(row["record"], {})}
+
+
+def _tf_finish_backend(request_id: str, source: Optional[dict], backend: Optional[str], strict: bool = True) -> str:
+    """A finish runs where its draft's bundle lives: the source record's backend. An explicit
+    `backend=` that contradicts it is refused (the other backend has no such bundle)."""
+    recorded = ((source or {}).get("record", {}).get("textureflow") or {}).get("backend")
+    if strict and recorded and backend and _tf_backend(backend) != recorded:
+        raise ToolError(f"texture_flow: draft {request_id} was rendered on backend={recorded!r} and its "
+                        f"bundle only lives there — drop backend= or pass {recorded!r}")
+    return _tf_backend(recorded or backend)
+
+
 def _tf_estimate(args: dict) -> float:
-    if _tf_backend(args.get("backend")) == "local":
+    finish = args.get("finish_from")
+    backend = (_tf_finish_backend(finish, _tf_source(finish), args.get("backend"), strict=False) if finish
+               else _tf_backend(args.get("backend")))
+    if backend == "local":
         return 0.0  # our own GPU: free, never held against the spend cap
+    if finish:
+        return _TF_EST_FINISH_USD
+    if args.get("draft"):
+        return _TF_EST_DRAFT_USD
     quick = args.get("use_upscale") is False and args.get("upscale_esrgan") is False
     return _TF_EST_QUICK_USD if quick else _TF_EST_FULL_USD
 
@@ -651,10 +688,17 @@ _TF_OWN_DOCS = {
     "region": 'Optional pack layer id this render is for (e.g. "fabric_left"). Recorded in the render\'s record with that layer\'s box (resolved against this call\'s project).',
     "allow_over_cap": "Only after Xander OKs it: run even though it takes the project past its spend cap.",
     "hap": "Also write the engine-playable HAP clip beside the mp4 (`clip` in the result; same render id) — default true.",
-    "recipe": "A style recipe name (list_recipes): its style images and settings become the defaults; every argument you pass wins. Add width/height (the region's aspect), and control_input or diffusion_mask for the target.",
+    "recipe": "A style recipe name (list_recipes): its style images and settings become the defaults; every argument you pass wins. Add output_width/output_height (the region's aspect; density for the content scale), and control_input or diffusion_mask for the target.",
     "backend": '"modal" (WZRD\'s Modal GPU, paid, counts toward the spend cap) or "local" (Xander\'s desktop RTX 3090: $0, same args, outputs and seed handling, renders anything Modal can; the desktop must be on — if it\'s off the call fails in ~2 s). Omitted = $TEXTUREFLOW_BACKEND, else "modal". Xander picks it; never switch backends on your own or retry a failed call on the other one.',
 }
 _TF_NOTES = {"images": "Required unless a recipe supplies them."}
+# Added to the description when the endpoint's spec has `finish_from` (spec ≥ 2.2.0).
+_TF_FINISH_INTRO = """\
+Draft → pick → finish: render candidates with draft=true at the final's
+settings, then finish_from="<request_id>" (from the draft's reply or its
+render record) with nothing else but finish settings: no images or recipe;
+it runs on the backend that rendered the draft, recorded as its child."""
+_TF_FINISH_NOTES = {"images": "Required unless a recipe supplies them or finish_from is set."}
 
 
 async def _texture_flow(
@@ -669,14 +713,26 @@ async def _texture_flow(
     """The body of `texture_flow`; its signature + docstring are generated (`_tf_tool`)."""
     args = {k: v for k, v in spec_args.items() if v is not None}
     images = args.get("images")
-    backend = _tf_backend(backend)
+    finish = args.get("finish_from") or None
+    if not finish:
+        args.pop("finish_from", None)  # "" = unset
     warnings: list[str] = []
-    if recipe:
-        from .recipe_tools import apply_recipe
+    source = None  # the draft being finished, when this library has its record
+    if finish:
+        given = [k for k in _TF_MEDIA if k in args] + (["recipe"] if recipe else [])
+        if given:
+            raise ToolError(f"texture_flow: finish_from takes no {', '.join(given)} — the draft's own inputs "
+                            "and settings are reused; only finish settings (upscale, output size, codec, …) may be set")
+        source = _tf_source(finish)
+        backend = _tf_finish_backend(finish, source, backend)
+    else:
+        backend = _tf_backend(backend)
+        if recipe:
+            from .recipe_tools import apply_recipe
 
-        args = apply_recipe(recipe, args, warnings)
-    elif not images:
-        raise ToolError("texture_flow needs images= (style images) or recipe=")
+            args = apply_recipe(recipe, args, warnings)
+        elif not images:
+            raise ToolError("texture_flow needs images= (style images) or recipe=")
     sent = dict(args)  # local paths, before packing — what the record keeps
     region_info = provenance.region_meta(region) if region else {}
     # Local: the health check (≈ 2 s) runs before the spend check, so a
@@ -702,31 +758,53 @@ async def _texture_flow(
         model = f"{app_name} (TextureFlow)"
 
     # The main video is the library item; the previews are scratch beside the job.
+    # The file is named after the server's request_id (it carries the timestamp), so a
+    # file on disk alone leads back to its draft bundle.
     response: dict = {}
+    request_id = res.get("request_id")
     scratch = library.intermediates_dir() / (jobs.current_job.get() or f"texture_flow_{project.stamp()}")
     for key, out in res["outputs"].items():
         ext = Path(out["filename"]).suffix or ".mp4"
         if key == "output_video":
-            path = library.output_path("texture_flow", ext)
+            path = library.output_path("texture_flow", ext, name=f"texture_flow_{request_id}" if request_id else "")
         else:
             scratch.mkdir(parents=True, exist_ok=True)
             path = str(scratch / f"{key}{ext}")
         await asyncio.to_thread(Path(path).write_bytes, out["bytes"])
         response[key] = path
+    info = res.get("info") or {}
     response.update(seed=res["params"].get("seed"), params=res["params"],
-                    request_id=res["request_id"], timings=res["timings"])
+                    request_id=request_id, timings=res["timings"])
+    # Spec ≥ 2.2.0: the bundle a later finish_from=<request_id> finishes (servers before it send none).
+    stage = info.get("stage") or ("finish" if finish else "draft" if args.get("draft") else "full")
+    bundle = {k: info["draft"].get(k) for k in ("id", "expires_at")} if isinstance(info.get("draft"), dict) else None
+    if bundle:
+        response["draft"] = bundle
+    for k in ("finished_from", "finish_warnings"):
+        if info.get(k):
+            response[k] = info[k]
     # Cost = billed container seconds on the endpoint's GPU, all on the main
     # output; a local render costs nothing.
     t = res["timings"]
     seconds = (t.get("total_s") or 0) + ((t.get("restore_s") or 0) if t.get("cold_start") else 0)
     main = response.get("output_video")
     paid = local is None
+    rec_args = dict(sent) if recipe else {}
+    if source:  # a finish records the draft's settings too (More like this, the Settings list)
+        drop = {"draft", "seed", "model", "finish_from"}
+        rec_args = {**{k: v for k, v in (source["record"].get("args") or {}).items() if k not in drop}, **sent}
     response["_provenance"] = {
         "paid": paid,
         "est_usd": {str(Path(main).resolve()): seconds * _TF_USD_PER_S} if main and paid else {},
-        "args": {**(sent if recipe else {}), "seed": res["params"].get("seed"), "model": model},
+        "args": {**rec_args, "seed": res["params"].get("seed"), "model": model},
+        "record": {"textureflow": {
+            "request_id": request_id, "backend": backend, "stage": stage, "draft": bundle,
+            "params": res["params"], **({"finished_from": finish} if finish else {}),
+        }},
         **region_info,
     }
+    if source:  # lineage: draft → final (the draft's render id, even if its mp4 is gone)
+        response["_provenance"]["parent"] = source["id"]
     if warnings:
         response["warnings"] = warnings
     return await attach_clip(response, "output_video", hap)
@@ -746,8 +824,11 @@ def _tf_tool():
 
     texture_flow.__signature__ = inspect.Signature(params, return_annotation=dict)
     texture_flow.__annotations__ = {**{p.name: p.annotation for p in params}, "return": dict}
-    lines = tf_spec.args_doc(spec, _TF_NOTES, skip) + [f"{k}: {v}" for k, v in _TF_OWN_DOCS.items()]
-    texture_flow.__doc__ = (spec["summary"].strip() + "\n\n" + _TF_INTRO + "\n\nArgs:\n"
+    finish = "finish_from" in spec["parameters"]
+    notes = {**_TF_NOTES, **(_TF_FINISH_NOTES if finish else {})}
+    intro = _TF_INTRO + ("\n\n" + _TF_FINISH_INTRO if finish else "")
+    lines = tf_spec.args_doc(spec, notes, skip) + [f"{k}: {v}" for k, v in _TF_OWN_DOCS.items()]
+    texture_flow.__doc__ = (spec["summary"].strip() + "\n\n" + intro + "\n\nArgs:\n"
                             + "\n".join(f"    {line}" for line in lines))
     return tool(title="TextureFlow animation", tags={"generate", "textureflow"}, open_world=True,
                 project_arg=True, render=True)(texture_flow)

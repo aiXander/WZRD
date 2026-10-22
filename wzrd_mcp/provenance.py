@@ -13,7 +13,7 @@ that knows more returns a private `_provenance` dict, popped before the result
 reaches the agent:
 
     {"est_usd": {path: usd}, "args": {...}, "region": id, "source_box": [...],
-     "parent": path | {output path: path}, "variant_of": {hap path: source path},
+     "parent": path | render id | {output path: path}, "variant_of": {hap path: source path},
      "paid": bool, "record": {extra top-level record fields}}
 
 `record` adds tool-specific fields to every master record of the call
@@ -124,6 +124,15 @@ def _render_id_of(path: str) -> Optional[str]:
         return None
 
 
+def _parent_id(parent: Optional[str]) -> Optional[str]:
+    """A parent given as a render id (`r_…`, e.g. a finished draft whose mp4 may be gone) or a file path."""
+    if not parent:
+        return None
+    if parent.startswith("r_") and library.query_one("SELECT 1 FROM renders WHERE id=?", (parent,)):
+        return parent
+    return _render_id_of(parent) if Path(parent).is_file() else None
+
+
 def record_outputs(tool: str, client_args: dict, result: dict, since: float,
                    prov: Optional[dict] = None, job: Optional[str] = None) -> list[dict]:
     """Tag + record every output of one tool call. Returns `[{path, id}]`."""
@@ -174,7 +183,7 @@ def record_outputs(tool: str, client_args: dict, result: dict, since: float,
                 **(prov.get("record") or {}),
                 "schema": RECORD_SCHEMA, "id": identity.new_id(), "variant": "master", "tool": tool,
                 "args": args, "inputs": input_refs,
-                "parent": _render_id_of(parent) if parent and Path(parent).is_file() else None,
+                "parent": _parent_id(parent),
                 "created": created, "est_usd": round(float(est.get(out, 0.0)), 4),
                 "duration_s": duration, "job": job, "project": project.active_project(),
                 "canvas": list(canvas) if canvas else None,

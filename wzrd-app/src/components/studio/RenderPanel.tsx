@@ -5,9 +5,12 @@
 //
 // - TextureFlow: a recipe (its style images + settings are the defaults;
 //   what's set here wins), or the style tray's images; the target region
-//   sets the aspect (long side = the default width, snapped to the width
-//   step) and is recorded as "made for"; length / motion / seed; Draft
-//   (fewest steps, no upscale, ≈ 30 s) or Final. Optional shape input
+//   sets the aspect (long side = the default output width, snapped to its
+//   step; pre-2.0 specs: `width`) and is recorded as "made for"; length /
+//   motion / seed; Draft or Final. With a spec that has `draft` (≥ 2.2.0) a
+//   Draft is the Final's own first pass (same settings + `draft: true`),
+//   finished later from its record (Upscale, RecordPanel); older specs: the
+//   fewest steps with the upscales off. Optional shape input
 //   (`control_input`, an AssetPicker over the open show's named assets —
 //   `surface_lit` / `surface` first) with "Use as shape" → ControlNet
 //   (`use_controlnet1` + `controlnet_strength1`), and a `diffusion_mask`.
@@ -57,19 +60,23 @@ const CN_SWEET = [0.35, 0.65] as const;
 const num = (p: TfParam | undefined, key: 'default' | 'minimum' | 'maximum' | 'step'): number =>
   Number(p?.[key]);
 
-/** A region's box → TextureFlow width/height: its aspect, long side = the
- *  spec's default width, snapped to its step and range. */
+/** A region's box → the TextureFlow output size: its aspect, long side = the
+ *  spec's default width, snapped to its step and range. Spec ≥ 2.0.0 sizes
+ *  the output (`output_width` / `output_height`); older ones `width` / `height`. */
 function sizeFor(
   bbox: [number, number, number, number] | null | undefined,
   spec: TfSpec | null,
-): { width: number; height: number } | null {
-  const pw = spec?.parameters.width;
+): Record<string, number> | null {
+  const out = !!spec?.parameters.output_width;
+  const [kw, kh] = out ? ['output_width', 'output_height'] : ['width', 'height'];
+  const pw = spec?.parameters[kw];
   if (!bbox || !pw) return null;
   const w = Math.max(1, bbox[2] - bbox[0]);
   const h = Math.max(1, bbox[3] - bbox[1]);
   const [lo, hi, step, long] = [num(pw, 'minimum'), num(pw, 'maximum'), num(pw, 'step') || 1, num(pw, 'default')];
   const snap = (v: number) => Math.min(hi, Math.max(lo, lo + Math.round((v - lo) / step) * step));
-  return w >= h ? { width: snap(long), height: snap((long * h) / w) } : { width: snap((long * w) / h), height: snap(long) };
+  const [sw, sh] = w >= h ? [snap(long), snap((long * h) / w)] : [snap((long * w) / h), snap(long)];
+  return { [kw]: sw, [kh]: sh };
 }
 
 export function RenderPanel() {
@@ -131,7 +138,8 @@ export function RenderPanel() {
       const size = sizeFor(regionLayer?.bbox, tfSpec);
       if (size) Object.assign(a, size);
       if (seed.trim()) a.seed = Number(seed);
-      if (!final) Object.assign(a, { n_steps: num(P.n_steps, 'minimum'), use_upscale: false, upscale_esrgan: false });
+      // A real draft (spec ≥ 2.2.0) is the final's first pass: same settings + draft.
+      if (!final) Object.assign(a, P.draft ? { draft: true } : { n_steps: num(P.n_steps, 'minimum'), use_upscale: false, upscale_esrgan: false });
       if (controlInput) {
         a.control_input = controlInput;
         if (useShape) Object.assign(a, { use_controlnet1: true, controlnet_strength1: Math.round(cnStrength * 100) / 100 });
@@ -259,7 +267,7 @@ export function RenderPanel() {
             <span className="text-[10px] text-fg3">
               {(() => {
                 const s = sizeFor(regionLayer.bbox, tfSpec);
-                return s ? `${s.width}×${s.height} (the region's aspect)` : '';
+                return s ? `${Object.values(s).join('×')} (the region's aspect)` : '';
               })()}
             </span>
           )}
@@ -349,13 +357,26 @@ export function RenderPanel() {
                 <Seg<'draft' | 'final'>
                   value={final ? 'final' : 'draft'}
                   onChange={(v) => setFinal(v === 'final')}
-                  options={[
-                    { id: 'draft', label: 'Draft ≈30 s' },
-                    { id: 'final', label: 'Final ≈6 min' },
-                  ]}
+                  options={
+                    P?.draft
+                      ? [
+                          { id: 'draft', label: 'Draft · ½' },
+                          { id: 'final', label: 'Final' },
+                        ]
+                      : [
+                          { id: 'draft', label: 'Draft ≈30 s' },
+                          { id: 'final', label: 'Final ≈6 min' },
+                        ]
+                  }
                 />
               </Field>
             </div>
+            {P?.draft && !final && (
+              <span className="text-[10px] text-fg3 leading-snug">
+                Each draft is its final's first pass (same seed and composition) at about half the time. Pick one, then Upscale it from
+                its record; drafts are kept 24 h.
+              </span>
+            )}
           </>
         )}
         <Field label={`How many · ${count}`}>

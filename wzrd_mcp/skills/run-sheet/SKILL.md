@@ -88,17 +88,23 @@ Load skill `textureflow` (settings, and the style recipe library).
    scored well (and badly) with them before. Agree with the operator which
    recipes go on which regions — one recipe set across regions reads as one
    show; a contrasting recipe marks a region out.
-2. **Drafts first**, one per region × recipe:
-   `texture_flow(recipe=<name>, region=<id>, project=<show>, width=…,
-   height=…, use_upscale=false, upscale_esrgan=false, wait=false)` with
-   width/height at the region's `aspect_ratio` (from step 3), snapped to
-   multiples of 32, short side ≥ 384. ≤ 6 jobs in flight; poll `jobs()`.
+2. **Drafts first**, one per region × recipe (a few seeds each):
+   `texture_flow(recipe=<name>, region=<id>, project=<show>,
+   output_width=…, output_height=…, draft=true, wait=false)` with the
+   output size = the region box's own pixel size (from step 3) and every
+   other arg as the final should have it — a draft is the final's first
+   pass. If the tool has no `draft` arg yet (production not on it), use
+   `use_upscale=false, upscale_esrgan=false` instead. Modal renders 3 at a
+   time (more queue); ≤ 6 jobs in flight; poll `jobs()`.
 3. `check_frames(<clip mp4>)` on every result, and `view_media`. A `flash`
    fail never goes on the wall — drop it. `haze` warns: re-render darker, or
    plan a `lumaKey` effect on that region.
 4. Show the operator a contact sheet per region; finals for what they pick
-   (drop the two upscale args; vary `seed`, `mapping_mode`, `motion_scale`
-   for variety within a recipe). Aim for 3–5 passing clips per region.
+   = **finishes, not re-renders**: `texture_flow(finish_from=<the draft's
+   request_id>, wait=false)`, nothing else (or the operator clicks Upscale
+   on the draft in Studio). Drafts live 24 h. Without `draft`, finals are
+   re-renders without the two upscale args. Variety comes from more drafts
+   (`seed`, `mapping_mode`, `motion_scale`). Aim for 3–5 passing clips per region.
 5. A new look the operator loves → `save_recipe(name, from_clip=<clip>,
    when_to_use=<mood, motion, which surfaces it reads on>)`, on their word.
 

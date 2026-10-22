@@ -5,6 +5,12 @@
 //
 // The record comes from library.db via the shell's read-only reader, so it
 // shows while the hub is down; label edits need the hub.
+//
+// A TextureFlow draft (`record.textureflow.stage === 'draft'`, spec ≥ 2.2.0)
+// gets Upscale: `texture_flow(finish_from=<request_id>)`, which finishes it
+// from the bundle the server keeps 24 h (on the backend that rendered it —
+// the hub reads that from the record). Expired → Re-draft: the same args and
+// seed re-render it exactly.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { libraryRecord, startRender, type LibraryItem, type RenderRecord, type RenderTool } from '../../api/hub';
@@ -117,6 +123,7 @@ export function RecordPanel({ onPrompt }: { onPrompt: (k: PromptKind) => void })
           + Styles
         </Btn>
         {item.kind === 'video' && <AddToDeck />}
+        {rec?.tool === 'texture_flow' && rec.record.textureflow?.stage === 'draft' && <FinishDraft rec={rec} />}
         {rec && MORE_TOOLS.has(rec.tool ?? '') && <MoreLikeThis rec={rec} />}
         {item.kind === 'video' && !item.playable && !hasHap && <MakePlayable item={item} />}
       </footer>
@@ -201,8 +208,11 @@ function MoreLikeThis({ rec }: { rec: RenderRecord }) {
   const run = async () => {
     // The job's own args when there is one; else the record's minus its
     // provenance-only keys. A fresh seed either way.
-    const src = (rec.job_args ?? rec.record.args ?? {}) as Record<string, unknown>;
-    const { seed: _seed, model: _model, ...args } = src;
+    // A TextureFlow finish's job args are only `finish_from`: its record holds
+    // the draft's settings, which a new full render needs.
+    const finish = rec.record.textureflow?.stage === 'finish';
+    const src = ((finish ? rec.record.args : rec.job_args ?? rec.record.args) ?? {}) as Record<string, unknown>;
+    const { seed: _seed, model: _model, finish_from: _finish, ...args } = src;
     if (rec.tool === 'nano_banana') delete args.num_images;
     setBusy(true);
     try {
@@ -224,6 +234,45 @@ function MoreLikeThis({ rec }: { rec: RenderRecord }) {
         ▾
       </button>
     </span>
+  );
+}
+
+/** Hours left before a draft bundle expires (negative = expired), from its UTC `expires_at`. */
+function hoursLeft(expiresAt: string | undefined): number {
+  const t = expiresAt ? Date.parse(expiresAt) : NaN;
+  return Number.isFinite(t) ? (t - Date.now()) / 3.6e6 : -1;
+}
+
+/** Draft → pick → finish: finish this draft (the final's first pass) from
+ *  the server's bundle, or re-render it exactly once the bundle expired. */
+function FinishDraft({ rec }: { rec: RenderRecord }) {
+  const [busy, setBusy] = useState(false);
+  const tf = rec.record.textureflow as { request_id?: string; draft?: { expires_at?: string } | null };
+  const left = hoursLeft(tf.draft?.expires_at);
+  const live = !!tf.request_id && left > 0;
+  const run = async () => {
+    // Expired: the same args + seed as a new draft (the same first pass), finished afterwards.
+    const { model: _model, ...again } = (rec.job_args ?? rec.record.args ?? {}) as Record<string, unknown>;
+    const args = live ? { finish_from: tf.request_id } : { ...again, seed: rec.record.args?.seed, draft: true };
+    setBusy(true);
+    try {
+      await startRender('texture_flow', args);
+      useStore.getState().toast(live ? 'Upscaling the draft' : 'Re-rendering the expired draft', 'ok');
+      refreshJobs();
+    } catch (e) {
+      useStore.getState().toast(`${live ? 'Upscale' : 'Re-draft'} refused: ${e}`, 'bad');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return live ? (
+    <Btn size="sm" tone="deck" disabled={busy} onClick={run} title="Finish this draft: the upscale passes only, from its saved first pass (same seed and composition)">
+      Upscale · {left >= 1 ? `${Math.floor(left)} h` : `${Math.max(1, Math.round(left * 60))} min`}
+    </Btn>
+  ) : (
+    <Btn size="sm" disabled={busy} onClick={run} title="This draft expired on the server (kept 24 h): re-render it exactly (same settings and seed), then Upscale the new one">
+      Draft expired · re-draft
+    </Btn>
   );
 }
 
