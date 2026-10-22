@@ -63,7 +63,9 @@ loose images whenever a recipe fits.
 | Texture that hugs the surface's shapes | `control_input` = the dark surface (non-reflective areas black), `use_controlnet1=true`, `preprocessor1="Scribble_XDoG_Preprocessor"`, `controlnet_strength1` (subtle vs strong: the tool's arg docs). For a steadier texture with the shape showing through more, add some `loop_noise` (Settings) |
 | "AI-skin" the surface itself | `control_input` = surface, `denoise` 0.7-0.9 (keeps its layout and darkness, restyles it) |
 | Fill one region's shape, black elsewhere in its box | `diffusion_mask` = its `region_crop_mask`, `output_width`/`output_height` = its box, **no** `control_input` (with one, its pixels show through the black mask area) |
-| Whole frame morphs A → B → A | `mapping_mode="crossfade"`, 2+ images: no regions, each style fills the frame in turn and the loop fades back to the first |
+| Whole frame morphs A → B → A | `mapping_mode="crossfade"`, 2+ images: no regions, each style fills the frame in turn and the loop fades back to the first. `style_hold` = how long each stays pure before fading |
+| Each region changes material over the loop | `style_paths` (e.g. `"1>2, 3>4, 5"`: three regions; the first cycles style 1 → 2 → 1, the second 3 → 4 → 3, the third holds 5), with a band `mapping_mode` or `map_shape_input_to_ip_masks`. A creative extra, not a default: add it once a plain render of the same images looks right |
+| Styles scattered as drifting blobs | `mapping_mode="flow_noise"`: organic blobs of every style wander over the whole frame instead of bands. A very different, hit-or-miss look: render a few seeds, offer it as a variation |
 | Animated logo | logo as `control_input`, `use_controlnet1=true`, Canny or Scribble |
 | Motion-driven | a simple motion clip/GIF as `control_input` |
 | Animated QR code | QR as `control_input`, `preprocessor1="none"` (luminance mode) |
@@ -123,6 +125,20 @@ remembered.
   Xander's pick — keep the default unless the look wants hard edges.
   `style_blend`: `tokens` = borders read as a faded transition from one
   material into the next; `attention` = the classic double-exposure overlap.
+- **Beyond one style per region** — only if the tool has these args (spec
+  ≥ 2.3.0; production may not yet):
+  - `mapping_mode="flow_noise"` spreads every style's texture all over the
+    frame as drifting blobs. Xander: cool, but hit or miss — a variation to
+    offer, never the first try or a recipe default. The seed shapes the blobs,
+    so try several.
+  - `style_paths` gives each region a sequence of styles instead of one (see
+    Setups). Very creative, but busy: a second-round option once the plain
+    look is approved, never a default. It needs at least as many `images` as
+    the highest style number; `crossfade` ignores it.
+  - `style_hold` only matters with `crossfade` or `style_paths`: how long each
+    style stays pure before fading into the next. Keep the default (Xander
+    rated it over always-fading 0 and an abrupt 0.8); lower = more
+    in-between blends, higher = longer pure stretches and quicker fades.
 - **`ip_adapter_weight_type`**: how the style images' pull splits between
   layout and colour/texture (`style transfer` = their colours and textures,
   less layout; `composition` = only their layout). `linear` is the classic

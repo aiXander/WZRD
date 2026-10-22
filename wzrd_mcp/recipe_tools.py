@@ -129,6 +129,8 @@ def _look(args: dict) -> str:
     bits = [model]
     if "mapping_mode" in args:
         bits.append(args["mapping_mode"])
+    if args.get("style_paths"):
+        bits.append(f"style paths {args['style_paths']}")
     if "motion_scale" in args:
         bits.append(f"motion {args['motion_scale']}")
     if args.get("use_controlnet1"):

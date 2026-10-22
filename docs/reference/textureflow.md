@@ -49,6 +49,10 @@ a model `summary` and a semver `version`; the deployed `textureflow` serves it f
 - **Snapshot upkeep:** after a lab spec change ships, `uv run python -m wzrd_mcp.tf_spec --snapshot`
   (from the deployed app) or `--snapshot <lab>/tflab/spec.yaml`, and commit it. `python -m wzrd_mcp.tf_spec`
   prints what's loaded.
+- **A new arg or choice needs no WZRD code** — only the craft skill (`wzrd_mcp/skills/textureflow/SKILL.md`)
+  and, if it changes a look a lot, the one-line recipe summary (`recipe_tools._look`). Example, lab spec
+  2.3.0: `mapping_mode` choice `flow_noise`, args `style_paths` (per-region style sequences) + `style_hold`;
+  the tool gains them on the first hub start after the lab deploys it.
 - **Studio:** `GET /api/textureflow/spec` (= `tf_spec.public()`: the loaded spec + `source`, `app`,
   `target`). `RenderPanel.tsx` reads its knobs' ranges, steps and defaults from it (length, motion, shape
   strength inside the curated 0.35–0.65 sweet spot, region size snap, whether Draft can send `draft`);
