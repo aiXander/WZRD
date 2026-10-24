@@ -1,7 +1,7 @@
 // The monitor. Measures the largest pack-aspect rect that fits its slot and
 // shows the native preview there (lossless, full-rate blit of the engine
 // composite, `<NativeSlot>` with Perform's default params: the deck-toggle
-// leg). With the underlay, HTML can draw over it; with `WZRD_PREVIEW=window`
+// leg, plus the caller's surface shine-through `surface`, 0 = none). With the underlay, HTML can draw over it; with `WZRD_PREVIEW=window`
 // the child window covers the rect, so nothing can.
 //
 // In a plain browser (dev bridge) the slot shows the JPEG `preview` channel
@@ -14,7 +14,7 @@ import { useAspectFit } from '../ui/useAspectFit';
 import { usePreviewJpegDemand } from '../ui/usePreviewJpegDemand';
 import { NativeSlot } from './NativeSlot';
 
-export function NativePreview({ className = '' }: { className?: string }) {
+export function NativePreview({ className = '', surface }: { className?: string; surface?: number }) {
   const [outer, setOuter] = useState<HTMLDivElement | null>(null);
   const pack = useStore((s) => s.pack);
   // The largest aspect-correct rect inside the slot, either dimension.
@@ -25,6 +25,7 @@ export function NativePreview({ className = '' }: { className?: string }) {
     <div ref={setOuter} className={'relative w-full h-full min-h-0 flex items-center justify-center ' + className}>
       <NativeSlot
         native={native}
+        params={surface ? { surface } : undefined}
         className="relative flex items-center justify-center"
         style={{ width: box.w, height: box.h }}
       >

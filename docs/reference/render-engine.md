@@ -107,8 +107,12 @@ agents.
   caps the drawable at composite resolution (the layer's resize gravity
   scales it). Rooms differ only in `PreviewParams` (`core.rs`): Perform =
   the deck-toggle leg, each with its own leg's brightness/saturation masters (DESIGN was un-mastered until 2026-10-25, so Master/Sat looked dead while authoring);
-  Prepare = design + the pack's surface photo (`photo_weight` /
-  `light_weight`, additive in linear light); Align = `program: true`, the
+  Prepare = design + the pack's surface photo; any view may set
+  `surface` (0..1), which replaces the legacy additive `photo_weight` /
+  `light_weight` with `projected_on_surface` in `final_pass.wgsl` — a first
+  approximation meant to be refined: albedo ≈ photo ÷ its mean linear luma
+  (`Gpu::photo_mean`, computed at upload), light × mix(1, albedo, amount) +
+  photo × 0.25·amount (the wall under room light); Align = `program: true`, the
   exact projector final pass incl. the real §2.8 warp (LUT indexed by
   **uv**, `fs_preview`) and test pattern, `dim` 0.55. Same device,
   full-rate, zero readback. Ordering upholds §3.1: on show the view is

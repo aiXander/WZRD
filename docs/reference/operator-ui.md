@@ -37,7 +37,7 @@ Every scalar now uses the effect descriptor's `min`/`max` (`LayerParams.tsx
 | Room | What it's for | Key files |
 |---|---|---|
 | **Studio** | Make, browse and label content (studio plan A2): library roots + folder tree, a folder grid of static thumbs, the preview monitor + the focused item's record and labels, the style tray. Full map: "Studio + the hub" below. | `Studio.tsx`, `components/studio/*`, `state/studio.ts` |
-| **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (photo / light / both, "Show regions" switch), inspector (target, effect cards, dials; Duplicate / Delete / deselect × in its header), bottom drawer = **clip decks** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `LayerList.tsx` (layer + region lists), `LayerInspector.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
+| **Prepare** | Build looks on DESIGN: layer list + region list, the surface map (a **surface** shine-through slider, "Show regions" switch), inspector (target, effect cards, dials; Duplicate / Delete / deselect × in its header), bottom drawer = **clip decks** or code (Monaco, lazy). Entering it switches hands to DESIGN. Two-click layer creation: pick a region → "+ New"/"Light it up". | `Prepare.tsx`, `LayerList.tsx` (layer + region lists), `LayerInspector.tsx`, `SurfaceMap.tsx`, `ClipGrid.tsx`, `LayerParams.tsx mode="author"`, `MonacoPanel.tsx` |
 | **Align** | §2.8 warp; side panel with the "projector bumped?" recovery hint, test patterns, background (lit-background warning). | `Align.tsx`, `WarpCanvas.tsx`, `state/alignment.ts` |
 | **Perform** | The booth: monitor (native preview, deck-coloured frame, PREVIEW/PROGRAM label), a slim looks strip + auto-pilot under it, one mixer panel with a Layers \| Clips tab (`MixerPanel`, tab in localStorage `wzrd.perform.mixerTab`; only the visible tab mounts, so the clip poll runs only on Clips), selected layer's dials, deck panel (switch, cue monitor, TAKE/CUT/PULL, FADE, BAR/NOW), masters + BLACK/FLASH/FREEZE + room audio. | `Perform.tsx`, `DeckPanel.tsx`, `LayerStack.tsx`, `ClipGrid.tsx compact`, `LayerParams.tsx`, `LooksBank.tsx`, `MastersPanel.tsx` |
 | **Debug** | Engine internals (unchanged content, restyled), plus the plain "Performance (frame profiler)" readout of the `perf` / `perf_spike` channels — headroom, stage p95 table, threads, clips, last spike ([render-engine.md](render-engine.md) §2.9). | `Debug.tsx` |
@@ -562,9 +562,13 @@ them too), freely clickable once a show is picked; footer Back / Next.
   (mask overlays, the warp grid, dropdowns, modals) composites on top.
   Three users, differing only in `PreviewParams`: Perform's monitor
   (`NativePreview.tsx` — the deck-toggle leg), Prepare's `SurfaceMap`
-  (design + surface photo per the PHOTO/LIGHT/BOTH toggle, BOTH's photo
-  weight 0.15 linear ≈ the old 0.42 sRGB alpha; the canvas only draws
-  region overlays, cleared transparent) and Align's `WarpCanvas` (the
+  (design on the surface photo; the canvas only draws region overlays,
+  cleared transparent). Prepare and Perform's monitor each carry a
+  **surface** slider (`ui/SurfaceSlider.tsx`; three values — Prepare,
+  Perform DESIGN, Perform LIVE — in `localStorage wzrd.surface.<view>`,
+  defaults 0.5 / 0 / 0) → `PreviewParams.surface`, the engine's physical
+  shine-through model (`render-engine.md` §1b); it replaced Prepare's
+  PHOTO / LIGHT / BOTH tabs (2026-10-25) and Align's `WarpCanvas` (the
   program view — the projector's exact output incl. local corrections,
   dimmed 0.55, over the projector rect). The mode is resolved once at boot
   (`api/previewMode.ts`): `underlay`, `window` (`WZRD_PREVIEW=window`, the

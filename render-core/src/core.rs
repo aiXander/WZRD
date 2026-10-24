@@ -128,6 +128,12 @@ pub struct PreviewParams {
     pub photo_weight: f32,
     /// The composite itself; 0 = photo only.
     pub light_weight: f32,
+    /// Surface shine-through, 0..1: when set, replaces `photo_weight` /
+    /// `light_weight` with the physical approximation in `final_pass.wgsl`
+    /// (`projected_on_surface`): 0 = pure light on a black wall, 1 = the
+    /// light reflected off the photographed wall plus the wall under room
+    /// light. Each UI view keeps its own value.
+    pub surface: Option<f32>,
     /// Studio file preview (studio plan P1): show the file opened with
     /// `preview.file` instead of any leg — the shell's `"studio"` slot sets
     /// it. Every other field is ignored, and neither leg renders for it.
@@ -143,6 +149,7 @@ impl Default for PreviewParams {
             dim: 1.0,
             photo_weight: 0.0,
             light_weight: 1.0,
+            surface: None,
             file: false,
         }
     }
@@ -2245,7 +2252,8 @@ impl Core {
         let (input, uniforms) = self.preview_uniforms();
         let Some(gpu) = self.gpu.as_ref() else { return };
         let p = self.preview_params;
-        let extra = PreviewExtraUniforms::new(p.dim, p.photo_weight, p.light_weight);
+        let extra = PreviewExtraUniforms::new(p.dim, p.photo_weight, p.light_weight)
+            .with_surface(p.surface, gpu.photo_mean());
         // Upload only on change (masters, mix, params move rarely).
         let write = !self.last_preview_uniforms.is_some_and(|(i, u, x)| {
             i == input

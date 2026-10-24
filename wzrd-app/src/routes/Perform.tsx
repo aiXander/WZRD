@@ -19,10 +19,13 @@ import { LooksBank } from '../components/LooksBank';
 import { ClipGrid } from '../components/ClipGrid';
 import { useStore } from '../state/store';
 import { Panel, Seg } from '../ui/primitives';
+import { SurfaceSlider, useSurfaceAmount } from '../ui/SurfaceSlider';
 import { Pane, Split } from '../ui/layoutSplit';
 
 export function Perform() {
   const leg = useStore((s) => s.deck?.preview_source ?? 'design');
+  // DESIGN and LIVE each keep their own surface shine-through.
+  const [surface, setSurface] = useSurfaceAmount(leg);
   const pack = useStore((s) => s.pack);
   return (
     <Split id="perform.cols" dir="row" className="h-full p-2">
@@ -48,11 +51,12 @@ export function Perform() {
                   {leg === 'live' ? 'What the wall shows — your hands are live' : 'Design draft — the crowd can’t see this'}
                 </span>
                 <div className="flex-1" />
+                <SurfaceSlider view={leg} value={surface} onChange={setSurface} className="w-32 shrink-0" />
                 {pack && <span className="num text-[10px] text-fg3">{pack.width}×{pack.height}</span>}
                 <FpsLabel />
               </div>
               <div className="flex-1 min-h-0 p-2">
-                <NativePreview />
+                <NativePreview surface={surface} />
               </div>
             </section>
           </Pane>

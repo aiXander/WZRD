@@ -332,18 +332,33 @@ pub enum PreviewInput {
     Program,
 }
 
-/// `fs_preview`'s group-1 uniform: (dim, photo_weight, light_weight, _).
+/// `fs_preview`'s group-1 uniform: `weights` = (dim, photo_weight,
+/// light_weight, _); `surface` = (amount 0..1, the photo's mean linear
+/// luminance, enabled, _) — the physical shine-through model
+/// (`projected_on_surface` in `final_pass.wgsl`), which replaces the two
+/// weights when enabled.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct PreviewExtraUniforms {
     pub weights: [f32; 4],
+    pub surface: [f32; 4],
 }
 
 impl PreviewExtraUniforms {
     pub fn new(dim: f32, photo_weight: f32, light_weight: f32) -> Self {
         Self {
             weights: [dim, photo_weight, light_weight, 0.0],
+            surface: [0.0; 4],
         }
+    }
+
+    /// Switch to the physical model at `amount` (0 = pure light), with the
+    /// photo's mean luminance as its albedo reference.
+    pub fn with_surface(mut self, amount: Option<f32>, photo_mean: f32) -> Self {
+        if let Some(a) = amount {
+            self.surface = [a.clamp(0.0, 1.0), photo_mean.max(1e-3), 1.0, 0.0];
+        }
+        self
     }
 }
 
@@ -636,6 +651,9 @@ pub struct GpuContext {
     /// 1×1 black until `set_surface_photo`.
     photo_texture: wgpu::Texture,
     photo_view: wgpu::TextureView,
+    /// The photo's mean linear luminance (the shine-through model's albedo
+    /// reference); 0.18 until a photo is set.
+    photo_mean: f32,
 
     /// LIVE-leg composite — what the projector pass warps to the swapchain.
     pub composite_texture: wgpu::Texture,
@@ -909,6 +927,7 @@ impl GpuContext {
             preview: None,
             photo_texture,
             photo_view,
+            photo_mean: 0.18,
             composite_texture,
             composite_view,
             composite_sampler,
@@ -986,6 +1005,7 @@ impl GpuContext {
         let (texture, view) = create_photo_texture(&self.device, &self.queue, width, height, rgba);
         self.photo_texture = texture;
         self.photo_view = view;
+        self.photo_mean = mean_linear_luma(rgba);
         if let Some(pv) = self.preview.as_mut() {
             pv.extra_bind_group = create_preview_extra_bind_group(
                 &self.device,
@@ -994,6 +1014,11 @@ impl GpuContext {
                 &pv.extra_buffer,
             );
         }
+    }
+
+    /// The surface photo's mean linear luminance (see `photo_mean`).
+    pub fn photo_mean(&self) -> f32 {
+        self.photo_mean
     }
 
     pub fn warp_size(&self) -> (u32, u32) {
@@ -2622,7 +2647,12 @@ mod tests {
         // 1×1 dummy LUT (`render_preview` also clears the flag for them).
         assert_eq!(FinalPassUniforms::identity().adjust[3], 0.0);
         assert_eq!(FinalPassUniforms::new(0.5, 1.0, 0.0).adjust[3], 0.0);
-        assert_eq!(std::mem::size_of::<PreviewExtraUniforms>(), 16);
+        assert_eq!(std::mem::size_of::<PreviewExtraUniforms>(), 32);
+        // The legacy weights stay in charge until a surface amount is set.
+        assert_eq!(PreviewExtraUniforms::new(1.0, 0.0, 1.0).with_surface(None, 0.2).surface[2], 0.0);
+        assert_eq!(PreviewExtraUniforms::new(1.0, 0.0, 1.0).with_surface(Some(2.0), 0.2).surface[0], 1.0);
+        // sRGB mid-grey (128) is ~0.216 linear.
+        assert!((mean_linear_luma(&[128, 128, 128, 255]) - 0.216).abs() < 0.01);
     }
 }
 
@@ -3115,6 +3145,24 @@ fn create_preview_extra_bind_group(
 
 /// The surface photo as `Rgba8UnormSrgb` (sampling linearizes it).
 /// `rgba` is tightly packed, `width × height × 4` bytes.
+/// Mean linear-light luminance of tightly packed sRGB RGBA8 pixels, sampled
+/// on a sparse grid (a photo is megapixels; the mean needs a few thousand).
+fn mean_linear_luma(rgba: &[u8]) -> f32 {
+    let lin = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let px = rgba.len() / 4;
+    let step = (px / 4096).max(1);
+    let (mut sum, mut n) = (0.0f64, 0u32);
+    for i in (0..px).step_by(step) {
+        let p = &rgba[i * 4..i * 4 + 3];
+        sum += (0.2126 * lin(p[0]) + 0.7152 * lin(p[1]) + 0.0722 * lin(p[2])) as f64;
+        n += 1;
+    }
+    if n == 0 { 0.18 } else { (sum / n as f64) as f32 }
+}
+
 fn create_photo_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

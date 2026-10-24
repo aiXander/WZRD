@@ -382,6 +382,9 @@ export type PreviewParams = {
   photo_weight?: number;
   /** The composite itself, 0 = photo only. */
   light_weight?: number;
+  /** Surface shine-through 0..1 (replaces the two weights when set): the
+   *  engine's physical approximation of the light on the photographed wall. */
+  surface?: number;
 };
 /**
  * Place the native (lossless, full-rate) preview over a measured layout slot

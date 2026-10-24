@@ -166,7 +166,30 @@ fn shade(uv: vec2<f32>) -> vec4<f32> {
 struct PreviewExtra {
     // (dim, photo_weight, light_weight, _)
     weights: vec4<f32>,
+    // (amount 0..1, the photo's mean linear luminance, enabled, _): when
+    // enabled, `projected_on_surface` replaces the two weights.
+    surface: vec4<f32>,
 };
+
+// Surface shine-through — a first physical approximation of what an
+// audience sees: projector light reflected off a real wall, plus the wall
+// itself under room light. All linear light. Meant to be refined.
+//
+//   albedo  ≈ photo / mean(photo): the photo stands in for the wall's
+//             reflectance, normalised so an average patch reflects the light
+//             1:1 (projection gain folded in); dark cracks and windows swallow
+//             light, pale stone throws it back, a tinted wall tints it.
+//   ambient = the wall under room light, scaled to read like a dim room.
+//   amount  blends from the ideal black screen (0: pure light, as authored)
+//             to the full model (1).
+const SURFACE_ALBEDO_MAX: f32 = 2.5; // brightest patch vs the average
+const SURFACE_AMBIENT: f32 = 0.25;   // room light on the wall at amount 1
+fn projected_on_surface(light: vec3<f32>, photo: vec3<f32>, amount: f32, photo_mean: f32) -> vec3<f32> {
+    let albedo = clamp(photo / photo_mean, vec3<f32>(0.0), vec3<f32>(SURFACE_ALBEDO_MAX));
+    let reflected = light * mix(vec3<f32>(1.0), albedo, amount);
+    let room = photo * (SURFACE_AMBIENT * amount);
+    return reflected + room;
+}
 
 // The pack's surface photo (`pack.json` `surface`), Rgba8UnormSrgb so the
 // sample is already linear; a 1×1 black texture when the pack has none.
@@ -196,5 +219,9 @@ fn fs_preview(in: VsOut) -> @location(0) vec4<f32> {
         inside,
     );
     let w = preview.weights;
+    if (preview.surface.z > 0.5) {
+        let rgb = projected_on_surface(light.rgb, photo, preview.surface.x, preview.surface.y);
+        return vec4<f32>(rgb * w.x, 1.0);
+    }
     return vec4<f32>((light.rgb * w.z + photo * w.y) * w.x, 1.0);
 }
