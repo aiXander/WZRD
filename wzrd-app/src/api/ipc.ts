@@ -12,6 +12,8 @@ export type PackLayer = {
   label: string | null;
   tags: string[];
   bbox: [number, number, number, number] | null;
+  /** The padded box the engine fits a region's clips into (C4); absent → `bbox`. */
+  source_box?: [number, number, number, number] | null;
   centroid: [number, number] | null;
   z: number;
 };

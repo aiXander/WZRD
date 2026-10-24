@@ -215,8 +215,8 @@ def spend_report() -> dict:
 # ---------------------------------------------------------------------------
 # region= : a pack layer id -> its placement box
 # ---------------------------------------------------------------------------
-def _pack_json() -> Path:
-    root = project.project_dir()
+def _pack_json(name: Optional[str] = None) -> Path:
+    root = project.project_dir(name)
     scene = root / "scene.json"
     if scene.is_file():
         try:
@@ -230,7 +230,7 @@ def _pack_json() -> Path:
     packs = sorted((root / project.PACKS).glob("*/pack.json"), key=lambda p: p.stat().st_mtime)
     if not packs:
         raise ToolError(
-            f"region=: project {project.active_project()!r} has no layer pack yet — "
+            f"region=: project {name or project.active_project()!r} has no layer pack yet — "
             f"run build_layerpack first (regions are pack layer ids)"
         )
     return packs[-1]
@@ -249,4 +249,66 @@ def region_meta(layer_id: str) -> dict:
             return {"region": layer_id, "source_box": layer.get("source_box") or layer.get("bbox")}
     ids = ", ".join(sorted(str(layer.get("id")) for layer in layers))
     raise ToolError(f"region={layer_id!r} is not a layer of {pack.parent.name} (layers: {ids})")
+
+
+# Shape images for a region's render, best first: the named assets (canvas-sized
+# by contract), then the pack's own surface.
+REGION_SHAPE_ASSETS = ("surface_lit", "surface")
+
+
+def region_inputs(layer_id: str, name: Optional[str] = None) -> dict:
+    """A region's TextureFlow inputs, cut to its placement box.
+
+    `mask` = the layer's mask (white = the region), `shape` = the show's
+    surface (`surface_lit`, else `surface`, else the pack's surface image),
+    both cropped to the padded `source_box` — the box the engine fits the
+    clip into, so a render at that aspect lands back on the region exactly.
+    Outside the canvas the crop is black. Cached in `<show>/regions/auto/`,
+    re-cut when the pack or the source image is newer.
+    """
+    from PIL import Image
+
+    from . import assets
+
+    pack = _pack_json(name)
+    manifest = json.loads(pack.read_text())
+    layer = next((lay for lay in manifest.get("layers", []) if lay.get("id") == layer_id), None)
+    if layer is None:
+        ids = ", ".join(sorted(str(lay.get("id")) for lay in manifest.get("layers", [])))
+        raise ToolError(f"region={layer_id!r} is not a layer of {pack.parent.name} (layers: {ids})")
+    box = layer.get("source_box") or layer.get("bbox")
+    canvas = manifest.get("projector_resolution")
+    if not box or not canvas:
+        raise ToolError(f"region={layer_id!r}: the pack has no box or canvas size for it")
+
+    shape_src, shape_from = None, None
+    for key in REGION_SHAPE_ASSETS:
+        try:
+            shape_src, shape_from = assets.resolve(key, name or project.active_project()), key
+            break
+        except ValueError:
+            continue
+    if shape_src is None and manifest.get("surface") and (pack.parent / manifest["surface"]).is_file():
+        shape_src, shape_from = str(pack.parent / manifest["surface"]), "pack surface"
+
+    out_dir = project.project_dir(name) / project.REGIONS / "auto"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{pack.parent.name}_{layer_id}"
+
+    def cut(src: Path, dest: Path, mode: str) -> str:
+        if not dest.is_file() or dest.stat().st_mtime < max(src.stat().st_mtime, pack.stat().st_mtime):
+            with Image.open(src) as im:
+                im = im.convert(mode)
+                sx, sy = im.width / canvas[0], im.height / canvas[1]
+                x0, y0, x1, y1 = box
+                im.crop((round(x0 * sx), round(y0 * sy), round(x1 * sx), round(y1 * sy))).save(dest)
+        return str(dest)
+
+    return {
+        "region": layer_id,
+        "source_box": box,
+        "mask": cut(pack.parent / layer["mask"], out_dir / f"{stem}_mask.png", "L"),
+        "shape": cut(Path(shape_src), out_dir / f"{stem}_shape.png", "RGB") if shape_src else None,
+        "shape_from": shape_from,
+    }
 

@@ -53,6 +53,11 @@ export type ProjectInfo = {
 export const projectInfo = (project?: string | null) =>
   hubCall<ProjectInfo>('GET', `/api/project?${q({ project })}`);
 
+/** A region's mask + the show's surface cut to its placement box (the Render panel's auto-fill). */
+export type RegionInputs = { region: string; source_box: number[]; mask: string; shape: string | null; shape_from: string | null };
+export const regionInputs = (project: string, region: string) =>
+  hubCall<RegionInputs>('GET', `/api/project/region_inputs?${q({ project, region })}`);
+
 export const pinAsset = (project: string, name: string, path: string, note?: string) =>
   hubCall<{ assets: Record<string, Asset> }>('POST', '/api/project/assets', { project, name, path, note });
 export const unpinAsset = (project: string, name: string) =>

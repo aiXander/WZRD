@@ -16,9 +16,14 @@
 //   finished later from its record (Upscale, RecordPanel); older specs: the
 //   fewest steps with the upscales off. Optional shape input
 //   (`control_input`, an AssetPicker over the open show's named assets —
-//   `surface_lit` / `surface` first) with "Use as shape" → ControlNet
-//   (`use_controlnet1` + `controlnet_strength1`), and a `diffusion_mask`.
-//   Sent only when set (show-setup M1). Every range / default / step comes
+//   `surface_lit` / `surface` first) whose strength (full spec range; > 0
+//   sends `use_controlnet1` + `controlnet_strength1`, 0 = no ControlNet),
+//   and a `diffusion_mask`; each slot has a × to clear it.
+//   Sent only when set (show-setup M1). Picking a region auto-fills both
+//   with that region's crops (`/api/project/region_inputs`: its mask + the
+//   show's surface cut to its padded `source_box`, the box the engine fits
+//   the clip into) — overridable; a slot still holding the auto crop
+//   follows the region. Every range / default / step comes
 //   from the endpoint's arg spec (`/api/textureflow/spec`); the form stays
 //   a curated subset of it.
 // - Image (Nano Banana): a prompt + the tray as references.
@@ -27,7 +32,7 @@
 // The cost estimate comes from the hub before Go (`/api/estimate`); past
 // today's cap the app asks, and only then sends `allow_over_cap` (S15).
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   estimateRender,
   getTextureflowSpec,
@@ -51,11 +56,13 @@ import {
   useQueue,
   useRenderQueue,
 } from '../../state/renderQueue';
+import { regionInputs, type RegionInputs } from '../../api/project';
 import { regionName } from '../../state/scene';
 import { useStore } from '../../state/store';
 import { addStyles, itemByPath, short, useStudio } from '../../state/studio';
 import { usePathDrop } from '../../ui/media/pathDrag';
 import { isImagePath } from '../../ui/media/types';
+import { Popover } from '../../ui/Popover';
 import { Btn, Dot, Seg } from '../../ui/primitives';
 import type { TfBackend } from '../../api/hub';
 import { Fader } from '../../ui/Fader';
@@ -69,10 +76,6 @@ const TOOL: Record<Kind, RenderTool> = {
   image: 'nano_banana',
   video: 'kling_v25_image_to_video',
 };
-
-// The shape-strength fader's curated sweet spot (the spec's own advice:
-// subtle 0.35–0.45, strong 0.45–0.65), kept inside the spec's range.
-const CN_SWEET = [0.35, 0.65] as const;
 
 /** A numeric spec field (`default`, `minimum`, …) of one TextureFlow arg. */
 const num = (p: TfParam | undefined, key: 'default' | 'minimum' | 'maximum' | 'step'): number =>
@@ -113,15 +116,17 @@ export function RenderPanel() {
   const [seed, setSeed] = useState('');
   const [final, setFinal] = useState(false);
   const [prompt, setPrompt] = useState('');
-  const [count, setCount] = useState(4);
+  const [count, setCount] = useState(1);
   const [est, setEst] = useState<Estimate | null>(null);
   const [estErr, setEstErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [overCap, setOverCap] = useState(false);
   const [controlInput, setControlInput] = useState<string | null>(null);
-  const [useShape, setUseShape] = useState(true);
   const [cnStrengthSet, setCnStrength] = useState<number | null>(null);
   const [diffusionMask, setDiffusionMask] = useState<string | null>(null);
+  // The region's auto crops; a slot still holding one follows the region.
+  const [auto, setAuto] = useState<RegionInputs | null>(null);
+  const autoRef = useRef<RegionInputs | null>(null);
   const [backend, setBackendState] = useState<TfBackend>(preferredBackend);
   const setBackend = (b: TfBackend) => {
     setBackendState(b);
@@ -141,11 +146,35 @@ export function RenderPanel() {
       .catch((e) => console.warn('textureflow spec', e));
   }, [hubUp]);
 
+  useEffect(() => {
+    const prev = autoRef.current;
+    const follow = (cur: string | null, was: string | null | undefined, next: string | null) =>
+      cur == null || cur === was ? next : cur;
+    const apply = (next: RegionInputs | null) => {
+      autoRef.current = next;
+      setAuto(next);
+      setDiffusionMask((cur) => follow(cur, prev?.mask, next?.mask ?? null));
+      setControlInput((cur) => follow(cur, prev?.shape, next?.shape ?? null));
+    };
+    if (!region || !show || !hubUp || kind !== 'flow') {
+      if (!region) apply(null);
+      return;
+    }
+    let live = true;
+    regionInputs(show, region)
+      .then((r) => live && apply(r))
+      .catch((e) => {
+        console.warn('region inputs', e);
+        if (live) apply(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [region, show, hubUp, kind]);
+
   const P = tfSpec?.parameters;
   const seconds = secondsSet ?? (kind === 'video' ? 5 : num(P?.n_seconds, 'default'));
   const motion = motionSet ?? num(P?.motion_scale, 'default');
-  const cnLo = Math.max(CN_SWEET[0], num(P?.controlnet_strength1, 'minimum'));
-  const cnHi = Math.min(CN_SWEET[1], num(P?.controlnet_strength1, 'maximum'));
   const cnStrength = cnStrengthSet ?? num(P?.controlnet_strength1, 'default');
 
   const focused = itemByPath(focus);
@@ -159,14 +188,15 @@ export function RenderPanel() {
       const a: Record<string, unknown> = { ...common, n_seconds: seconds, motion_scale: motion };
       if (recipe) a.recipe = recipe;
       if (styles.length) a.images = styles.slice(0, 6);
-      const size = sizeFor(regionLayer?.bbox, tfSpec);
+      const size = sizeFor(regionLayer?.source_box ?? regionLayer?.bbox, tfSpec);
       if (size) Object.assign(a, size);
       if (seed.trim()) a.seed = Number(seed);
       // A real draft (spec ≥ 2.2.0) is the final's first pass: same settings + draft.
       if (!final) Object.assign(a, P.draft ? { draft: true } : { n_steps: num(P.n_steps, 'minimum'), use_upscale: false, upscale_esrgan: false });
       if (controlInput) {
         a.control_input = controlInput;
-        if (useShape) Object.assign(a, { use_controlnet1: true, controlnet_strength1: Math.round(cnStrength * 100) / 100 });
+        // Strength 0 = no ControlNet: the shape only shows through the mask's black areas.
+        if (cnStrength > 0) Object.assign(a, { use_controlnet1: true, controlnet_strength1: Math.round(cnStrength * 100) / 100 });
       }
       if (diffusionMask) a.diffusion_mask = diffusionMask;
       a.backend = backend;
@@ -178,7 +208,7 @@ export function RenderPanel() {
     }
     if (!startFrame) return null;
     return { ...common, prompt: prompt.trim(), image_url: startFrame, duration: seconds >= 8 ? '10' : '5' };
-  }, [kind, recipe, styles, region, regionLayer, seconds, motion, seed, final, prompt, startFrame, controlInput, useShape, cnStrength, diffusionMask, backend, P, tfSpec]);
+  }, [kind, recipe, styles, region, regionLayer, seconds, motion, seed, final, prompt, startFrame, controlInput, cnStrength, diffusionMask, backend, P, tfSpec]);
 
   // The estimate follows the form (debounced).
   const argsKey = JSON.stringify([kind, args, count]);
@@ -295,7 +325,7 @@ export function RenderPanel() {
           {kind === 'flow' && regionLayer && (
             <span className="text-[10px] text-fg3">
               {(() => {
-                const s = sizeFor(regionLayer.bbox, tfSpec);
+                const s = sizeFor(regionLayer.source_box ?? regionLayer.bbox, tfSpec);
                 return s ? `${Object.values(s).join('×')} (the region's aspect)` : '';
               })()}
             </span>
@@ -330,50 +360,51 @@ export function RenderPanel() {
             {show && (
               <>
                 <Group label="Shape input">
-                  <DropSlot onPaths={(p) => setControlInput(p[0])} accept={images}>
-                    <AssetPicker
-                      project={show}
-                      value={controlInput}
-                      onChange={setControlInput}
-                      suggest={['surface_lit', 'surface']}
-                      placeholder="— none —"
-                      compact
-                    />
-                  </DropSlot>
+                  <Clearable value={controlInput} onClear={() => setControlInput(null)}>
+                    <DropSlot onPaths={(p) => setControlInput(p[0])} accept={images}>
+                      <AssetPicker
+                        project={show}
+                        value={controlInput}
+                        onChange={setControlInput}
+                        suggest={['surface_lit', 'surface']}
+                        placeholder="— none —"
+                        compact
+                      />
+                    </DropSlot>
+                  </Clearable>
+                  <AutoHint auto={auto?.shape} value={controlInput} onUse={setControlInput} region={regionLayer && regionName(pack, regionLayer.id)} />
                   {controlInput && (
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <label className="flex items-center gap-1.5 text-[11px] text-fg2 shrink-0 cursor-pointer" title="ControlNet: the render follows this image's shapes / edges. Off = it only shows through black mask areas (and seeds img2img when denoise < 1)">
-                        <input type="checkbox" checked={useShape} onChange={(e) => setUseShape(e.target.checked)} className="accent-[rgb(var(--deck))]" />
-                        Use as shape (ControlNet)
-                      </label>
-                      {useShape && (
-                        <Fader
-                          value={cnStrength}
-                          min={cnLo}
-                          max={cnHi}
-                          step={num(P?.controlnet_strength1, 'step')}
-                          defaultValue={num(P?.controlnet_strength1, 'default')}
-                          onChange={setCnStrength}
-                          label="strength"
-                          format={(v) => v.toFixed(2)}
-                          size="sm"
-                          className="flex-1 min-w-0"
-                          title={P?.controlnet_strength1?.description}
-                        />
-                      )}
-                    </div>
+                    <Fader
+                      value={cnStrength}
+                      min={num(P?.controlnet_strength1, 'minimum')}
+                      max={num(P?.controlnet_strength1, 'maximum')}
+                      step={num(P?.controlnet_strength1, 'step')}
+                      defaultValue={num(P?.controlnet_strength1, 'default')}
+                      onChange={setCnStrength}
+                      label="shape strength"
+                      format={(v) => (v > 0 ? v.toFixed(2) : 'off')}
+                      size="sm"
+                      className="mt-0.5"
+                      title={
+                        'ControlNet: how closely the render follows this image\'s shapes / edges. 0 = off (the image then only ' +
+                        'shows through the mask\'s black areas).' + (P?.controlnet_strength1?.description ? '\n\n' + P.controlnet_strength1.description : '')
+                      }
+                    />
                   )}
                 </Group>
                 <Group label="Mask (white = animated)">
-                  <DropSlot onPaths={(p) => setDiffusionMask(p[0])} accept={images}>
-                    <AssetPicker
-                      project={show}
-                      value={diffusionMask}
-                      onChange={setDiffusionMask}
-                      placeholder="— none —"
-                      compact
-                    />
-                  </DropSlot>
+                  <Clearable value={diffusionMask} onClear={() => setDiffusionMask(null)}>
+                    <DropSlot onPaths={(p) => setDiffusionMask(p[0])} accept={images}>
+                      <AssetPicker
+                        project={show}
+                        value={diffusionMask}
+                        onChange={setDiffusionMask}
+                        placeholder="— none —"
+                        compact
+                      />
+                    </DropSlot>
+                  </Clearable>
+                  <AutoHint auto={auto?.mask} value={diffusionMask} onUse={setDiffusionMask} region={regionLayer && regionName(pack, regionLayer.id)} />
                 </Group>
               </>
             )}
@@ -412,22 +443,12 @@ export function RenderPanel() {
             )}
           </>
         )}
-        <Field label={`How many · ${count}`}>
-          <input
-            type="range"
-            min={1}
-            max={12}
-            step={1}
-            value={count}
-            onChange={(e) => setCount(Number(e.target.value))}
-            className="w-full accent-[rgb(var(--deck))]"
-          />
-        </Field>
       </div>
       <footer className="flex items-center gap-2 p-2 border-t border-line shrink-0">
         <div className="flex-1 min-w-0 text-[11px] leading-tight">
           <SpendLine missing={missing} estErr={estErr} est={est} />
         </div>
+        <CountPick value={count} onChange={setCount} />
         {overCap ? (
           <Btn tone="danger" disabled={busy} onClick={() => go(true)} title="Render even though it takes today past the daily cap">
             Past the cap — render anyway
@@ -439,7 +460,7 @@ export function RenderPanel() {
             onClick={() => (wouldExceed ? setOverCap(true) : go(false))}
             title="Start the jobs; they land in the folder on the “Renders land in” card"
           >
-            {busy ? 'Starting…' : `Render ${count}`}
+            {busy ? 'Starting…' : count > 1 ? `Render ${count}` : 'Render'}
           </Btn>
         )}
       </footer>
@@ -548,6 +569,76 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
     <div className="flex flex-col gap-1 min-w-0">
       <span className="label">{label}</span>
       {children}
+    </div>
+  );
+}
+
+/** Under a slot: "auto · <region>" while it holds the region's crop, else a
+ *  link back to it. Nothing without a region. */
+function AutoHint({ auto, value, onUse, region }: { auto?: string | null; value: string | null; onUse: (p: string) => void; region?: string }) {
+  if (!auto || !region) return null;
+  return value === auto ? (
+    <span className="text-[10px] text-fg3" title="Cut from the region's box — follows the Made for choice">
+      auto · {region}
+    </span>
+  ) : (
+    <button className="text-[10px] text-fg3 hover:text-fg underline-offset-2 hover:underline text-left" onClick={() => onUse(auto)}>
+      use {region}'s crop
+    </button>
+  );
+}
+
+/** How many renders to start: a small "×N" chip by the Render button (1 by
+ *  default — batches are rare), opening a 1–12 grid. Not a native <select>:
+ *  macOS draws its menu light. */
+function CountPick({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  return (
+    <>
+      <button
+        onClick={(e) => setAnchor(anchor ? null : e.currentTarget)}
+        className={'h-7 px-1.5 rounded border border-line text-[11px] num shrink-0 hover:text-fg ' + (value > 1 ? 'text-fg' : 'text-fg3')}
+        title="How many renders to start — separate jobs, each with a random seed unless Seed is set"
+      >
+        ×{value} ▾
+      </button>
+      {anchor && (
+        <Popover anchor={anchor} onClose={() => setAnchor(null)} width={148}>
+          <div className="grid grid-cols-4 gap-1 p-1">
+            {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => (
+              <button
+                key={n}
+                onClick={() => {
+                  onChange(n);
+                  setAnchor(null);
+                }}
+                className={'h-7 rounded text-[12px] num ' + (n === value ? 'bg-deck/25 text-fg' : 'text-fg2 hover:bg-panel2 hover:text-fg')}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+        </Popover>
+      )}
+    </>
+  );
+}
+
+/** A slot with a small × that empties it (only while it holds something). */
+function Clearable({ value, onClear, children }: { value: string | null; onClear: () => void; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-1 min-w-0">
+      <div className="flex-1 min-w-0">{children}</div>
+      {value && (
+        <button
+          onClick={onClear}
+          className="w-6 h-7 shrink-0 rounded text-fg3 hover:text-fg hover:bg-panel2 text-[14px] leading-none"
+          title="Clear"
+          aria-label="Clear"
+        >
+          ×
+        </button>
+      )}
     </div>
   );
 }
