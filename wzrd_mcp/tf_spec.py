@@ -83,6 +83,7 @@ def _load() -> Loaded:
 
 
 _current: Optional[Loaded] = None
+_latest: Optional[dict] = None  # the spec() reply this process fetched (refresh_in_background)
 
 
 def current() -> Loaded:
@@ -90,6 +91,19 @@ def current() -> Loaded:
     if _current is None:
         _current = _load()
     return _current
+
+
+def capabilities() -> set[str]:
+    """What the deployed app says it can do beyond the contract (its `spec()` reply's `capabilities`, e.g.
+    `progress_dict`: `render(..., progress_key=)` writes progress to a Modal Dict). Only a reply fetched from
+    the app counts — this process's refresh, else the cache — never the committed snapshot, which would claim
+    them for the fallback app or an older deploy."""
+    reply = _latest
+    if reply is None:
+        cur = current()
+        reply = cur.reply if cur.source.startswith("cache") else {}
+    caps = reply.get("capabilities") or (reply.get("spec") or {}).get("capabilities") or []
+    return {str(c) for c in caps} if isinstance(caps, list) else set()
 
 
 def public() -> dict:
@@ -197,6 +211,8 @@ def refresh_in_background() -> threading.Thread:
         if not _valid(reply):
             _emit(f"⚠ TextureFlow spec: {env}/{app} spec() returned a malformed reply — ignored")
             return
+        global _latest
+        _latest = reply
         path = cache_path(app)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")

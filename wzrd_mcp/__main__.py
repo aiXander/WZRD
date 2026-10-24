@@ -110,6 +110,15 @@ def main() -> None:
         re-raises the SIGTERM it caught once it's done, so code after
         `run()` (and atexit) never runs on a signal."""
 
+        async def startup(self, sockets=None):
+            await super().startup(sockets)
+            # Q8: local TextureFlow jobs a previous hub submitted keep rendering on the desktop — collect them.
+            from . import tf_queue
+            try:
+                await tf_queue.adopt_all()
+            except Exception as exc:  # noqa: BLE001 — never block the hub's start
+                _emit(f"[hub] re-adopting local TextureFlow jobs failed: {exc!r}")
+
         async def shutdown(self, sockets=None):
             hub.STOPPING = True  # open /api/jobs long-polls return now
             try:

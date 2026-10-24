@@ -75,6 +75,11 @@ def version() -> int:
     return _version
 
 
+def bump() -> None:
+    """Wake `/api/jobs` long-polls without a row change (progress moving with time)."""
+    _bump()
+
+
 def size_key(tool: str, args: dict) -> str:
     return json.dumps({k: args.get(k) for k in SIZE_ARGS.get(tool, ())}, sort_keys=True)
 
@@ -97,7 +102,7 @@ def start(tool: str, args: dict, *, by: str = "agent", session: Optional[str] = 
 
 
 def update(job: str, **fields: Any) -> None:
-    allowed = {"est_usd", "remote", "dest"}
+    allowed = {"est_usd", "remote", "dest", "backend", "lane_rank", "progress"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
         return
@@ -122,6 +127,23 @@ def finish(job: str, *, ok: bool, error: Optional[str] = None, outputs: Optional
     _bump()
 
 
+def move_job(job: str, backend: str, est_usd: float) -> None:
+    """A queued texture_flow job changed lane (tf_queue.move): backend, pre-estimate and its args' backend."""
+    with library.tx() as c:
+        row = c.execute("SELECT args FROM jobs WHERE id=?", (job,)).fetchone()
+        args = {**library._loads(row["args"] if row else None, {}), "backend": backend}
+        c.execute("UPDATE jobs SET backend=?, est_usd=?, args=? WHERE id=?",
+                  (backend, est_usd, library._dumps(args), job))
+    _bump()
+
+
+def adopt(job: str) -> None:
+    """This process takes over a job a previous hub left running (tf_queue.adopt_all)."""
+    with library.tx() as c:
+        c.execute("UPDATE jobs SET pid=? WHERE id=?", (os.getpid(), job))
+    _bump()
+
+
 def _alive(pid: int) -> bool:
     if pid == os.getpid():
         return True
@@ -134,9 +156,19 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _col(row: Any, name: str) -> Any:
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
 def status_of(row: Any) -> str:
     if row["ended"] is None:
-        return "running" if _alive(row["pid"]) else "lost"
+        if not _alive(row["pid"]):
+            return "lost"
+        # queued = waiting in a TextureFlow lane, not rendering yet (tf_queue sets lane_rank while it waits)
+        return "queued" if _col(row, "lane_rank") is not None else "running"
     if row["cancelled"]:
         return "cancelled"
     return "done" if row["ok"] else "failed"
@@ -151,11 +183,32 @@ def _job_dict(row: Any) -> dict:
         "outputs": library._loads(row["outputs"], []), "dest": row["dest"], "project": row["project"],
         "session": row["session"],
     }
-    if st == "running":
+    if st in ("running", "queued"):
         out["elapsed_s"] = round(time.time() - row["started"], 1)
+    if row["tool"] == "texture_flow":
+        out.update(_tf_fields(row, st, out["args"]))
+        if st in ("running", "queued"):
+            out["eta_s"] = (out["progress"] or {}).get("eta_s")
+    elif st == "running":
         e = eta(row["tool"], row["size_key"])
         out["eta_s"] = round(max(0.0, e - out["elapsed_s"]), 1) if e is not None else None
     return out
+
+
+def _tf_fields(row: Any, status: str, args: dict) -> dict:
+    """texture_flow's queue fields (render-queue plan, hub API contract): backend, lane_pos, pinned, progress."""
+    from . import tf_queue
+
+    job = row["id"]
+    live = tf_queue.progress(job) if status in ("running", "queued") else None
+    prog = live if live is not None else library._loads(_col(row, "progress"), None)
+    if prog is not None and status == "done":
+        prog = {**prog, "phase": "saving", "pct": 1.0, "eta_s": 0.0}
+    elif prog is not None and status in ("failed", "cancelled", "lost"):
+        prog = {**prog, "eta_s": None}
+    return {"backend": _col(row, "backend") or args.get("backend") or "modal",
+            "lane_pos": tf_queue.lane_pos(job) if status == "queued" else None,
+            "pinned": bool(args.get("finish_from")), "progress": prog}
 
 
 def get(job: str) -> dict:
@@ -270,9 +323,9 @@ async def detach(job: str, body: Callable[[], Awaitable[Any]], dest: Optional[st
         waiter.cancel()
     if task in done:
         return task.result()  # finished (or failed) before submitting: reply as a blocking call would
-    row = library.query_one("SELECT tool, size_key, dest FROM jobs WHERE id=?", (job,))
-    return {"job": job, "status": "running", "dest": (row["dest"] if row else None) or dest,
-            "eta_s": eta(row["tool"], row["size_key"]) if row else None,
+    cur = get(job)
+    return {"job": job, "status": cur["status"], "dest": cur["dest"] or dest, "eta_s": cur.get("eta_s"),
+            **({k: cur[k] for k in ("backend", "lane_pos", "pinned", "progress")} if cur["tool"] == "texture_flow" else {}),
             "note": "rendering in the hub; jobs(job) for status, cancel_job(job) to stop it"}
 
 
@@ -313,7 +366,7 @@ async def cancel(job: str) -> dict:
     if not row:
         raise ToolError(f"no job {job!r}")
     status = status_of(row)
-    if status not in ("running", "lost"):
+    if status not in ("running", "lost", "queued"):
         raise ToolError(f"job {job} is {status} — nothing to cancel")
     remote = None
     try:
@@ -329,7 +382,7 @@ async def cancel(job: str) -> dict:
     if task and not task.done():
         task.cancel()
         await asyncio.wait({task}, timeout=10)
-    if status_of(library.query_one("SELECT * FROM jobs WHERE id=?", (job,))) in ("running", "lost"):
+    if status_of(library.query_one("SELECT * FROM jobs WHERE id=?", (job,))) in ("running", "lost", "queued"):
         finish(job, ok=False, error="cancelled", cancelled=True)
     return {**get(job), "remote_cancel": remote}
 

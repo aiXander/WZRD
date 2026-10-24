@@ -21,7 +21,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from . import jobs, library, project, provenance, textureflow_local, tf_spec
+from . import jobs, library, project, provenance, textureflow_local, tf_queue, tf_spec
 from ._keepalive import with_keepalive
 from ._log import log_progress
 from .file_io import resolve_input_async
@@ -701,17 +701,39 @@ it runs on the backend that rendered the draft, recorded as its child."""
 _TF_FINISH_NOTES = {"images": "Required unless a recipe supplies them or finish_from is set."}
 
 
-async def _texture_flow(
-    region: Optional[str] = None,
-    allow_over_cap: bool = False,
-    hap: bool = True,
-    recipe: Optional[str] = None,
-    backend: Optional[str] = None,
-    ctx: Optional[Context] = None,
-    **spec_args: Any,
-) -> dict:
-    """The body of `texture_flow`; its signature + docstring are generated (`_tf_tool`)."""
+class _TfCall:
+    """One texture_flow call's resolved inputs (shared by a fresh call and a re-adopted local job)."""
+
+    def __init__(self, args: dict, sent: dict, backend: str, finish: Optional[str], source: Optional[dict],
+                 recipe: Optional[str], region_info: dict, warnings: list[str], hap: Any):
+        self.args, self.sent, self.backend, self.finish = args, sent, backend, finish
+        self.source, self.recipe, self.region_info, self.warnings, self.hap = source, recipe, region_info, warnings, hap
+        self.moved = False  # the operator moved it to the other backend while it was queued
+
+    @property
+    def eta_args(self) -> dict:
+        """What the ETA model reads: a finish renders at its draft's resolved params."""
+        base = ((self.source or {}).get("record", {}).get("textureflow") or {}).get("params") or {}
+        return {**base, **self.sent, **({"finish_from": self.finish, "draft": False} if self.finish else {})}
+
+    @property
+    def label(self) -> str:
+        if self.finish:
+            return f"finish {self.finish}"
+        if self.recipe:
+            return f"recipe {self.recipe}"
+        if self.sent.get("prompt"):
+            return str(self.sent["prompt"])[:80]
+        imgs = self.sent.get("images") or []
+        return Path(str(imgs[0])).name if imgs else "texture_flow"
+
+
+def _tf_prepare(region: Optional[str] = None, hap: Any = True, recipe: Optional[str] = None,
+                backend: Optional[str] = None, **spec_args: Any) -> _TfCall:
+    """Validate + resolve a call's args (recipe, finish routing, region) — no I/O beyond the library."""
     args = {k: v for k, v in spec_args.items() if v is not None}
+    for k in ("allow_over_cap", "ctx"):
+        args.pop(k, None)
     images = args.get("images")
     finish = args.get("finish_from") or None
     if not finish:
@@ -733,36 +755,70 @@ async def _texture_flow(
             args = apply_recipe(recipe, args, warnings)
         elif not images:
             raise ToolError("texture_flow needs images= (style images) or recipe=")
-    sent = dict(args)  # local paths, before packing — what the record keeps
     region_info = provenance.region_meta(region) if region else {}
-    # Local: the health check (≈ 2 s) runs before the spend check, so a
-    # desktop that is off fails here — even a wait=false caller sees it.
-    local = await textureflow_local.health() if backend == "local" else None
-    provenance.check_spend(_tf_estimate({**args, "backend": backend}), allow_over_cap)
+    return _TfCall(args, dict(args), backend, finish, source, recipe, region_info, warnings, hap)
 
-    files = await asyncio.to_thread(_tf_pack_media, args)
+
+_TF_PROGRESS_DICT = "textureflow-progress"  # Modal Dict the endpoint writes {stage, step, total, t} into (Q5)
+# Its lifecycle entries around the render's own stages: started (+cold_start) → stages → saving → done | failed.
+_TF_DICT_LIFECYCLE = ("started", "saving", "done", "failed")
+
+
+async def _tf_modal(args: dict, files: dict, job: Optional[str], ctx: Optional[Context]) -> dict:
+    """Spawn on the Modal app and wait; live progress from the Dict when the deployed spec() says so."""
+    import modal
+
+    app_name, env = _tf_target()
     mb = sum(len(b) for b in files.values()) / 1e6
-    if local is not None:
-        log_progress("texture_flow", f"Rendering on local {local.get('gpu')} ({len(files)} local file(s), {mb:.1f} MB)...")
-        res = await textureflow_local.render(args, files, ctx)
-        model = f"textureflow-local (TextureFlow, {res.get('info', {}).get('gpu') or local.get('gpu')})"
-    else:
-        import modal
+    log_progress("texture_flow", f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
+    tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
+    key = job if (job and "progress_dict" in tf_spec.capabilities()) else None
+    call = await tf.render.spawn.aio(args=args, files=files, **({"progress_key": key} if key else {}))
+    jobs.set_remote(f"modal|{call.object_id}", call.cancel.aio)
+    tf_queue.report(job, phase="starting" if key else "rendering")
+    task = asyncio.ensure_future(call.get.aio())
+    if not key:
+        return await with_keepalive(task, ctx, "TextureFlow")
 
-        app_name, env = _tf_target()
-        log_progress("texture_flow", f"Rendering on {env}/{app_name} ({len(files)} local file(s), {mb:.1f} MB)...")
-        tf = modal.Cls.from_name(app_name, "TextureFlow", environment_name=env)()
-        call = await tf.render.spawn.aio(args=args, files=files)
-        jobs.set_remote(f"modal|{call.object_id}", call.cancel.aio)
-        res = await with_keepalive(call.get.aio(), ctx, "TextureFlow")
-        model = f"{app_name} (TextureFlow)"
+    async def follow() -> dict:
+        d = modal.Dict.from_name(_TF_PROGRESS_DICT, environment_name=env)
+        failed = False
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=1.0)
+                if done:
+                    return task.result()
+                try:
+                    v = await d.get.aio(key)
+                except Exception as exc:  # noqa: BLE001 — progress is best-effort
+                    if not failed:
+                        log_progress("texture_flow", f"progress Dict unreadable ({type(exc).__name__}) — estimate only")
+                    failed, v = True, None
+                name = v.get("stage") if isinstance(v, dict) else None
+                if name == "started":  # the container picked the call up (lifecycle entries aren't stages)
+                    tf_queue.report(job, phase="starting")
+                elif name and name not in _TF_DICT_LIFECYCLE:
+                    tf_queue.report(job, stage=name, step=v.get("step"), total=v.get("total"))
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await d.pop.aio(key)
+            except Exception:  # noqa: BLE001
+                pass
 
+    return await with_keepalive(follow(), ctx, "TextureFlow")
+
+
+async def _tf_collect(res: dict, call: _TfCall, backend: str, job: Optional[str]) -> dict:
+    """The server's render dict → files in the library + the reply + `_provenance` (both backends)."""
+    tf_queue.report(job, phase="saving")
     # The main video is the library item; the previews are scratch beside the job.
     # The file is named after the server's request_id (it carries the timestamp), so a
     # file on disk alone leads back to its draft bundle.
     response: dict = {}
     request_id = res.get("request_id")
-    scratch = library.intermediates_dir() / (jobs.current_job.get() or f"texture_flow_{project.stamp()}")
+    scratch = library.intermediates_dir() / (job or f"texture_flow_{project.stamp()}")
     for key, out in res["outputs"].items():
         ext = Path(out["filename"]).suffix or ".mp4"
         if key == "output_video":
@@ -773,10 +829,11 @@ async def _texture_flow(
         await asyncio.to_thread(Path(path).write_bytes, out["bytes"])
         response[key] = path
     info = res.get("info") or {}
+    finish, source = call.finish, call.source
     response.update(seed=res["params"].get("seed"), params=res["params"],
                     request_id=request_id, timings=res["timings"])
     # Spec ≥ 2.2.0: the bundle a later finish_from=<request_id> finishes (servers before it send none).
-    stage = info.get("stage") or ("finish" if finish else "draft" if args.get("draft") else "full")
+    stage = info.get("stage") or ("finish" if finish else "draft" if call.args.get("draft") else "full")
     bundle = {k: info["draft"].get(k) for k in ("id", "expires_at")} if isinstance(info.get("draft"), dict) else None
     if bundle:
         response["draft"] = bundle
@@ -788,26 +845,141 @@ async def _texture_flow(
     t = res["timings"]
     seconds = (t.get("total_s") or 0) + ((t.get("restore_s") or 0) if t.get("cold_start") else 0)
     main = response.get("output_video")
-    paid = local is None
-    rec_args = dict(sent) if recipe else {}
+    paid = backend == "modal"
+    if paid:
+        model = f"{_tf_target()[0]} (TextureFlow)"
+    else:
+        model = f"textureflow-local (TextureFlow, {info.get('gpu') or tf_queue.S.local.gpu or 'desktop GPU'})"
+    rec_args = dict(call.sent) if call.recipe else {}
     if source:  # a finish records the draft's settings too (More like this, the Settings list)
         drop = {"draft", "seed", "model", "finish_from"}
-        rec_args = {**{k: v for k, v in (source["record"].get("args") or {}).items() if k not in drop}, **sent}
+        rec_args = {**{k: v for k, v in (source["record"].get("args") or {}).items() if k not in drop}, **call.sent}
+    if call.moved:  # the record says where it really rendered, not the backend it was submitted with
+        rec_args["backend"] = backend
+    # Q7: the stage timings + sizes are the ETA model's training data (tf_eta) and the lab's dataset.
+    sizes = {"stage_s": info.get("stage_s"), "gpu": info.get("gpu"), "first_pass_size": info.get("size"),
+             "output_size": info.get("final_size"), "n_frames": info.get("n_frames"),
+             "n_output_frames": info.get("n_output_frames"), "steps": info.get("steps"), "timings": t}
     response["_provenance"] = {
         "paid": paid,
         "est_usd": {str(Path(main).resolve()): seconds * _TF_USD_PER_S} if main and paid else {},
         "args": {**rec_args, "seed": res["params"].get("seed"), "model": model},
         "record": {"textureflow": {
             "request_id": request_id, "backend": backend, "stage": stage, "draft": bundle,
-            "params": res["params"], **({"finished_from": finish} if finish else {}),
+            "params": res["params"], **({"finished_from": finish} if finish else {}), **sizes,
         }},
-        **region_info,
+        **call.region_info,
     }
     if source:  # lineage: draft → final (the draft's render id, even if its mp4 is gone)
         response["_provenance"]["parent"] = source["id"]
-    if warnings:
-        response["warnings"] = warnings
-    return await attach_clip(response, "output_video", hap)
+    if call.warnings:
+        response["warnings"] = call.warnings
+    return await attach_clip(response, "output_video", call.hap)
+
+
+async def _texture_flow(
+    region: Optional[str] = None,
+    allow_over_cap: bool = False,
+    hap: bool = True,
+    recipe: Optional[str] = None,
+    backend: Optional[str] = None,
+    ctx: Optional[Context] = None,
+    **spec_args: Any,
+) -> dict:
+    """The body of `texture_flow`; its signature + docstring are generated (`_tf_tool`).
+
+    Checks (args, spend cap) → tracked by `tf_queue` → Modal: wait for a lane slot, spawn; local: hold
+    while the desktop is unreachable, submit (the server queues it) → files into the library. A queued
+    job the operator moves re-routes here (`tf_queue.Moved` / `acquire_modal` returning "local")."""
+    call = _tf_prepare(region=region, hap=hap, recipe=recipe, backend=backend, **spec_args)
+    args = call.args
+    if call.backend == "local":
+        textureflow_local.config()  # unconfigured: a clear error now
+        if not tf_queue.ssh_host():
+            # Without SSH the hub can't wake the desktop: one that is off fails here (≈ 2 s), before
+            # the spend check — even a wait=false caller sees it.
+            await textureflow_local.health()
+    est = {"modal": _tf_estimate({**args, "backend": "modal"}) if not call.finish else _TF_EST_FINISH_USD,
+           "local": 0.0}
+    files = await asyncio.to_thread(_tf_pack_media, args)
+    job = jobs.current_job.get()
+    if job:  # in its lane from here (status "queued"), so a wait=false reply already says so
+        await tf_queue.track(job, call.backend, call.eta_args, pinned=bool(call.finish), est=est,
+                             allow_over_cap=allow_over_cap, label=call.label)
+    try:
+        provenance.check_spend(est[call.backend], allow_over_cap)
+        backend_now = call.backend
+        while True:
+            entry = tf_queue.entry(job)
+            backend_now = entry.backend if entry else backend_now
+            if backend_now == "modal":
+                if job and await tf_queue.acquire_modal(job) != "modal":
+                    continue  # moved to local while it waited
+                try:
+                    res = await _tf_modal(args, files, job, ctx)
+                finally:
+                    tf_queue.release(job or "")
+                break
+            try:
+                if job:
+                    await tf_queue.hold_local(job)
+                mb = sum(len(b) for b in files.values()) / 1e6
+                log_progress("texture_flow", f"Rendering on the local GPU ({len(files)} local file(s), {mb:.1f} MB)...")
+                res = await textureflow_local.render(args, files, ctx, job=job,
+                                                     meta={"client": "wzrd", "label": call.label})
+                tf_queue.release(job or "")
+                break
+            except tf_queue.Moved:
+                tf_queue.consume_move(job or "")
+                log_progress("texture_flow", f"job {job} moved to Modal")
+        call.moved = backend_now != call.backend
+        return await _tf_collect(res, call, backend_now, job)
+    finally:
+        if job:
+            tf_queue.finish(job)
+
+
+async def adopt_local(row: dict) -> None:
+    """Hub start (render-queue Q8): finish a local job a previous hub submitted — follow the server job,
+    save its files, record them, end the job row. Runs as a hub task (`tf_queue.adopt_all`)."""
+    from . import _log
+
+    job, t0 = row["id"], float(row["started"])
+    client_args = library._loads(row["args"], {})
+    server_id = (row["remote"] or "").split("|", 1)[1]
+    tokens = [(jobs.current_job, jobs.current_job.set(job)),
+              (library.current_dest, library.current_dest.set(row.get("dest"))),
+              (project.call_project, project.call_project.set(row.get("project")))]
+    try:
+        try:
+            call = _tf_prepare(**{k: v for k, v in client_args.items() if k != "allow_over_cap"})
+        except Exception:  # noqa: BLE001 — a recipe gone since: keep what the job row has
+            call = _TfCall(dict(client_args), dict(client_args), "local", client_args.get("finish_from"),
+                           None, None, {}, [], client_args.get("hap", True))
+        call.backend = "local"
+        await tf_queue.track(job, "local", call.eta_args, pinned=True, est={"local": 0.0}, label=call.label)
+        e = tf_queue.entry(job)
+        if e:
+            e.server_id, e.local = server_id, "queued"
+        await tf_queue.hold_local(job)
+        res = await textureflow_local.collect(server_id, None, job)
+        tf_queue.release(job)
+        result = await _tf_collect(res, call, "local", job)
+        result, records, cost = await asyncio.to_thread(_log._with_provenance, "texture_flow", client_args,
+                                                        result, t0, job)
+        jobs.finish(job, ok=True, outputs=[r["path"] for r in records], est_usd=cost)
+        log_progress("texture_flow", f"re-adopted job {job} finished: {result.get('output_video')}")
+    except asyncio.CancelledError:
+        jobs.finish(job, ok=False, error="cancelled", cancelled=True)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        jobs.finish(job, ok=False, error=str(exc))
+        log_progress("texture_flow", f"re-adopted job {job} failed: {exc}")
+    finally:
+        tf_queue.finish(job)
+        jobs.forget(job)
+        for var, token in reversed(tokens):
+            var.reset(token)
 
 
 def _tf_tool():
@@ -860,7 +1032,9 @@ async def textureflow_warm(minutes: float = 60, backend: Optional[str] = None,
 
     app_name, env = _tf_target()
     fn = modal.Function.from_name(app_name, "set_warm", environment_name=env)
-    return await fn.remote.aio(minutes)
+    out = await fn.remote.aio(minutes)
+    tf_queue.note_warm(minutes)
+    return out
 
 
 # ---------------------------------------------------------------------------

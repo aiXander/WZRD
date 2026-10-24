@@ -291,13 +291,57 @@ async def _jobs(request, body):
     since = _q(request, "since")
     if since is not None:
         t = float(since)
-        rows = [j for j in rows if j["status"] == "running" or j["started"] >= t or (j["ended"] or 0) >= t]
+        rows = [j for j in rows if j["status"] in ("running", "queued") or j["started"] >= t or (j["ended"] or 0) >= t]
     return {"version": jobs.version(), "now": time.time(), "jobs": rows, "spend": jobs.spend()}
 
 
 @api("/api/jobs/cancel", ("POST",))
 async def _jobs_cancel(request, body):
     return await jobs.cancel(body["job"])
+
+
+# -- TextureFlow render queue (docs/TODO/textureflow-render-queue.md, hub API contract) --
+@api("/api/tf/backends")
+async def _tf_backends(request, body):
+    from . import tf_queue
+
+    return await tf_queue.backends()
+
+
+@api("/api/tf/queue")
+async def _tf_queue_view(request, body):
+    from . import tf_queue
+
+    return await tf_queue.queue_view()
+
+
+@api("/api/tf/modal", ("POST",))
+async def _tf_modal(request, body):
+    from . import tf_queue
+
+    return tf_queue.set_modal_slots(body.get("slots"))
+
+
+@api("/api/tf/local", ("POST",))
+async def _tf_local(request, body):
+    from . import tf_queue
+
+    return await tf_queue.local_action(str(body.get("action") or ""))
+
+
+@api("/api/jobs/reorder", ("POST",))
+async def _jobs_reorder(request, body):
+    from . import tf_queue
+
+    return await tf_queue.reorder(body["backend"], [str(j) for j in body.get("order") or []])
+
+
+@api("/api/jobs/move", ("POST",))
+async def _jobs_move(request, body):
+    from . import tf_queue
+
+    await tf_queue.move(body["job"], body["backend"])
+    return jobs.get(body["job"])
 
 
 @api("/api/estimate", ("POST",))

@@ -42,7 +42,7 @@ from typing import Any, Iterable, Optional
 from . import identity
 from ._log import _emit
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 INBOX = "inbox"
 WZRD_DIR = ".wzrd"
 TRASH_DIR = "trash"  # <media_root>/.wzrd/trash/<id>/<name>
@@ -189,6 +189,12 @@ _MIGRATIONS: list[str] = [
         flushed     REAL                   -- epoch seconds, NULL while restorable
     );
     CREATE INDEX trash_deleted ON trash(deleted);
+    """,
+    # v3 — TextureFlow render queue: the job's backend, its place while queued, live progress
+    """
+    ALTER TABLE jobs ADD COLUMN backend TEXT;      -- texture_flow: 'modal' | 'local'
+    ALTER TABLE jobs ADD COLUMN lane_rank REAL;    -- set while queued (hub lane / desktop queue), NULL once running
+    ALTER TABLE jobs ADD COLUMN progress TEXT;     -- JSON, the last progress block (tf_queue)
     """,
 ]
 
@@ -424,6 +430,16 @@ FROM files f LEFT JOIN renders r ON r.id = f.render_id
 """
 
 
+def _tf_brief(record: dict) -> Optional[dict]:
+    """`record.textureflow` in brief, for the grid's draft badge (render-queue plan, "U asks")."""
+    tf = record.get("textureflow")
+    if not isinstance(tf, dict):
+        return None
+    draft = tf.get("draft") if isinstance(tf.get("draft"), dict) else {}
+    return {"stage": tf.get("stage"), "request_id": tf.get("request_id"), "backend": tf.get("backend"),
+            "expires_at": draft.get("expires_at")}
+
+
 def _item(row: sqlite3.Row) -> dict:
     record = _loads(row["record"], {})
     return {
@@ -436,6 +452,7 @@ def _item(row: sqlite3.Row) -> dict:
         "wzrd": row["rkind"] == "wzrd", "tool": row["tool"], "created": row["created"],
         "project": row["project"], "region": row["region"],
         "est_usd": record.get("est_usd"),
+        "tf": _tf_brief(record),
         "score": row["score"], "tags": _loads(row["tags"], []),
         "agent_tags": _loads(row["agent_tags"], []), "notes": row["notes"],
         "thumb": row["thumb"] if row["thumb"] and Path(row["thumb"]).is_file() else None,

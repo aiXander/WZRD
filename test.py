@@ -297,13 +297,14 @@ def test_textureflow():
     _require(TEST_DAY_IMAGE)
     tmp = Path(tempfile.mkdtemp(prefix="wzrd_tf_"))
     env_keys = ("WZRD_MEDIA_ROOT", "WZRD_PROJECTS_ROOT", "TEXTUREFLOW_BACKEND", "TEXTUREFLOW_APP",
-                "WZRD_MODAL_ENV", "TEXTUREFLOW_LOCAL_URL", "TEXTUREFLOW_LOCAL_TOKEN", "WZRD_RECIPES_ROOT")
+                "WZRD_MODAL_ENV", "TEXTUREFLOW_LOCAL_URL", "TEXTUREFLOW_LOCAL_TOKEN", "WZRD_RECIPES_ROOT",
+                "TEXTUREFLOW_LOCAL_SSH", "TEXTUREFLOW_MODAL_SLOTS")
     saved_env = {k: os.environ.get(k) for k in env_keys}
     for k in env_keys[2:]:
         os.environ.pop(k, None)
     os.environ["WZRD_MEDIA_ROOT"] = str(tmp / "media")
     os.environ["WZRD_PROJECTS_ROOT"] = str(tmp / "projects")
-    saved_modal = (modal.Cls.from_name, modal.Function.from_name)
+    saved_modal = (modal.Cls.from_name, modal.Function.from_name, modal.Dict.from_name)
     mp4 = tmp / "tiny.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=8", "-t", "1",
                     "-pix_fmt", "yuv420p", str(mp4)], check=True)
@@ -316,9 +317,13 @@ def test_textureflow():
     rendered = set(names) | {"seed", "params", "request_id", "timings", "clip", "job"}
     rids = iter(range(1, 1000))
 
+    q7 = {"stage_s": {"styles": 0.5, "sample": 9.0, "vae_decode": 1.0, "rife": 2.0, "encode": 1.5},
+          "size": [640, 368], "final_size": [1920, 1080], "n_frames": 48, "n_output_frames": 192, "steps": 10}
+
     def tf_info(args: dict, rid: str, **extra) -> dict:
         """`info` as the server sends it: spec ≥ 2.2.0 servers (args carry draft / finish_from)
         add the stage + the bundle; older ones send neither (WZRD must cope with both)."""
+        extra = {**q7, **extra}
         if not ({"draft", "finish_from"} & set(args)):
             return extra
         src = args.get("finish_from") or rid
@@ -332,6 +337,9 @@ def test_textureflow():
     def no_modal(*a, **kw):
         raise AssertionError(f"Modal was called: {a} {kw}")
 
+    modal_gate: dict = {"event": None}  # an asyncio.Event: Modal renders block until it is set
+    modal_kw: list = []  # the extra spawn kwargs (progress_key) per spawn
+
     class FakeCall:
         object_id = "fc-test"
 
@@ -340,6 +348,8 @@ def test_textureflow():
             self.get, self.cancel = self, self
 
         async def aio(self):  # get.aio() / cancel.aio()
+            if modal_gate["event"] is not None:
+                await modal_gate["event"].wait()
             rid = f"tf-modal-{next(rids)}"
             return {"request_id": rid, "params": {"seed": 1111, **self.args},
                     "info": tf_info(self.args, rid, app="textureflow"), "timings": timings,
@@ -347,9 +357,31 @@ def test_textureflow():
                                 for n in names}}
 
     class FakeSpawn:
-        async def aio(self, args, files):
+        async def aio(self, args, files, **kw):
             modal_calls.append(("render", args, files))
+            modal_kw.append(kw)
             return FakeCall(args, files)
+
+    dict_reads: list = []
+
+    class FakeDict:  # Modal Dict `textureflow-progress`: a scripted sequence of progress values
+        script = [None, {"stage": "started", "cold_start": False, "t": 0},
+                  {"stage": "styles", "step": None, "total": None, "t": 1},
+                  {"stage": "KSampler", "step": 2, "total": 10, "t": 2}]
+
+        def __init__(self, *a, **kw):
+            dict_reads.append(("from_name", a, kw))
+            self.get, self.pop = self._Get(), self._Pop()
+
+        class _Get:
+            async def aio(self, key):
+                dict_reads.append(("get", key))
+                n = sum(1 for r in dict_reads if r[0] == "get")
+                return FakeDict.script[min(n, len(FakeDict.script)) - 1]
+
+        class _Pop:
+            async def aio(self, key):
+                dict_reads.append(("pop", key))
 
     class FakeCls:
         def __init__(self, *a, **kw):
@@ -369,7 +401,8 @@ def test_textureflow():
 
     # -- the fake local job server (wire contract v1) ----------------------
     TOKEN, GPU = "s3cret", "NVIDIA GeForce RTX 3090"
-    srv = {"jobs": {}, "submits": [], "cancels": [], "requests": 0, "worker": "ready"}
+    srv = {"jobs": {}, "submits": [], "cancels": [], "requests": 0, "worker": "ready", "legacy": False,
+           "orders": [], "go": set()}
 
     @web.middleware
     async def auth(request, handler):
@@ -383,31 +416,46 @@ def test_textureflow():
                                   "commit": "abc123", "vram_free_gb": 23.1})
 
     async def submit(request):
-        args, files = None, {}
+        args, files, meta = None, {}, None
         reader = await request.multipart()
         async for part in reader:
             if part.name == "args":
                 assert part.headers.get("Content-Type") == "application/json", part.headers
                 args = json.loads(await part.text())
+            elif part.name == "meta" and not srv["legacy"]:
+                meta = json.loads(await part.text())
+            elif part.name == "meta":  # a server before the queue routes
+                return web.json_response({"error": "unexpected multipart part 'meta' (want 'args' and 'file')"},
+                                         status=400)
             else:
                 assert part.name == "file", part.name
                 files[part.filename] = bytes(await part.read())
         if args.get("n_steps") == 99:
             return web.json_response({"error": "n_steps: 99 is outside 4-14"}, status=400)
-        jid = f"lj{len(srv['jobs']) + 1}"
-        script = {666: "hold", 13: "fail"}.get(args.get("seed"), "ok")
+        srv["n"] = srv.get("n", 0) + 1
+        jid = f"lj{srv['n']}"
+        script = {666: "hold", 13: "fail", 777: "wait"}.get(args.get("seed"), "ok")
         down = srv["worker"] == "down"  # accepted, but failed at once
         srv["jobs"][jid] = {"state": "error" if down else "queued", "script": script, "polls": 0,
-                            "args": args, "changed": asyncio.Event(),
+                            "args": args, "changed": asyncio.Event(), "meta": meta or {},
                             "error": "render worker is down" if down else None}
-        srv["submits"].append({"job_id": jid, "args": args, "files": files})
-        return web.json_response({"job_id": jid, "queue_position": 0})
+        srv["submits"].append({"job_id": jid, "args": args, "files": files, "meta": meta})
+        return web.json_response({"job_id": jid, "queue_position": qpos(jid)})
+
+    def queued_ids():
+        order = srv.get("order") or []
+        q = [j for j, x in srv["jobs"].items() if x["state"] == "queued"]
+        return [j for j in order if j in q] + [j for j in q if j not in order]
+
+    def qpos(jid):
+        q = queued_ids()
+        return q.index(jid) if jid in q else None
 
     def status_doc(jid, job):
         running = job["state"] == "running"
-        return {"job_id": jid, "state": job["state"], "stage": "sampling" if running else None,
+        return {"job_id": jid, "state": job["state"], "stage": "KSampler" if running else None,
                 "step": job["polls"] if running else None, "total": 3 if running else None,
-                "queue_position": 0 if job["state"] in ("queued", "running") else None,
+                "queue_position": qpos(jid) if job["state"] == "queued" else 0 if running else None,
                 "error": (job["error"] or "CUDA out of memory") if job["state"] == "error" else None}
 
     async def status(request):
@@ -417,6 +465,9 @@ def test_textureflow():
             return web.json_response({"error": "unknown job"}, status=404)
         assert 0 <= float(request.query.get("wait", 0)) <= 60
         if job["state"] in ("queued", "running"):
+            if job["script"] == "wait" and job["state"] == "queued" and jid not in srv["go"]:
+                await asyncio.sleep(0.05)
+                return web.json_response(status_doc(jid, job))
             if job["script"] == "hold" and job["state"] == "running":
                 try:  # long-poll until something changes (cancel), capped short for the test
                     await asyncio.wait_for(job["changed"].wait(), 1.0)
@@ -459,8 +510,27 @@ def test_textureflow():
             asyncio.get_running_loop().create_task(stop())
         return web.json_response({"job_id": jid, "state": job["state"]})
 
+    async def queue(request):
+        if srv["legacy"]:
+            return web.json_response({"error": "not found"}, status=404)
+        doc = lambda j: {**status_doc(j, srv["jobs"][j]), "client": srv["jobs"][j]["meta"].get("client"),  # noqa: E731
+                         "label": srv["jobs"][j]["meta"].get("label"), "created_at": 0, "started_at": None}
+        running = [j for j, x in srv["jobs"].items() if x["state"] == "running"]
+        return web.json_response({"running": doc(running[0]) if running else None,
+                                  "queued": [doc(j) for j in queued_ids()], "worker": srv["worker"],
+                                  "gpu_holder": None})
+
+    async def queue_order(request):
+        if srv["legacy"]:
+            return web.json_response({"error": "not found"}, status=404)
+        order = (await request.json())["order"]
+        srv["orders"].append(order)
+        srv["order"] = order
+        return web.json_response({"order": queued_ids()})
+
     app = web.Application(middlewares=[auth])
-    app.add_routes([web.get("/v1/health", health), web.post("/v1/render", submit),
+    app.add_routes([web.get("/v1/queue", queue), web.post("/v1/queue/order", queue_order),
+                    web.get("/v1/health", health), web.post("/v1/render", submit),
                     web.get("/v1/jobs/{jid}", status), web.get("/v1/jobs/{jid}/result", result),
                     web.get("/v1/jobs/{jid}/files/{name}", files),
                     web.post("/v1/jobs/{jid}/cancel", cancel)])
@@ -505,8 +575,15 @@ def test_textureflow():
                 assert rec["est_usd"] > 0 and rec["args"]["model"] == "textureflow (TextureFlow)", rec
                 assert "backend" not in rec["args"], rec["args"]
                 # a pre-2.2.0 server: the id is kept and names the file, no bundle
-                assert rec["textureflow"] == {"request_id": res_m["request_id"], "backend": "modal", "stage": "full",
-                                              "draft": None, "params": res_m["params"]}, rec["textureflow"]
+                assert rec["textureflow"] == {
+                    "request_id": res_m["request_id"], "backend": "modal", "stage": "full", "draft": None,
+                    "params": res_m["params"], "stage_s": q7["stage_s"], "gpu": None, "first_pass_size": [640, 368],
+                    "output_size": [1920, 1080], "n_frames": 48, "n_output_frames": 192, "steps": 10,
+                    "timings": timings}, rec["textureflow"]  # Q7: the ETA's training data
+                assert modal_kw[-1] == {}  # the snapshot claims no capabilities: no progress_key
+                j = jobs.get(res_m["job"])
+                assert j["backend"] == "modal" and j["pinned"] is False and j["lane_pos"] is None, j
+                assert j["progress"]["phase"] == "saving" and j["progress"]["pct"] == 1.0, j["progress"]
                 assert Path(res_m["output_video"]).name == f"texture_flow_{res_m['request_id']}.mp4"
                 assert "draft" not in res_m
                 assert library.query_one("SELECT remote FROM jobs WHERE id=?", (res_m["job"],))["remote"] == "modal|fc-test"
@@ -670,6 +747,212 @@ def test_textureflow():
                 fin2 = await call(c, "texture_flow", {"finish_from": rid})
                 assert library.render(fin2["output_video"])["parent"] == d_rec["id"]
                 modal.Cls.from_name = no_modal
+
+                # 11. the render queue (docs/TODO/textureflow-render-queue.md), through the hub's /api routes:
+                # the Modal lane (1 slot here), reorder, cancel a queued job, move to local, a pinned finish.
+                import httpx
+                from wzrd_mcp import hub, textureflow_local, tf_queue  # noqa: F401 — hub registers the routes
+                api = httpx.AsyncClient(transport=httpx.ASGITransport(app=mcp.http_app(transport="streamable-http")),
+                                        base_url="http://hub")
+
+                async def get(path):
+                    r = await api.get(path)
+                    assert r.status_code == 200, (path, r.text)
+                    return r.json()
+
+                async def post(path, body, status=200):
+                    r = await api.post(path, json=body)
+                    assert r.status_code == status, (path, r.status_code, r.text)
+                    return r.json()
+
+                async def until(pred, what, timeout=15.0):
+                    t_end = time.perf_counter() + timeout
+                    while not pred():
+                        assert time.perf_counter() < t_end, f"timed out waiting for {what}"
+                        await asyncio.sleep(0.05)
+
+                def st(j):
+                    return jobs.get(j)["status"]
+
+                def mp4_of(j):
+                    return next(o for o in jobs.get(j)["outputs"] if o.endswith(".mp4"))
+
+                modal.Cls.from_name = FakeCls  # Modal slots: default 1
+                modal_gate["event"] = asyncio.Event()
+                n_render = sum(1 for x in modal_calls if x[0] == "render")
+                a, b, d = [(await call(c, "texture_flow", {"images": [style], **base["draft"], "seed": 100 + i,
+                                                            "wait": False}))["job"] for i in range(3)]
+                await until(lambda: st(a) == "running" and st(b) == st(d) == "queued", "the Modal lane")
+                assert [jobs.get(x)["lane_pos"] for x in (b, d)] == [0, 1]
+                jb = jobs.get(b)
+                assert jb["progress"]["phase"] == "queued" and jb["progress"]["eta_s"] > 0 and jb["backend"] == "modal"
+                assert jobs.get(d)["progress"]["eta_s"] > jb["progress"]["eta_s"]  # waits for one more ahead
+                assert [x["job"] for x in (await get("/api/tf/queue"))["modal"]] == [a, b, d]
+                be = await get("/api/tf/backends")
+                assert be["modal"] == {"state": "ready", "slots": 1, "max_slots": 3, "running": 1, "queued": 2}, be["modal"]
+                assert (await post("/api/jobs/reorder", {"backend": "modal", "order": [d, "j_nope"]}))["order"] == [d, b]
+                assert jobs.get(d)["lane_pos"] == 0 and jobs.get(b)["lane_pos"] == 1
+                assert (await post("/api/jobs/cancel", {"job": b}))["status"] == "cancelled"
+                jobs.set_daily_cap(0.0)
+                moved = await post("/api/jobs/move", {"job": d, "backend": "local"})  # $0: no cap check
+                jobs.set_daily_cap(20.0)
+                assert moved["backend"] == "local" and moved["est_usd"] == 0 and moved["args"]["backend"] == "local"
+                await until(lambda: st(d) == "done", "the moved job")
+                modal_gate["event"].set()
+                await until(lambda: st(a) == "done", "the running Modal job")
+                assert [x[1].get("seed") for x in modal_calls if x[0] == "render"][n_render:] == [100]  # b, d never spawned
+                rec = library.render(mp4_of(d))["record"]
+                assert rec["textureflow"]["backend"] == "local" and rec["args"]["backend"] == "local", rec["args"]
+                # a finish is pinned to its draft's backend
+                modal_gate["event"] = asyncio.Event()
+                hold = (await call(c, "texture_flow", {"images": [style], **base["draft"], "wait": False}))["job"]
+                fq = (await call(c, "texture_flow", {"finish_from": rid, "wait": False}))["job"]
+                await until(lambda: st(fq) == "queued", "the queued finish")
+                assert jobs.get(fq)["pinned"] is True
+                err = await post("/api/jobs/move", {"job": fq, "backend": "local"}, 400)
+                assert "can't move" in err["error"], err
+                await post("/api/jobs/move", {"job": hold, "backend": "local"}, 400)  # running: not queued
+                modal_gate["event"].set()
+                await until(lambda: st(fq) == "done" and st(hold) == "done", "the finish")
+                modal_gate["event"] = None
+
+                # 11b. Modal slots are an operator setting (library.db, 1..3); lowering never cancels a running job.
+                be = (await get("/api/tf/backends"))["modal"]
+                assert (be["slots"], be["max_slots"]) == (1, 3), be
+                for bad in (0, 4, 1.5, "2"):
+                    await post("/api/tf/modal", {"slots": bad}, 400)
+                modal_gate["event"] = asyncio.Event()
+                s3 = [(await call(c, "texture_flow", {"images": [style], **base["draft"], "wait": False}))["job"]
+                      for _ in range(3)]
+                await until(lambda: [st(x) for x in s3] == ["running", "queued", "queued"], "1 slot")
+                assert (await post("/api/tf/modal", {"slots": 2}))["slots"] == 2
+                await until(lambda: [st(x) for x in s3] == ["running", "running", "queued"], "2 slots")
+                assert library.get_setting("tf_modal_slots") == 2
+                await post("/api/tf/modal", {"slots": 1})
+                await asyncio.sleep(0.3)
+                assert [st(x) for x in s3] == ["running", "running", "queued"]  # both keep running
+                modal_gate["event"].set()
+                await until(lambda: all(st(x) == "done" for x in s3), "the lane drains")
+                modal_gate["event"] = None
+
+                # 12. the local lane = the desktop server's queue: meta, lane_pos incl. another client's job,
+                # reorder forwarded (foreign jobs keep their place), move local → Modal cancels the server job.
+                srv["jobs"]["lab1"] = {"state": "queued", "script": "wait", "polls": 0, "args": {}, "error": None,
+                                       "changed": asyncio.Event(), "meta": {"client": "lab", "label": "explore02"}}
+                l1, l2 = [(await call(c, "texture_flow", {"images": [style], **base["draft"], "seed": 777,
+                                                          "backend": "local", "wait": False}))["job"] for _ in range(2)]
+                await until(lambda: jobs.get(l2)["lane_pos"] == 2 and jobs.get(l1)["lane_pos"] == 1, "server positions")
+                assert st(l1) == "queued" and jobs.get(l1)["progress"]["phase"] == "queued"
+                assert srv["submits"][-1]["meta"] == {"client": "wzrd", "label": "day.jpg"}, srv["submits"][-1]["meta"]
+                sid = {j: library.query_one("SELECT remote FROM jobs WHERE id=?", (j,))["remote"].split("|")[1]
+                       for j in (l1, l2)}
+                view = (await get("/api/tf/queue"))["local"]
+                assert view[0]["foreign"] is True and view[0]["client"] == "lab" and view[0]["job_id"] == "lab1"
+                assert [v.get("job") for v in view[1:]] == [l1, l2], view
+                assert (await post("/api/jobs/reorder", {"backend": "local", "order": [l2, l1]}))["order"] == [l2, l1]
+                assert srv["orders"][-1] == ["lab1", sid[l2], sid[l1]], srv["orders"]
+                assert jobs.get(l2)["lane_pos"] == 1
+                await post("/api/jobs/move", {"job": l1, "backend": "modal"})
+                assert sid[l1] in srv["cancels"]
+                await until(lambda: st(l1) == "done", "local → Modal")
+                rec = library.render(mp4_of(l1))["record"]
+                assert rec["textureflow"]["backend"] == "modal" and rec["args"]["backend"] == "modal"
+                assert modal_calls[-1][1]["seed"] == 777
+                srv["go"] |= {sid[l2]}
+                await until(lambda: st(l2) == "done", "the reordered local job")
+                del srv["jobs"]["lab1"]
+
+                # 13. an older server (no meta part, no /v1/queue): resent without meta, the view falls back,
+                # reorder refuses.
+                srv["legacy"] = True
+                old = (await call(c, "texture_flow", {"images": [style], **base["draft"], "seed": 777,
+                                                      "backend": "local", "wait": False}))["job"]
+                await until(lambda: st(old) == "queued" and jobs.get(old)["lane_pos"] == 0, "legacy submit")
+                assert srv["submits"][-1]["meta"] is None and textureflow_local._meta_ok is False
+                assert [v.get("job") for v in (await get("/api/tf/queue"))["local"]] == [old]
+                err = await post("/api/jobs/reorder", {"backend": "local", "order": [old]}, 400)
+                assert "older version" in err["error"], err
+                srv["go"].add(library.query_one("SELECT remote FROM jobs WHERE id=?", (old,))["remote"].split("|")[1])
+                await until(lambda: st(old) == "done", "legacy job")
+                srv["legacy"], textureflow_local._meta_ok = False, True
+
+                # 14. desktop unreachable: the job is held in the hub (no fail-fast once SSH is set), the
+                # lane reads off → service_down → `textureflow-ctl start` over ssh (once) → submitted.
+                ctl_calls: list = []
+                desk = {"service": "off"}
+
+                def fake_ctl(argv):
+                    ctl_calls.append(argv)
+                    if desk["service"] == "off":
+                        return subprocess.CompletedProcess(argv, 255, "", "ssh: connect to host beast: timed out")
+                    result = "ok"
+                    if argv[-1].endswith(" start"):
+                        desk["service"], result = "active", "started"
+                        os.environ["TEXTUREFLOW_LOCAL_URL"] = url  # the service comes up
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(
+                        {"result": result, "service": desk["service"], "gpu_lock": "free", "holder": None,
+                         "want": False, "health": None, "detail": None}) + "\n", "")
+
+                saved_ctl, saved_poll = tf_queue.run_ctl, tf_queue.HOLD_POLL_S
+                tf_queue.run_ctl, tf_queue.HOLD_POLL_S = fake_ctl, 0.05
+                os.environ["TEXTUREFLOW_LOCAL_SSH"] = "beast"
+                os.environ["TEXTUREFLOW_LOCAL_URL"] = f"http://127.0.0.1:{_free_port()}"
+                try:
+                    tf_queue.S.local.health_t = tf_queue.S.local.ctl_t = 0
+                    assert (await get("/api/tf/backends"))["local"]["state"] == "off"
+                    held = await call(c, "texture_flow", {"images": [style], **base["draft"], "backend": "local",
+                                                          "wait": False})
+                    hj = held["job"]
+                    await until(lambda: (jobs.get(hj)["progress"] or {}).get("phase") == "waiting_backend", "held")
+                    assert st(hj) == "queued" and jobs.get(hj)["lane_pos"] == 0
+                    assert not any(x[-1].endswith(" start") for x in ctl_calls)  # off: nothing to start
+                    desk["service"] = "inactive"  # the desktop wakes, the service is down
+                    tf_queue.S.local.ctl_t = 0
+                    await until(lambda: st(hj) == "done", "the held job", timeout=20)
+                    assert sum(1 for x in ctl_calls if x[-1].endswith(" start")) == 1
+                    assert ctl_calls[0][:6] == ["/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+                                                "beast"] and ctl_calls[0][-1] == "~/.local/bin/textureflow-ctl status"
+                    n = len(ctl_calls)
+                    out = await post("/api/tf/local", {"action": "start"})  # up already: no ssh
+                    assert out["state"] == "ready" and len(ctl_calls) == n, (out, ctl_calls[n:])
+                    await post("/api/tf/local", {"action": "stop"}, 400)
+                finally:
+                    tf_queue.run_ctl, tf_queue.HOLD_POLL_S = saved_ctl, saved_poll
+                    del os.environ["TEXTUREFLOW_LOCAL_SSH"]
+                    os.environ["TEXTUREFLOW_LOCAL_URL"] = url
+
+                # 15. Modal progress from the Dict, only when the deployed spec() advertises it.
+                tf_spec._latest = {"capabilities": ["progress_dict"]}
+                modal.Dict.from_name = FakeDict
+                modal_gate["event"] = asyncio.Event()
+                pj = (await call(c, "texture_flow", {"images": [style], **base["draft"], "wait": False}))["job"]
+                await until(lambda: ((jobs.get(pj)["progress"] or {}).get("stage") == "sample"), "Dict progress")
+                pr = jobs.get(pj)["progress"]
+                assert pr["source"] == "live" and pr["phase"] == "rendering" and (pr["step"], pr["total"]) == (2, 10), pr
+                assert 0 < pr["pct"] < 1 and pr["eta_s"] > 0, pr
+                modal_gate["event"].set()
+                await until(lambda: st(pj) == "done", "the Dict-tracked render")
+                assert modal_kw[-1] == {"progress_key": pj} and ("pop", pj) in dict_reads
+                assert dict_reads[0] == ("from_name", ("textureflow-progress",), {"environment_name": "wzrd"})
+                tf_spec._latest, modal_gate["event"] = None, None
+                modal.Cls.from_name = no_modal
+
+                # 16. hub restart (Q8): a local job a dead hub submitted is re-adopted and collected.
+                srv["jobs"]["ljx"] = {"state": "done", "script": "ok", "polls": 0, "args": {"images": ["day.jpg"]},
+                                      "changed": asyncio.Event(), "meta": {}, "error": None}
+                orphan = jobs.start("texture_flow", {"images": [style], "backend": "local"}, project="tf-t",
+                                    dest=str(library.inbox()))
+                dead = subprocess.Popen(["true"])
+                dead.wait()
+                with library.tx() as cx:
+                    cx.execute("UPDATE jobs SET pid=?, remote='local|ljx' WHERE id=?", (dead.pid, orphan))
+                assert st(orphan) == "lost"
+                assert await tf_queue.adopt_all() == [orphan]
+                await until(lambda: st(orphan) == "done", "the re-adopted job")
+                rec = library.render(mp4_of(orphan))["record"]
+                assert rec["textureflow"]["backend"] == "local" and rec["job"] == orphan, rec
+                assert await tf_queue.adopt_all() == []
+                await api.aclose()
         finally:
             mute.close()
             await runner.cleanup()
@@ -702,15 +985,54 @@ def test_textureflow():
         finally:
             tf_spec._current, tf_spec.fetch = loaded, fetch
 
+    def eta_sanity():
+        """The stage model (tf_eta): plausible totals, drafts/finishes cheaper, a tracker that only moves
+        forward, and the lab's 3090 samples file used as priors when present."""
+        from wzrd_mcp import tf_eta
+
+        full, draft = tf_eta.predict_total({}, "modal"), tf_eta.predict_total({"draft": True}, "modal")
+        assert 30 < full < 600 and draft < full < tf_eta.predict_total({}, "local"), (full, draft)
+        assert tf_eta.predict_total({"n_seconds": 12}, "modal") > full
+        laps = dict(tf_eta.plan({"finish_from": "x"}, "modal"))
+        assert "resume" in laps and "sample" not in laps and "upscale_pass" in laps
+        tr = tf_eta.Tracker(tf_eta.plan({}, "modal"), "modal", 10.0)
+        tr.set_phase("starting", 1000.0)
+        snaps = []
+        for t, (stage, step, total) in enumerate([("styles", None, None), ("KSampler", 5, 10), ("sample", None, None),
+                                                  ("KSampler", 2, 6), ("esrgan", 1, 4), ("rife", 3, 4)]):
+            tr.on_stage(stage, step, total, 1001.0 + 5 * t)
+            snaps.append(tr.snapshot(1002.0 + 5 * t))
+        assert [s["stage"] for s in snaps] == ["control_input", "sample", "vae_decode", "upscale_pass", "esrgan", "rife"]
+        pcts = [s["pct"] for s in snaps]
+        assert pcts == sorted(pcts) and 0 < pcts[0] and pcts[-1] < 1, pcts
+        saved = tf_eta.SAMPLES_PATH
+        small = {"n_seconds": 6, "density": 0.15, "use_upscale": True}
+        try:
+            tf_eta.SAMPLES_PATH = tmp / "samples.json"
+            tf_eta.invalidate()
+            without = dict(tf_eta.plan(small, "local"))["sample"]
+            tf_eta.SAMPLES_PATH.write_text(json.dumps({"samples": [
+                {"params": {"n_seconds": 6, "n_steps": 10}, "stage_s": {"sample": 900.0},
+                 "info": {"size": [512, 288], "n_frames": 48, "steps": 10}},
+                {"params": {"n_seconds": 12, "n_steps": 10}, "stage_s": {"sample": 1800.0},
+                 "info": {"size": [512, 288], "n_frames": 96, "steps": 10}}]}))
+            tf_eta.invalidate()
+            assert dict(tf_eta.plan(small, "local"))["sample"] > 2 * without, without  # the slow samples count
+        finally:
+            tf_eta.SAMPLES_PATH = saved
+            tf_eta.invalidate()
+
     loaded = tf_spec.current()
     try:
         asyncio.run(run())
         tf_spec._current = loaded
         tools._tf_tool()  # back to the loaded spec's tool
         spec_sources()
+        eta_sanity()
     finally:
         tf_spec._current = loaded
-        modal.Cls.from_name, modal.Function.from_name = saved_modal
+        modal.Cls.from_name, modal.Function.from_name, modal.Dict.from_name = saved_modal
+        tf_spec._latest = None
         for k, v in saved_env.items():
             if v is None:
                 os.environ.pop(k, None)

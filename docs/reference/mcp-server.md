@@ -279,7 +279,9 @@ JSON over `library.py` / `jobs.py`, errors `{error}` with 400/500.
 rename, delete, delete_scored, signal, tags}`, `thumb?id=`, `selection`,
 `jobs` (long-poll on `version`, or `since`), `jobs/item`, `jobs/cancel`,
 `render` (`{tool, args, count}` → each a `wait=false` call of the render
-tool, `by: "app"`), `estimate`, `spend`, `recipes`, and for show setup:
+tool, `by: "app"`), `estimate`, `spend`, `recipes`, the TextureFlow render
+queue (`tf/backends`, `tf/queue`, `tf/modal`, `tf/local`, `jobs/reorder`,
+`jobs/move` — [textureflow.md](textureflow.md) "The render queue"), and for show setup:
 `project` (`?project=` → folder map, assets, roles, canvas choices,
 `has_scene`, existing shows), `project/assets` (pin / `path: null`
 unpins), `tool` (`{tool, args}` → any non-render tool run synchronously,
@@ -318,7 +320,8 @@ after the operator opened another Studio folder still lands where it was
 started (S1).
 
 **`library.db`** (SQLite, WAL; the migrations at the top of `library.py`
-are the schema — v1 Studio, v2 the trash; version in `PRAGMA user_version`,
+are the schema — v1 Studio, v2 the trash, v3 the jobs' `backend` / `lane_rank` / `progress`
+(TextureFlow queue); version in `PRAGMA user_version`,
 migrations run on open). The hub writes; the app reads it `mode=ro` to
 browse while the hub is down (the Rust reader ignores `user_version`).
 
@@ -376,8 +379,12 @@ bad `region=` still fails synchronously. Remote calls register with
 via `fal_client.submit` + `handle.get`) so `cancel` stops the billing side
 first, then the task; Nano Banana has no remote handle. A job whose process
 died without `ended` reads **lost** (pid check on read); cancelling a lost
-job still cancels its recorded remote call. ETA = median `duration_s` of
+job still cancels its recorded remote call. A `texture_flow` job waiting in a
+lane reads **queued** (`lane_rank` set; cancellable, no remote side) and its
+ETA + progress come from `tf_queue` / `tf_eta` ([textureflow.md](textureflow.md)
+"The render queue"); for other tools ETA = median `duration_s` of
 the last 20 successful jobs with the same tool + size args (`SIZE_ARGS`).
+Queued jobs count for the idle exit and (Modal, with their pre-estimate) the spend cap.
 Pre-call estimates live in `jobs.ESTIMATORS` (registered by the tool
 modules; shared by `check_spend` and `/api/estimate`). A job's `dest` is
 the folder its outputs land in — `to_hap` records its source's folder.
@@ -502,6 +509,7 @@ D16: the default is what a Finder-launched app sees). Code:
 | `provenance.py` | render records for every output (`record_outputs`), legacy sidecar reads, `region=` → pack layer box |
 | `recipe_tools.py` | style recipe library: `list_recipes`, `save_recipe`, `apply_recipe` (the `texture_flow(recipe=)` merge) |
 | `tf_spec.py`, `textureflow_spec.json` | TextureFlow's published arg spec: cache → committed snapshot, background refresh from the app's `spec()`, the generated `texture_flow` params/docs, unknown-arg checks — [textureflow.md](textureflow.md) |
+| `textureflow_local.py`, `tf_queue.py`, `tf_eta.py`, `tf_eta_3090_samples.json` | TextureFlow's desktop client (wire contract v1 + the additive queue routes), the render queue (Modal lane, local view, moves, SSH start, re-adoption, progress) and the stage-time ETA model + its 3090 priors — [textureflow.md](textureflow.md) |
 | `local_tools.py` | `capture_camera_snapshot` (off by default) |
 | `file_io.py`, `auth.py`, `modal_app.py`, `upload.py` | input resolution; parked cloud path |
 
