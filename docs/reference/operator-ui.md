@@ -47,8 +47,11 @@ tempo (beat lamps from the `transport` channel, BPM double-click/scroll,
 TAP, `1` = bar line here), the **jobs pill** (running/queued renders per
 TextureFlow backend + a thin aggregate progress bar · $ today; its popover
 holds the render queue, `JobsPill.tsx`) and **hub lamp** (`HubLamp.tsx`) — both "Studio + the hub"
-below — health (Audio / FPS / reload verdict / Engine —
-a restart button while the engine is down), ADOPT for agent edits, help
+below — health (Audio / FPS / Engine — a restart button while the engine
+is down; a red "Error — kept last good" cell appears only after a failed
+hot reload, a clean apply shows nothing since 2026-10-25), ADOPT for agent
+edits — tempo through health sit in one right-aligned cluster that clips
+from its left edge below ~1200 px so ⚙ and `?` never fall off — help
 overlay (`?`), toasts. While the engine is down a red banner under the bar
 (`EngineDownBanner`) shows the reason and one "Restart engine" button.
 
@@ -248,7 +251,11 @@ the hub's own side (routes, `library.db` schema, jobs) is
   show's folder name**, written on every show switch and whenever the hub
   comes up — agent tools called without `project=` act on it.
   `state/studio.ts`: open folder, listing (2 s poll while Studio is
-  mounted), grid selection + cursor, "show ≤ N", monitor item, and the
+  mounted; while the listing has `pending` files one extra re-list fires
+  400 ms later, so new tiles don't wait for the poll), the library
+  `roots`, grid selection + cursor, the score range filter
+  (`scoreRange` [min, max] over 0–9: full = everything incl. unrated, any
+  narrower range = only rated files inside it), monitor item, and the
   mirror of the hub's L5 selection. The **target folder** (where renders
   land, the selection's `target`) is **a fixed folder you pick** — browsing
   never changes it (2026-10-24; it used to follow the open folder, S1).
@@ -259,13 +266,22 @@ the hub's own side (routes, `library.db` schema, jobs) is
   `styles` (debounced 300 ms; the poll reads it back, so an agent's
   edit shows in the tray; a pending write blocks the read-back). Labels
   are optimistic (`pendingLabels` survive a poll until the hub echoes).
-- **The room:** `Split` `studio.cols` = `FolderTree` (roots, lazy tree,
-  "+ Add folder…" = a new root indexed in place, "Index this folder" =
-  deep index) · `MediaGrid` (static thumbs, score/codec/tag badges, a
-  dashed tile per file still being indexed, a **job tile** per running
-  job whose `dest` is this folder with elapsed/ETA, "show ≤ N", "Delete
-  ≤ N…" = dry run then confirm, **Trash (n)** = `RecentlyDeleted`, a
-  hover ⤢ = Lightbox) · `Monitor` + `RecordPanel` (score buttons, **"In
+- **The room:** `Split` `studio.cols` = `FolderTree` (roots, lazy tree
+  that always reveals the open folder — `revealInTree` expands its
+  ancestors, the row scrolls into view — "+ Add folder…" = a new root
+  indexed in place, "Index this folder" = deep index) · `MediaGrid` (a
+  **breadcrumb** header: the part above the folder's library root dimmed,
+  every segment from the root down opens that folder; static thumbs,
+  score/codec/tag badges, a dashed tile per file still being indexed, a
+  **job tile** per running job whose `dest` is this folder with
+  elapsed/ETA, the **score range slider** — two integer thumbs, double-click
+  = full range — and "Delete N–M…" (exactly what the range shows: hub
+  `delete_scored` takes `min_score` + `max_score`, unrated never; dry run
+  then confirm; the button sits left of the slider so its appearing never
+  shifts the slider mid-drag), **Trash (n)** = `RecentlyDeleted`, a hover
+  ⤢ = Lightbox; **clicking or arrowing onto an image/video puts it in the
+  Monitor** — arrows settle 120 ms first so a held key doesn't open a HAP
+  decode per tile) · `Monitor` + `RecordPanel` (score buttons, **"In
   show" pins** — the open show's asset names pointing at this file, ×
   unpins, "★ Pin to show as…" = `NamePrompt` with the roles →
   `pinAsset(openShow, name, path)` — tags (agent tags ✦, read-only),
@@ -284,7 +300,7 @@ the hub's own side (routes, `library.db` schema, jobs) is
   panel's Styles row, Shape input and Mask (images; the slots take the
   first). The tile under the Monitor carries a small **MONITOR** chip
   (tooltip "Showing in the Monitor"). No telemetry subscriptions.
-- **Render panel (R1)** — the side tab next to Record
+- **Render panel (R1)** — the side tab next to Label (`RecordPanel.tsx`, tab id `record`)
   (`RenderPanel.tsx`, tab remembered in `localStorage wzrd.studio.side`):
   TextureFlow (recipe from `/api/recipes`; the tray's styles override the
   recipe's), Image (`nano_banana`) and Video (`kling_v25_image_to_video`,
@@ -374,10 +390,11 @@ the hub's own side (routes, `library.db` schema, jobs) is
 - **Keys** (only while no input has focus and no modal / lightbox is
   open; Studio's own handler in `Studio.tsx`, and `shortcuts.ts` returns
   early in Studio so T/M/digits never TAKE/mute/select layers): arrows
-  move (⇧ extends; ↑↓ step a grid row via `gridColumns()`), space = play
-  in the monitor, `F` / Enter = full-screen `Lightbox` over the visible
-  items (← → move the cursor with it; HAP/DXV show their thumb — the
-  monitor plays them), `0–9` score, `−`
+  move (⇧ extends; ↑↓ step a grid row via `gridColumns()`; the Monitor
+  follows), Space / `F` / Enter = full-screen `Lightbox` over the visible
+  items (Space again or Esc closes — Studio passes `onSpace`; any arrow
+  steps prev/next with the cursor and Monitor following; HAP/DXV show
+  their thumb — the monitor plays them), `0–9` score, `−`
   clears it, `T` tags (autocomplete from every tag in use, Tab completes),
   `N` notes (⌘Enter), `D` add to the open show's active deck, `U` upscale the
   selected TextureFlow drafts (`state/drafts.ts::upscaleDrafts`), `M` move (folders the tree knows, or a typed
@@ -399,7 +416,7 @@ same everywhere. Exact props live in each file's header.
 | `types.ts` | `MediaRef` (`path` + optional name/kind/thumb/size/`LibraryItem`), `toMediaRef`, `isImagePath`, `kindOf`, `thumbOf`, `sameDir` |
 | `modalState.ts` | `modalOpen()` refcount (`useModalLock`) + the **Esc layer stack** (`useEscapeLayer`) |
 | `Modal.tsx` | portal dialog: title bar + `headerRight`, scrolling body, `footer`; Esc closes, backdrop only with `closeOnBackdrop` |
-| `Lightbox.tsx` | full-window viewer: ← → step, Esc, F fit / 1:1 (drag pans), Space = play/pause or hold-to-flip the `compareWith` blend; `actions(ref)` in its top bar |
+| `Lightbox.tsx` | full-window viewer: ← → (↑ ↓) step, Esc, F fit / 1:1 (drag pans), Space = play/pause or hold-to-flip the `compareWith` blend, or the caller's `onSpace` (Studio: close); `actions(ref)` in its top bar |
 | `MediaTile.tsx` | static thumb + name, `badges`, hover ⤢ / ★ / ✕ (each only when its handler is given), ★ asset chips (`pins`), selected ring |
 | `JobTile.tsx` | a running job's tile (elapsed / ETA / ✕ cancel); Studio's `MediaGrid` uses it too |
 | `MediaGallery.tsx` | a folder (`listFolder`, 2 s poll while mounted; hub down = reader, no ★/✕) or fixed `items`; job tiles for jobs whose `dest` is the folder; Lightbox; ★ → `NamePrompt` → `pinAsset`; ✕ → soft delete + Undo |
