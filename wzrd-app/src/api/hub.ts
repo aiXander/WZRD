@@ -298,9 +298,11 @@ export const labelRenders = (refs: { ids?: string[]; paths?: string[] }, patch: 
 export const moveFiles = (paths: string[], dest: string) =>
   hubCall<{ moved: unknown[] }>('POST', '/api/library/move', { paths, dest });
 export const deleteFiles = (paths: string[]) => hubCall<unknown>('POST', '/api/library/delete', { paths });
-export const deleteScored = (dir: string, maxScore: number, dryRun = false) =>
+/** Delete (to the trash) every file in `dir` scored minScore ≤ score ≤ maxScore; unrated files never. */
+export const deleteScored = (dir: string, minScore: number, maxScore: number, dryRun = false) =>
   hubCall<{ deleted?: string[]; would_delete?: string[]; count?: number }>('POST', '/api/library/delete_scored', {
     dir,
+    min_score: minScore,
     max_score: maxScore,
     dry_run: dryRun,
   });

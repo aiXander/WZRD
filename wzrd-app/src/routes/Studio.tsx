@@ -5,14 +5,17 @@
 //
 // Renders started from here (or by an agent reading `studio_selection()`)
 // land in the target folder — a fixed folder picked on the tray's "Renders
-// land in" card; browsing doesn't change it. Keys (only while no
-// input has focus): arrows move (⇧ extends), space plays in the monitor,
-// 0–9 score (− clears), T tag, N note, M move, D add to the open show’s
-// active deck, U upscale the selected TextureFlow drafts (state/drafts.ts),
-// F / Enter full-screen (ui/media/Lightbox over the folder),
+// land in" card; browsing doesn't change it. The focused tile (click or
+// arrows) shows in the monitor. Keys (only while no input has focus):
+// arrows move (↑ ↓ by one grid row; ⇧ extends), 0–9 score (− clears),
+// T tag, N note, M move, D add to the open show’s active deck, U upscale
+// the selected TextureFlow drafts (state/drafts.ts), Space / F / Enter
+// full-screen (ui/media/Lightbox over the folder; Space again or Esc
+// closes, arrows step through the folder there and the monitor follows),
 // ⌫ delete media (to the trash for 30 min, Undo in the toast; records are
 // kept; a multi-selection needs a second ⌫ within 2 s), Esc deselects.
-// Every key is off while a modal / lightbox is open (show-setup G11).
+// Every key is off while a modal / lightbox is open (show-setup G11) — the
+// Lightbox handles its own.
 // Under the grid: the render queue (Modal + Local lanes, RenderQueue.tsx),
 // shown / hidden by the grid header's Queue button (remembered per machine).
 // No telemetry subscriptions here — the only engine use is the monitor's
@@ -80,7 +83,7 @@ function SideTabs({ onPrompt }: { onPrompt: (k: PromptKind) => void }) {
         value={tab}
         onChange={pick}
         options={[
-          { id: 'record', label: 'Record' },
+          { id: 'record', label: 'Label' },
           { id: 'render', label: 'Render' },
         ]}
       />
@@ -152,8 +155,11 @@ export function Studio() {
           e.preventDefault();
           return moveFocus(cols, e.shiftKey);
         case ' ':
+          if (!st.focus) return;
           e.preventDefault();
-          st.setMonitor(st.monitor === st.focus ? null : st.focus);
+          // A just-clicked button would also fire on Space's keyup.
+          if (document.activeElement instanceof HTMLButtonElement) document.activeElement.blur();
+          useStudio.setState({ lightbox: st.focus });
           return;
         case '-':
           return void setScore(targets(), null);
@@ -241,14 +247,15 @@ export function Studio() {
   );
 }
 
-/** F / Enter / a tile's ⤢: the focused item full-screen, ← → over the
- *  folder's visible items (the cursor follows, so closing leaves it there). */
+/** Space / F / Enter / a tile's ⤢: the focused item full-screen, arrows over
+ *  the folder's visible items (the cursor and the monitor follow, so closing
+ *  leaves them there). Space closes it again. */
 function StudioLightbox() {
   const path = useStudio((s) => s.lightbox);
   const listing = useStudio((s) => s.listing);
-  const maxScore = useStudio((s) => s.maxScore);
+  const scoreRange = useStudio((s) => s.scoreRange);
   if (!path) return null;
-  const items = visibleItems({ listing, maxScore }).map(toMediaRef);
+  const items = visibleItems({ listing, scoreRange }).map(toMediaRef);
   const index = items.findIndex((m) => m.path === path);
   const close = () => useStudio.setState({ lightbox: null });
   return (
@@ -262,6 +269,7 @@ function StudioLightbox() {
         clickItem(p, {});
       }}
       onClose={close}
+      onSpace={close}
       actions={(ref) => (
         <Btn
           size="sm"

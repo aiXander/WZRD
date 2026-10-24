@@ -1,8 +1,9 @@
 // Full-window viewer over a list of media (show-setup M1): an image or a
-// looping `<video controls>`. Keys: ← → step · Esc closes (only the
-// lightbox — a Modal under it stays; modalState's layer stack) · F toggles
-// fit / 1:1 (drag pans at 1:1) · Space = play/pause a video, or, with
-// `compareWith`, hold to flip the blend. Top bar: name · W×H · size, the
+// looping `<video controls>`. Keys: ← → (and ↑ ↓) step · Esc closes (only
+// the lightbox — a Modal under it stays; modalState's layer stack) · F
+// toggles fit / 1:1 (drag pans at 1:1) · Space = play/pause a video, or,
+// with `compareWith`, hold to flip the blend — unless the caller passes
+// `onSpace` (Studio: Space toggles the viewer, so it closes it). Top bar: name · W×H · size, the
 // caller's `actions(ref)` (pin, delete …), fit toggle, close.
 //
 // `compareWith` draws another image in the same box under the item, with a
@@ -28,6 +29,7 @@ export function Lightbox({
   onClose,
   compareWith,
   actions,
+  onSpace,
 }: {
   items: MediaRef[];
   index: number;
@@ -35,6 +37,8 @@ export function Lightbox({
   onClose: () => void;
   compareWith?: string | null;
   actions?: (ref: MediaRef) => React.ReactNode;
+  /** Space calls this instead of play/pause / compare-flip. */
+  onSpace?: () => void;
 }) {
   useModalLock();
   useEscapeLayer(onClose);
@@ -64,8 +68,8 @@ export function Lightbox({
   }, [m?.path]);
 
   // Latest values for the window listeners (registered once).
-  const st = useRef({ i, n: items.length, onIndex, kind, compare: !!compareWith });
-  st.current = { i, n: items.length, onIndex, kind, compare: !!compareWith };
+  const st = useRef({ i, n: items.length, onIndex, kind, compare: !!compareWith, onSpace });
+  st.current = { i, n: items.length, onIndex, kind, compare: !!compareWith, onSpace };
 
   useEffect(() => {
     // The key that opened the viewer (Studio's F / Enter) can still reach
@@ -75,9 +79,13 @@ export function Lightbox({
       if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.repeat || performance.now() - openedAt < 200) return;
       const s = st.current;
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
-        if (s.n > 1) s.onIndex((s.i + (e.key === 'ArrowRight' ? 1 : -1) + s.n) % s.n);
+        const d = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1;
+        if (s.n > 1) s.onIndex((s.i + d + s.n) % s.n);
+      } else if (e.key === ' ' && s.onSpace) {
+        e.preventDefault();
+        s.onSpace();
       } else if (e.key === 'f' || e.key === 'F') {
         e.preventDefault();
         setOneToOne((v) => !v);

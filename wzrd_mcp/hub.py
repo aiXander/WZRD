@@ -244,7 +244,8 @@ async def _delete(request, body):
 @api("/api/library/delete_scored", ("POST",))
 async def _delete_scored(request, body):
     return await _thread(library.purge, body["dir"], int(body["max_score"]),
-                         bool(body.get("recursive", False)), bool(body.get("dry_run", False)))
+                         bool(body.get("recursive", False)), bool(body.get("dry_run", False)),
+                         int(body.get("min_score") or 0))
 
 
 @api("/api/library/signal", ("POST",))
@@ -443,6 +444,14 @@ async def _project_assets(request, body):
     else:
         out = await _thread(assets.pin, name, body["path"], note=body.get("note"), by="app", name=show)
     return {"assets": out}
+
+
+@api("/api/project/region_inputs")
+async def _region_inputs(request, body):
+    """A region's mask + surface cut to its box — the Render panel's auto-fill."""
+    from . import provenance
+
+    return await _thread(provenance.region_inputs, request.query_params["region"], _show(_q(request, "project")))
 
 
 # -- any non-render tool, synchronously (G8) ---------------------------------

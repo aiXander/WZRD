@@ -1,25 +1,30 @@
 // Studio's left column (A2): the library home + extra roots (L1), each a
 // lazily expanded folder tree, "Index this folder" (S3 — a deep index so
 // search sees the whole tree; opening a folder already indexes it), and
-// "+ Add folder…" for a new root indexed in place (S2: never moved).
+// "+ Add folder…" for a new root indexed in place (S2: never moved). The
+// open folder is always revealed (ancestors expanded, row highlighted and
+// scrolled into view) — the grid's breadcrumb opens folders too.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { addRoot, indexFolder, libraryRoots, removeRoot, type Root } from '../../api/hub';
+import { addRoot, indexFolder, removeRoot, type Root } from '../../api/hub';
 import { IN_TAURI } from '../../api/transport';
 import { useHub } from '../../state/hub';
-import { openDir, short, toggleTree, useStudio } from '../../state/studio';
+import { loadRoots, openDir, revealInTree, short, toggleTree, useStudio } from '../../state/studio';
 import { useStore } from '../../state/store';
 import { Btn } from '../../ui/primitives';
 
 export function FolderTree() {
   const hubState = useHub((s) => s.status?.state);
-  const [roots, setRoots] = useState<Root[]>([]);
+  const roots = useStudio((s) => s.roots);
   const dir = useStudio((s) => s.dir);
-  const reload = () => libraryRoots().then(setRoots).catch((e) => console.warn('roots', e));
+  const reload = loadRoots;
   useEffect(() => {
     reload();
   }, [hubState]);
+  useEffect(() => {
+    if (dir && roots.length) revealInTree(dir);
+  }, [dir, roots]);
 
   const add = async () => {
     let path: string | null = null;
@@ -85,9 +90,14 @@ function RootRow({ root, onRemoved }: { root: Root; onRemoved: () => void }) {
 function Node({ path, name, depth, title }: { path: string; name: string; depth: number; title?: string }) {
   const children = useStudio((s) => s.expanded[path]);
   const current = useStudio((s) => s.dir === path);
+  const row = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (current) row.current?.scrollIntoView({ block: 'nearest' });
+  }, [current]);
   return (
     <>
       <div
+        ref={row}
         className={
           'flex items-center gap-1 h-6 pr-2 cursor-pointer whitespace-nowrap ' +
           (current ? 'bg-raised text-fg' : 'text-fg2 hover:bg-panel2 hover:text-fg')

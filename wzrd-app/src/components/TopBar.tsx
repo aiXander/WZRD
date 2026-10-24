@@ -84,24 +84,27 @@ export function TopBar() {
         </div>
       )}
 
-      <div className="flex-1 min-w-0" />
+      {/* The status cluster takes the free space, right-aligned. Below ~1200 px
+          it can't all fit: it clips from its left edge (tempo first), so the
+          health strip, ⚙ and ? always stay on screen. Its popovers portal. */}
+      <div className="flex-1 min-w-0 overflow-hidden flex items-center justify-end gap-2 xl:gap-3">
+        {agentEdit && (
+          <button
+            onClick={() => adoptAgentScene().catch((e) => console.error('adopt agent scene:', e))}
+            className="h-7 px-2.5 shrink-0 whitespace-nowrap text-[11px] font-semibold rounded-md bg-amber/15 text-amber border border-amber/60 hover:bg-amber/25"
+            title={`The AI edited the design scene (r${agentEdit.rev}): ${agentEdit.summary}\nClick to save it to scene.json`}
+          >
+            ✦ AI edit · ADOPT
+          </button>
+        )}
 
-      {agentEdit && (
-        <button
-          onClick={() => adoptAgentScene().catch((e) => console.error('adopt agent scene:', e))}
-          className="h-7 px-2.5 shrink-0 whitespace-nowrap text-[11px] font-semibold rounded-md bg-amber/15 text-amber border border-amber/60 hover:bg-amber/25"
-          title={`The AI edited the design scene (r${agentEdit.rev}): ${agentEdit.summary}\nClick to save it to scene.json`}
-        >
-          ✦ AI edit · ADOPT
-        </button>
-      )}
-
-      <Tempo />
-      <OutputPill />
-      <JobsPill />
-      <HubLamp />
-      <Health />
-      <LayoutUnlockedChip />
+        <Tempo />
+        <OutputPill />
+        <JobsPill />
+        <HubLamp />
+        <Health />
+        <LayoutUnlockedChip />
+      </div>
 
       <SetupMenu />
       <button
@@ -328,7 +331,6 @@ function Health() {
   const engineError = useStore((s) => s.engineError);
   const audioTone = fresh?.state === 'fresh' ? 'ok' : fresh?.state === 'stale' ? 'warn' : fresh ? 'bad' : 'off';
   const fpsTone = !fps ? 'off' : fps.presenting === false ? 'info' : fps.fps > 55 ? 'ok' : fps.fps > 40 ? 'warn' : 'bad';
-  const hotTone = !hot ? 'off' : hot.ok ? (hot.probe?.band === 'yellow' ? 'warn' : 'ok') : 'bad';
   return (
     <div className="flex items-center h-8 rounded-lg bg-bg border border-line divide-x divide-line shrink-0">
       <button
@@ -350,22 +352,20 @@ function Health() {
         <span className="num">{fps ? Math.round(fps.fps) : '–'}</span>
         <span className="hidden xl:inline text-fg3 text-[10px]">FPS</span>
       </div>
-      <div
-        className="flex items-center gap-1.5 px-2 xl:px-2.5 h-full text-[11px] text-fg2 max-w-[220px]"
-        title={
-          hot
-            ? `${hot.target} ${hot.ok ? 'applied' : 'FAILED — the last good version keeps playing'}` +
-              (hot.probe ? `\nGPU probe: ${hot.probe.band}, ~${hot.probe.predicted_p95_ms.toFixed(1)} ms/frame predicted` : '') +
-              (hot.message ? '\n' + hot.message : '')
-            : 'No reloads yet'
-        }
-      >
-        <Dot tone={hotTone} />
-        {/* Narrow: the words only when something failed. */}
-        <span className={(hot && !hot.ok ? '' : 'hidden xl:inline ') + 'truncate'}>
-          {!hot ? 'Ready' : !hot.ok ? 'Error — kept last good' : hot.probe?.band === 'yellow' ? 'Applied · heavy' : 'Applied'}
-        </span>
-      </div>
+      {/* Hot-reload status: only a failure shows (a clean apply adds nothing). */}
+      {hot && !hot.ok && (
+        <div
+          className="flex items-center gap-1.5 px-2 xl:px-2.5 h-full text-[11px] text-bad max-w-[160px] xl:max-w-[220px]"
+          title={
+            `${hot.target} FAILED — the last good version keeps playing` +
+            (hot.probe ? `\nGPU probe: ${hot.probe.band}, ~${hot.probe.predicted_p95_ms.toFixed(1)} ms/frame predicted` : '') +
+            (hot.message ? '\n' + hot.message : '')
+          }
+        >
+          <Dot tone="bad" />
+          <span className="truncate">Error — kept last good</span>
+        </div>
+      )}
       {running ? (
         <div className="flex items-center gap-1.5 px-2 xl:px-2.5 h-full text-[11px] text-fg2" title="Engine running">
           <Dot tone="ok" />

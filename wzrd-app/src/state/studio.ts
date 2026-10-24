@@ -26,6 +26,7 @@ import {
   type FolderListing,
   type LabelPatch,
   type LibraryItem,
+  type Root,
   type Selection,
 } from '../api/hub';
 import { softDelete, undoToast } from '../ui/media/trash';
@@ -33,6 +34,10 @@ import { hubUp, showName, useHub } from './hub';
 import { useStore } from './store';
 
 const LAST_DIR_KEY = 'wzrd.studio.dir';
+
+export type ScoreRange = readonly [number, number];
+export const FULL_SCORES: ScoreRange = [0, 9];
+export const isFullRange = (r: ScoreRange) => r[0] <= FULL_SCORES[0] && r[1] >= FULL_SCORES[1];
 
 type StudioState = {
   dir: string | null;
@@ -42,12 +47,16 @@ type StudioState = {
   selected: string[];
   /** Keyboard cursor (an item path). */
   focus: string | null;
-  /** "Show ≤ N": only items scored ≤ N (unrated hidden); null = all. */
-  maxScore: number | null;
+  /** Score range filter [min, max] over 0–9. The full range shows
+   *  everything incl. unrated files; any narrower range shows only rated
+   *  files inside it. */
+  scoreRange: ScoreRange;
   /** What the monitor shows. */
   monitor: string | null;
   /** The hub's Studio selection (L5). */
   selection: Selection;
+  /** Library roots (the home + folders indexed in place) — the tree's tops. */
+  roots: Root[];
   /** Folder tree: expanded dirs → their subfolders (loaded lazily). */
   expanded: Record<string, { name: string; path: string }[]>;
   /** Multi-delete armed: how many items a second ⌫ would delete (0 = not). */
@@ -55,7 +64,7 @@ type StudioState = {
   /** The full-screen viewer (ui/media/Lightbox) is open on this path. */
   lightbox: string | null;
   setFocus: (p: string | null) => void;
-  setMaxScore: (n: number | null) => void;
+  setScoreRange: (r: ScoreRange) => void;
   setMonitor: (p: string | null) => void;
 };
 
@@ -65,25 +74,34 @@ export const useStudio = create<StudioState>((set) => ({
   listError: null,
   selected: [],
   focus: null,
-  maxScore: null,
+  scoreRange: FULL_SCORES,
   monitor: null,
   selection: { styles: [], items: [], target: null, project: null },
+  roots: [],
   expanded: {},
   deleteArmed: 0,
   lightbox: null,
   setFocus: (focus) => set({ focus }),
-  setMaxScore: (maxScore) => set({ maxScore }),
+  setScoreRange: (scoreRange) => set({ scoreRange }),
   setMonitor: (monitor) => set({ monitor }),
 }));
 
 const toast = (text: string, tone: 'info' | 'warn' | 'bad' | 'ok' = 'info') =>
   useStore.getState().toast(text, tone);
 
-/** The items the grid shows, in order (the "show ≤ N" filter applied). */
-export function visibleItems(s: Pick<StudioState, 'listing' | 'maxScore'> = useStudio.getState()): LibraryItem[] {
+/** The items the grid shows, in order (the score range filter applied). */
+export function visibleItems(s: Pick<StudioState, 'listing' | 'scoreRange'> = useStudio.getState()): LibraryItem[] {
   const items = s.listing?.items ?? [];
-  if (s.maxScore == null) return items;
-  return items.filter((i) => i.score != null && i.score <= s.maxScore!);
+  if (isFullRange(s.scoreRange)) return items;
+  const [lo, hi] = s.scoreRange;
+  return items.filter((i) => i.score != null && i.score >= lo && i.score <= hi);
+}
+
+/** "3–7", "≤ 4" (min 0), "5" (one score), "all". */
+export function scoreRangeLabel(r: ScoreRange): string {
+  if (isFullRange(r)) return 'all';
+  if (r[0] === r[1]) return `${r[0]}`;
+  return r[0] <= FULL_SCORES[0] ? `≤ ${r[1]}` : `${r[0]}–${r[1]}`;
 }
 
 export function itemByPath(path: string | null): LibraryItem | undefined {
@@ -94,6 +112,8 @@ export function itemByPath(path: string | null): LibraryItem | undefined {
 // ---------- folder ----------
 
 let listSeq = 0;
+let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+const PENDING_RELIST_MS = 400;
 
 export async function refreshListing() {
   const dir = useStudio.getState().dir;
@@ -104,6 +124,14 @@ export async function refreshListing() {
     if (seq !== listSeq || useStudio.getState().dir !== dir) return;
     useStudio.setState((s) => mergeListing(s, listing));
     loadSelection();
+    // Files still being indexed: re-list soon (one at a time), so tiles land
+    // as the hub indexes them instead of on the 2 s poll.
+    if (listing.pending.length && !pendingTimer) {
+      pendingTimer = setTimeout(() => {
+        pendingTimer = undefined;
+        if (useStudio.getState().dir === dir) refreshListing();
+      }, PENDING_RELIST_MS);
+    }
   } catch (e) {
     if (seq === listSeq) useStudio.setState({ listError: String(e) });
   }
@@ -127,6 +155,8 @@ function mergeListing(s: StudioState, listing: FolderListing): Partial<StudioSta
 export async function openDir(dir: string) {
   const prev = useStudio.getState().dir;
   if (prev !== dir) {
+    clearTimeout(pendingTimer);
+    pendingTimer = undefined;
     useStudio.setState({ dir, listing: null, selected: [], focus: null, listError: null });
     try {
       localStorage.setItem(LAST_DIR_KEY, dir);
@@ -142,6 +172,48 @@ export function lastDir(): string | null {
     return localStorage.getItem(LAST_DIR_KEY);
   } catch {
     return null;
+  }
+}
+
+export async function loadRoots() {
+  try {
+    useStudio.setState({ roots: await libraryRoots() });
+  } catch (e) {
+    console.warn('roots', e);
+  }
+}
+
+const trimSlash = (p: string) => p.replace(/\/+$/, '') || '/';
+
+/** The library root `dir` sits in (the deepest one, roots can nest). */
+export function rootOf(dir: string, roots: Root[]): Root | undefined {
+  const d = trimSlash(dir);
+  return roots
+    .filter((r) => d === trimSlash(r.path) || d.startsWith(trimSlash(r.path) + '/'))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+/** Expand the tree down to `dir` (its root and every folder above it), so
+ *  the open folder is visible and highlighted; never collapses anything. */
+export async function revealInTree(dir: string) {
+  const root = rootOf(dir, useStudio.getState().roots);
+  if (!root) return;
+  const d = trimSlash(dir);
+  let p = trimSlash(root.path);
+  const chain: string[] = [];
+  for (const seg of d.slice(p.length).split('/').filter(Boolean)) {
+    chain.push(p);
+    p = `${p}/${seg}`;
+  }
+  for (const a of chain) {
+    if (useStudio.getState().expanded[a]) continue;
+    try {
+      const l = await listFolder(a, false); // subfolders only — no indexing
+      useStudio.setState((s) => ({ expanded: { ...s.expanded, [a]: l.dirs } }));
+    } catch (e) {
+      console.warn('reveal', a, e);
+      return;
+    }
   }
 }
 
@@ -177,6 +249,24 @@ export function clickItem(path: string, mods: { shift?: boolean; meta?: boolean 
   }
   useStudio.setState({ selected, focus: path });
   writeSelection({ items: selected });
+  showInMonitor(path, 0);
+}
+
+let monitorTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Focusing a tile shows it in the monitor (images and videos). Keyboard
+ *  moves settle for a beat first, so holding an arrow doesn't open a HAP
+ *  decode stream per tile it passes. */
+function showInMonitor(path: string, delayMs: number) {
+  clearTimeout(monitorTimer);
+  const apply = () => {
+    const it = itemByPath(path);
+    if (it && (it.kind === 'image' || it.kind === 'video') && useStudio.getState().focus === path) {
+      useStudio.getState().setMonitor(path);
+    }
+  };
+  if (delayMs <= 0) apply();
+  else monitorTimer = setTimeout(apply, delayMs);
 }
 
 /** Arrow keys: move the cursor by `delta` items (± columns for up/down). */
@@ -191,6 +281,7 @@ export function moveFocus(delta: number, extend = false) {
     useStudio.setState({ focus: next, selected: [next] });
     writeSelection({ items: [next] });
   }
+  showInMonitor(next, 120);
 }
 
 /** What a key acts on: the selection, else the focused item. */
@@ -290,15 +381,16 @@ export async function deleteMedia(items: LibraryItem[]) {
   await refreshListing();
 }
 
-export async function deleteScoredHere(maxScore: number, dryRun: boolean) {
+/** "Delete N–M": every rated file in the open folder inside the score range. */
+export async function deleteScoredHere(range: ScoreRange, dryRun: boolean) {
   const dir = useStudio.getState().dir;
   if (!dir) return null;
   try {
-    const r = await deleteScored(dir, maxScore, dryRun);
+    const r = await deleteScored(dir, range[0], range[1], dryRun);
     if (!dryRun) {
       const n = r.deleted?.length ?? r.count ?? 0;
       undoToast(
-        `Moved ${n} file${n === 1 ? '' : 's'} scored ≤ ${maxScore} to the trash — restorable for 30 min`,
+        `Moved ${n} file${n === 1 ? '' : 's'} scored ${scoreRangeLabel(range)} to the trash — restorable for 30 min`,
         (r as { trashed?: { id: string; path: string }[] }).trashed,
         refreshListing
       );
@@ -358,6 +450,7 @@ export async function setTarget(dir: string) {
     const inside = roots.some((r) => dir === r.path || dir.startsWith(r.path.replace(/\/+$/, '') + '/'));
     if (!inside) {
       await addRoot(dir);
+      loadRoots();
       toast(`Renders land in ${short(dir)} — added it to the library so they show up`, 'ok');
       return;
     }

@@ -972,14 +972,16 @@ def trash_flush(ids: Optional[list[str]] = None, older_than_s: Optional[float] =
     return {"flushed": len(rows)}
 
 
-def purge(folder: str, max_score: int, recursive: bool = False, dry_run: bool = False) -> dict:
-    """S5 bulk delete: media in *folder* scored ≤ *max_score* (unrated files are never touched)."""
+def purge(folder: str, max_score: int, recursive: bool = False, dry_run: bool = False,
+          min_score: int = 0) -> dict:
+    """S5 bulk delete: media in *folder* scored *min_score* ≤ score ≤ *max_score*
+    (Studio's score range filter; unrated files are never touched)."""
     d = str(Path(folder).expanduser().resolve())
     where = "(f.dir=? OR f.dir LIKE ?)" if recursive else "f.dir=?"
     params: list[Any] = [d, d.rstrip("/") + "/%"] if recursive else [d]
     rows = query(f"SELECT f.path FROM files f JOIN renders r ON r.id=f.render_id "
-                 f"WHERE {where} AND f.missing=0 AND r.score IS NOT NULL AND r.score<=?",
-                 (*params, int(max_score)))
+                 f"WHERE {where} AND f.missing=0 AND r.score IS NOT NULL AND r.score>=? AND r.score<=?",
+                 (*params, int(min_score), int(max_score)))
     paths = [r["path"] for r in rows if Path(r["path"]).is_file()]
     if dry_run:
         return {"would_delete": paths}

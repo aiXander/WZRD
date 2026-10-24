@@ -69,7 +69,7 @@ export function Monitor() {
       )}
       {mode === 'empty' && (
         <div className="absolute inset-0 flex items-center justify-center text-[11px] text-fg3">
-          Space or double-click plays the selected item here
+          Click an item to show it here
         </div>
       )}
       <span className="absolute top-1 left-1 text-[9px] font-bold tracking-wider px-1 rounded bg-black/60 text-fg3">
