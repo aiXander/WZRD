@@ -260,11 +260,16 @@ def region_inputs(layer_id: str, name: Optional[str] = None) -> dict:
     """A region's TextureFlow inputs, cut to its placement box.
 
     `mask` = the layer's mask (white = the region), `shape` = the show's
-    surface (`surface_lit`, else `surface`, else the pack's surface image),
-    both cropped to the padded `source_box` — the box the engine fits the
-    clip into, so a render at that aspect lands back on the region exactly.
-    Outside the canvas the crop is black. Cached in `<show>/regions/auto/`,
-    re-cut when the pack or the source image is newer.
+    surface (`surface_lit`, else `surface`, else the pack's surface image)
+    blacked out outside the region, both cropped to the padded `source_box` —
+    the box the engine fits the clip into, so a render at that aspect lands
+    back on the region exactly. Outside the canvas the crop is black.
+
+    Why black outside: TextureFlow keeps the shape input wherever the mask is
+    black, so an unmasked surface would end up baked into the video around
+    the region (the engine hides it at playback; the file shouldn't carry it).
+    Cached in `<show>/regions/auto/`, re-cut when the pack or the source
+    image is newer.
     """
     from PIL import Image
 
@@ -295,20 +300,33 @@ def region_inputs(layer_id: str, name: Optional[str] = None) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{pack.parent.name}_{layer_id}"
 
-    def cut(src: Path, dest: Path, mode: str) -> str:
-        if not dest.is_file() or dest.stat().st_mtime < max(src.stat().st_mtime, pack.stat().st_mtime):
-            with Image.open(src) as im:
-                im = im.convert(mode)
-                sx, sy = im.width / canvas[0], im.height / canvas[1]
-                x0, y0, x1, y1 = box
-                im.crop((round(x0 * sx), round(y0 * sy), round(x1 * sx), round(y1 * sy))).save(dest)
-        return str(dest)
+    def crop(src: Path, mode: str) -> Image.Image:
+        with Image.open(src) as im:
+            im = im.convert(mode)
+            sx, sy = im.width / canvas[0], im.height / canvas[1]
+            x0, y0, x1, y1 = box
+            return im.crop((round(x0 * sx), round(y0 * sy), round(x1 * sx), round(y1 * sy)))
+
+    def stale(dest: Path, *srcs: Path) -> bool:
+        return not dest.is_file() or dest.stat().st_mtime < max(p.stat().st_mtime for p in (pack, *srcs))
+
+    mask_src = pack.parent / layer["mask"]
+    mask_out = out_dir / f"{stem}_mask.png"
+    if stale(mask_out, mask_src):
+        crop(mask_src, "L").save(mask_out)
+    shape_out = None
+    if shape_src:
+        shape_out = out_dir / f"{stem}_surface.png"
+        if stale(shape_out, mask_src, Path(shape_src)):
+            surface = crop(Path(shape_src), "RGB")
+            mask = Image.open(mask_out).convert("L").resize(surface.size)
+            Image.composite(surface, Image.new("RGB", surface.size), mask).save(shape_out)
 
     return {
         "region": layer_id,
         "source_box": box,
-        "mask": cut(pack.parent / layer["mask"], out_dir / f"{stem}_mask.png", "L"),
-        "shape": cut(Path(shape_src), out_dir / f"{stem}_shape.png", "RGB") if shape_src else None,
+        "mask": str(mask_out),
+        "shape": str(shape_out) if shape_out else None,
         "shape_from": shape_from,
     }
 

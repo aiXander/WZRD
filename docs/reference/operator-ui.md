@@ -310,7 +310,9 @@ the hub's own side (routes, `library.db` schema, jobs) is
   `width`/`height` on older specs) and `region` in the args. It also **auto-fills
   Shape input + Mask** with the region's crops (`GET /api/project/region_inputs` →
   `provenance.region_inputs`: the pack mask + the show's `surface_lit` > `surface` >
-  pack surface, cut to `source_box`, cached in `<show>/regions/auto/`); a slot still
+  pack surface, cut to `source_box` and blacked out outside the region — TextureFlow keeps
+  the shape input wherever the mask is black, so an unmasked surface got baked into the video
+  around the region; cached in `<show>/regions/auto/`); a slot still
   holding the auto crop follows the next region pick, a hand-picked one stays
   ("auto · <region>" / "use <region>'s crop" under each). Why: the engine places
   and masks a region's clip at playback, so the render only needs the crop, never
