@@ -170,7 +170,15 @@ export type LocalState =
   | 'busy'
   | 'down';
 export type ModalState = 'ready' | 'warm' | 'cold' | 'unknown';
-export type ModalLane = { state: ModalState; slots: number; running: number; queued: number };
+export type ModalLane = {
+  state: ModalState;
+  /** How many Modal GPU containers may run at once (operator-set, 1..max_slots). */
+  slots: number;
+  /** Upper bound for `slots`; absent on hubs without `POST /api/tf/modal`. */
+  max_slots?: number;
+  running: number;
+  queued: number;
+};
 export type LocalLane = {
   state: LocalState;
   detail: string | null;
@@ -327,6 +335,8 @@ export const tfBackends = () => hubCall<TfBackends>('GET', '/api/tf/backends');
 export const tfQueue = () => hubCall<TfQueue>('GET', '/api/tf/queue');
 /** Start the desktop's job service (the hub runs `textureflow-ctl start` over SSH). */
 export const tfLocalStart = () => hubCall<LocalLane>('POST', '/api/tf/local', { action: 'start' });
+/** How many Modal GPUs may render at once; lowering it never cancels a running job. */
+export const tfModalSlots = (slots: number) => hubCall<ModalLane>('POST', '/api/tf/modal', { slots });
 /** The queued jobs of one lane in their new order. */
 export const reorderJobs = (backend: TfBackend, order: string[]) =>
   hubCall<{ order: string[] }>('POST', '/api/jobs/reorder', { backend, order });

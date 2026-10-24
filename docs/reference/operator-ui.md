@@ -287,7 +287,11 @@ the hub's own side (routes, `library.db` schema, jobs) is
   while the desktop's service is `service_down`), sent as `args.backend`; the choice
   is remembered per machine (`localStorage wzrd.tf.backend`, try/catch); Local is
   disabled when `unconfigured`. A render is accepted whatever the state — it waits
-  in that backend's lane. `/api/estimate` (debounced) shows ≈ cost vs today's spend;
+  in that backend's lane. With Modal chosen, **Parallel GPUs** (`ModalSlots`, in
+  `RenderQueue.tsx`) sets how many Modal containers may render at once — "up to N
+  renders billed at once", 1..`modal.max_slots`, default 1 → `POST /api/tf/modal
+  {slots}` (optimistic; the hub persists it). Lowering it never cancels a running
+  render: the lane drains down to the limit. Hidden on a hub that sends no `max_slots`. `/api/estimate` (debounced) shows ≈ cost vs today's spend;
   over the cap → confirm → `allow_over_cap`. Go = `POST /api/render`
   (`wait=false` jobs, `by: app`), landing in the open folder — the hub
   pins it at submit. Job tiles carry ✕ = `/api/jobs/cancel`.
@@ -328,6 +332,7 @@ the hub's own side (routes, `library.db` schema, jobs) is
   hover ⤒ to top, ⇄ other lane (`/api/jobs/move`, disabled when `pinned`), ✕
   cancel. Lane header: lamp + state (`backendLook`: local `idle` is fine, `waiting_gpu`
   names `gpu_holder`), running/queued counts, time to clear (max ETA in the lane),
+  the Modal lane's **GPUs − n +** stepper (the same `ModalSlots` setting),
   **Start** only when `service_down`. Finished jobs leave the lane; their files
   appear in the grid as before. **Dev mock:** `api/hubMock.ts`, opt in with
   `?hubmock=1` (sticky in localStorage, `?hubmock=0` clears; `import.meta.env.DEV`

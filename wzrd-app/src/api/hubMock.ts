@@ -29,7 +29,9 @@ type MockJob = {
   live: boolean;
 };
 
-const SLOTS: Record<TfBackend, number> = { modal: 3, local: 1 };
+// Modal's slots are operator-set (`POST /api/tf/modal`, default 1, max 3); local is one GPU.
+const MAX_MODAL = 3;
+const SLOTS: Record<TfBackend, number> = { modal: 1, local: 1 };
 // Fractions of a job's duration per phase / stage.
 const PLAN: { phase: JobProgress['phase']; stage: string | null; frac: number; steps: number | null }[] = [
   { phase: 'starting', stage: null, frac: 0.08, steps: null },
@@ -226,7 +228,13 @@ function backends(): TfBackends {
     queued: queued('local').length,
   };
   return {
-    modal: { state: running('modal').length ? 'warm' : 'cold', slots: SLOTS.modal, running: running('modal').length, queued: queued('modal').length },
+    modal: {
+      state: running('modal').length ? 'warm' : 'cold',
+      slots: SLOTS.modal,
+      max_slots: MAX_MODAL,
+      running: running('modal').length,
+      queued: queued('modal').length,
+    },
     local: loc,
   };
 }
@@ -241,6 +249,13 @@ const mine = (id: string) => jobs.find((x) => x.id === id);
 const ROUTES: Record<string, Handler> = {
   '/api/tf/backends': () => backends(),
   '/api/tf/queue': () => ({ modal: laneEntries('modal'), local: laneEntries('local') }),
+  '/api/tf/modal': (body) => {
+    const n = Number(body?.slots);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_MODAL) throw new Error(`slots must be 1..${MAX_MODAL}`);
+    SLOTS.modal = n;
+    tick();
+    return backends().modal;
+  },
   '/api/tf/local': (body) => {
     if (body?.action === 'start' && local.state === 'service_down') local = { state: 'starting', until: now() + 8 };
     return backends().local;

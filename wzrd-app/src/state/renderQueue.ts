@@ -22,6 +22,7 @@ import {
   reorderJobs,
   tfBackends,
   tfLocalStart,
+  tfModalSlots,
   tfQueue,
   type ForeignJob,
   type Job,
@@ -268,6 +269,20 @@ export async function cancelQueued(job: Job) {
   }
   refreshJobs();
   refreshQueue();
+}
+
+/** Parallel Modal GPUs (1..max_slots): optimistic, then the hub's reply. Lowering it
+ *  never cancels a running render — the lane drains down to the new limit. */
+export async function setModalSlots(slots: number) {
+  const prev = useQueue.getState().backends;
+  if (prev) useQueue.setState({ backends: { ...prev, modal: { ...prev.modal, slots } } });
+  try {
+    const modal = await tfModalSlots(slots);
+    useQueue.setState((s) => ({ backends: s.backends ? { ...s.backends, modal } : s.backends }));
+  } catch (e) {
+    toast(`Parallel GPUs not changed: ${e}`, 'bad');
+    refreshQueue();
+  }
 }
 
 /** Start the desktop's job service (only offered while it's `service_down`). */

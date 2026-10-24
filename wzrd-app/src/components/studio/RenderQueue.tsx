@@ -14,7 +14,9 @@
 // to reorder (pointer events, so it works without HTML5 drag-and-drop), ⤒ to
 // the top, ⇄ to the other lane (not a finish: it's bound to its draft's
 // backend), ✕ cancel. Lane header: the backend's lamp + state, counts, time
-// to clear, and Start while the desktop's job service is down.
+// to clear, and Start while the desktop's job service is down; the Modal
+// lane's header holds the parallel-GPUs stepper (`ModalSlots`, also in the
+// Render panel) — hidden on a hub without `POST /api/tf/modal`.
 
 import { useEffect, useRef, useState } from 'react';
 import { listRecipes, mediaUrl, type ForeignJob, type Job, type QueueEntry, type TfBackend } from '../../api/hub';
@@ -34,6 +36,7 @@ import {
   moveToOtherLane,
   phaseText,
   reorderLane,
+  setModalSlots,
   startLocal,
   toTop,
   useLanes,
@@ -129,6 +132,7 @@ function Lane({ backend, jobs, compact }: { backend: TfBackend; jobs: QueueEntry
         <span className="text-[10px] text-fg3 num shrink-0">
           {running} run · {queued} queued{eta != null ? ` · ${fmtEta(eta)}` : ''}
         </span>
+        {backend === 'modal' && <ModalSlots compact />}
         {canStart && (
           <Btn size="xs" tone="deck" disabled={busy} onClick={start} title="Start the desktop's job service (textureflow-ctl start over SSH)">
             Start
@@ -350,6 +354,51 @@ function IconBtn({
     >
       {children}
     </button>
+  );
+}
+
+const slotsTitle = (n: number) =>
+  `Parallel GPUs: ${n} — up to ${n} Modal render${n === 1 ? '' : 's'} billed at once. ` +
+  'Lowering it never cancels a running render; the lane drains down to the new limit.';
+
+/** How many Modal GPU containers may render at once (1..max_slots). `compact`:
+ *  a − n + stepper for the lane header; else a labelled slider (Render panel).
+ *  Renders nothing on a hub that doesn't publish `max_slots`. */
+export function ModalSlots({ compact = false }: { compact?: boolean }) {
+  const modal = useQueue((s) => s.backends?.modal);
+  if (!modal?.max_slots || modal.max_slots < 2) return null;
+  const { slots, max_slots: max } = modal;
+  const set = (n: number) => n !== slots && n >= 1 && n <= max && setModalSlots(n);
+  if (compact) {
+    return (
+      <span className="flex items-center gap-0.5 shrink-0" title={slotsTitle(slots)}>
+        <span className="text-[10px] text-fg3 mr-0.5">GPUs</span>
+        <IconBtn onClick={() => set(slots - 1)} disabled={slots <= 1} title="One GPU fewer">
+          −
+        </IconBtn>
+        <span className="num text-[11px] text-fg w-3 text-center">{slots}</span>
+        <IconBtn onClick={() => set(slots + 1)} disabled={slots >= max} title={`One GPU more (max ${max})`}>
+          +
+        </IconBtn>
+      </span>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-0.5" title={slotsTitle(slots)}>
+      <span className="text-[11px] text-fg2">
+        Parallel GPUs: <span className="num text-fg">{slots}</span>
+        <span className="text-fg3"> — up to {slots} render{slots === 1 ? '' : 's'} billed at once</span>
+      </span>
+      <input
+        type="range"
+        min={1}
+        max={max}
+        step={1}
+        value={slots}
+        onChange={(e) => set(Number(e.target.value))}
+        className="w-full accent-[rgb(var(--deck))]"
+      />
+    </div>
   );
 }
 

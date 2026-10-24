@@ -58,6 +58,7 @@ import { Btn, Dot, Seg } from '../../ui/primitives';
 import type { TfBackend } from '../../api/hub';
 import { Fader } from '../../ui/Fader';
 import { AssetPicker } from '../../ui/media/AssetPicker';
+import { ModalSlots } from './RenderQueue';
 import { SpendLine, wouldExceedCap } from './SpendLine';
 
 type Kind = 'flow' | 'image' | 'video';
@@ -495,6 +496,7 @@ function BackendPick({ value, onChange }: { value: TfBackend; onChange: (b: TfBa
           </Btn>
         )}
       </div>
+      {value === 'modal' && <ModalSlots />}
     </Group>
   );
 }
