@@ -3,8 +3,9 @@
 //   ┌ roots + folder tree │ folder grid (static thumbs, badges, job tiles) │ monitor + record ┐
 //   └──────────────── style tray (the hub selection) · target folder ─────────────────────────┘
 //
-// The open folder is the target folder: renders started from here (or by
-// an agent reading `studio_selection()`) land in it. Keys (only while no
+// Renders started from here (or by an agent reading `studio_selection()`)
+// land in the target folder — a fixed folder picked on the tray's "Renders
+// land in" card; browsing doesn't change it. Keys (only while no
 // input has focus): arrows move (⇧ extends), space plays in the monitor,
 // 0–9 score (− clears), T tag, N note, M move, D add to the open show’s
 // active deck, U upscale the selected TextureFlow drafts (state/drafts.ts),

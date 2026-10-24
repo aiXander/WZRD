@@ -249,8 +249,13 @@ the hub's own side (routes, `library.db` schema, jobs) is
   comes up — agent tools called without `project=` act on it.
   `state/studio.ts`: open folder, listing (2 s poll while Studio is
   mounted), grid selection + cursor, "show ≤ N", monitor item, and the
-  mirror of the hub's L5 selection. The **open folder is the target
-  folder** (S1, written on open); grid selection → `items`; the tray →
+  mirror of the hub's L5 selection. The **target folder** (where renders
+  land, the selection's `target`) is **a fixed folder you pick** — browsing
+  never changes it (2026-10-24; it used to follow the open folder, S1).
+  `studio.ts::setTarget` writes it and, for a folder outside every library
+  root, adds a root (`/api/roots`) so its renders get indexed (toast says
+  so); the hub's `library.target_dir()` falls back to `inbox/` when unset or
+  gone. Grid selection → `items`; the tray →
   `styles` (debounced 300 ms; the poll reads it back, so an agent's
   edit shows in the tray; a pending write blocks the read-back). Labels
   are optimistic (`pendingLabels` survive a poll until the hub echoes).
@@ -265,8 +270,20 @@ the hub's own side (routes, `library.db` schema, jobs) is
   unpins, "★ Pin to show as…" = `NamePrompt` with the roles →
   `pinAsset(openShow, name, path)` — tags (agent tags ✦, read-only),
   notes, made-for chip, settings, inputs, "+ Styles"); `StyleTray` along
-  the bottom with "Renders land in". Tiles drag out as `application/x-wzrd-paths` (the tray takes
-  them). No telemetry subscriptions.
+  the bottom with the **"Renders land in" card**: click = native folder
+  dialog (`canCreateDirectories`, starts in the current target; browser
+  seat: a typed path), "show" = open it in the grid, no target = "inbox/
+  (click to choose)". No "Reveal in Finder": plugin-shell's `open` scope
+  only allows URLs, and widening it is a `src-tauri` config change.
+  **Tiles drag out as library paths with pointer events**
+  (`ui/media/pathDrag.ts`: `startPathDrag` on the source, `usePathDrop`
+  on a target; 5 px threshold, a ghost with thumb + count, the target
+  under the cursor lights up via `[data-path-drop]` hit-testing, the
+  trailing click is swallowed). Selected tiles drag together; ⇧/⌘-press
+  never starts a drag. Targets: the style tray (any path) and the Render
+  panel's Styles row, Shape input and Mask (images; the slots take the
+  first). The tile under the Monitor carries a small **MONITOR** chip
+  (tooltip "Showing in the Monitor"). No telemetry subscriptions.
 - **Render panel (R1)** — the side tab next to Record
   (`RenderPanel.tsx`, tab remembered in `localStorage wzrd.studio.side`):
   TextureFlow (recipe from `/api/recipes`; the tray's styles override the
@@ -603,6 +620,14 @@ what the native slot shows; `screencapture -l <windowid>` grabs the real
 window (underlay included) even when it is covered.
 
 ## Traps
+
+- **HTML5 drag-and-drop doesn't work inside the shell.** Tauri's native
+  drag-drop stays on (Finder drops into show setup, `useFileDrop.ts`), and
+  on macOS WKWebView it swallows in-page HTML5 drags — `drop` never reaches
+  the page (the grid → tray drag silently did nothing, found 2026-10-24).
+  Drag between panels with `ui/media/pathDrag.ts` (pointer events), and
+  never set `draggable` on a pointer-drag source: a native drag session
+  would cancel the pointer stream.
 
 - **Anything that can move a `<NativeSlot>` without resizing it must call
   `layoutStore.notifyLayout()`** (fires `wzrd:layout`, which NativeSlot

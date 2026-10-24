@@ -7,8 +7,11 @@
 // opens the full-screen Lightbox. TextureFlow drafts carry a DRAFT badge
 // (hours left on their server bundle; "↑" while a finish is queued); with
 // drafts selected the header offers "Upscale N" (= key U, state/drafts.ts).
-// The header's Queue button shows / hides the render queue under the grid. Tiles drag out as library paths (the
-// style tray takes them; D1's deck slots will too).
+// The header's Queue button shows / hides the render queue under the grid.
+// Tiles drag out as library paths (the selection when the pressed tile is in
+// it) with pointer events — `ui/media/pathDrag.ts`, not HTML5 DnD, which the
+// shell's native drag-drop swallows: the style tray and the Render panel's
+// slots take them.
 
 import { memo, useEffect, useRef, useState } from 'react';
 import { mediaUrl, startRender, type LibraryItem, type TfBrief } from '../../api/hub';
@@ -26,9 +29,8 @@ import {
 import { Btn } from '../../ui/primitives';
 import { JobTile } from '../../ui/media/JobTile';
 import { RecentlyDeleted } from '../../ui/media/RecentlyDeleted';
+import { startPathDrag } from '../../ui/media/pathDrag';
 import { sameDir } from '../../ui/media/types';
-
-export const LIBRARY_DRAG = 'application/x-wzrd-paths';
 
 const GRID_ID = 'studio-grid';
 
@@ -167,14 +169,13 @@ const Tile = memo(function Tile({
   return (
     <div
       ref={innerRef}
-      draggable
-      onDragStart={(e) => {
-        const st = useStudio.getState();
-        const paths = st.selected.includes(item.path) ? st.selected : [item.path];
-        e.dataTransfer.setData(LIBRARY_DRAG, JSON.stringify(paths));
-        e.dataTransfer.setData('text/plain', paths.join('\n'));
-        e.dataTransfer.effectAllowed = 'copy';
-      }}
+      onPointerDown={(e) =>
+        startPathDrag(e, () => {
+          const st = useStudio.getState();
+          const paths = st.selected.includes(item.path) ? st.selected : [item.path];
+          return { paths, thumb: thumb ?? null };
+        })
+      }
       onClick={(e) => clickItem(item.path, { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey })}
       onDoubleClick={() => useStudio.getState().setMonitor(item.path)}
       title={`${item.name}${item.tool ? ` · ${item.tool}` : ''}${item.notes ? `\n${item.notes}` : ''}`}
@@ -230,7 +231,18 @@ const Tile = memo(function Tile({
           DRAFT {draft}
         </span>
       )}
-      {playing && <span className="absolute bottom-7 right-1 text-[10px] text-deck">▶</span>}
+      {playing && (
+        <span
+          className="absolute bottom-7 right-1 flex items-center gap-1 px-1 py-[1px] rounded bg-black/75 border border-deck/60 text-[9px] font-semibold tracking-wider text-deck cursor-default"
+          title="Showing in the Monitor"
+        >
+          <svg width="9" height="8" viewBox="0 0 9 8" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden>
+            <rect x="0.6" y="0.6" width="7.8" height="5" rx="0.8" />
+            <path d="M3 7.4h3" />
+          </svg>
+          MONITOR
+        </span>
+      )}
       <button
         className="absolute top-6 right-1 w-6 h-6 rounded bg-black/75 border border-line2 text-[12px] leading-none text-fg2 hover:text-fg hover:border-fg4 opacity-0 group-hover:opacity-100 transition-opacity"
         title="Full-screen (F / Enter)"

@@ -2,8 +2,10 @@
 // grid selection + keyboard focus, what plays in the monitor, and the
 // mirror of the hub's Studio selection (L5 — style tray, items, target).
 //
-// - The open folder is the **target folder** (S1): new renders land where
-//   you're looking. Opening one writes `target` to the hub selection.
+// - The **target folder** (where new renders land) is a fixed folder the
+//   operator picks ("Renders land in" card, `chooseTarget`); browsing other
+//   folders never changes it (changed 2026-10-24 — it used to follow the open
+//   folder, S1). It's the hub selection's `target`; no target = `inbox/`.
 // - The listing polls every 2 s while Studio is mounted (A1), through the
 //   hub (which also indexes what's new — S3) or, hub down, the read-only
 //   library.db reader. Labels are optimistic: the tile changes on the key
@@ -13,7 +15,9 @@
 
 import { create } from 'zustand';
 import {
+  addRoot,
   deleteScored,
+  libraryRoots,
   getSelection,
   labelRenders,
   listFolder,
@@ -131,8 +135,6 @@ export async function openDir(dir: string) {
     }
   }
   await refreshListing();
-  // S1: the open folder is where new renders land.
-  writeSelection({ target: dir });
 }
 
 export function lastDir(): string | null {
@@ -345,6 +347,24 @@ export async function loadSelection() {
   } catch (e) {
     console.warn('selection read:', e);
   }
+}
+
+/** Where renders land from now on (the hub's selection `target`). A folder
+ *  outside every library root becomes a root, so its renders are indexed. */
+export async function setTarget(dir: string) {
+  writeSelection({ target: dir });
+  try {
+    const roots = await libraryRoots();
+    const inside = roots.some((r) => dir === r.path || dir.startsWith(r.path.replace(/\/+$/, '') + '/'));
+    if (!inside) {
+      await addRoot(dir);
+      toast(`Renders land in ${short(dir)} — added it to the library so they show up`, 'ok');
+      return;
+    }
+  } catch (e) {
+    console.warn('target root check:', e);
+  }
+  toast(`Renders land in ${short(dir)}`, 'ok');
 }
 
 export function addStyles(paths: string[]) {

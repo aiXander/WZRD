@@ -1,7 +1,7 @@
 // Studio's Render panel (studio plan R1, S16): start renders from the app,
 // no chat and no terminal. Every render is a non-blocking hub job (H2 —
 // `POST /api/render`), visible in the jobs pill and as a tile in the folder
-// it lands in (the open folder = the target, S1), exactly like an agent's.
+// it lands in (the target folder on the tray's "Renders land in" card), exactly like an agent's.
 //
 // - TextureFlow: a recipe (its style images + settings are the defaults;
 //   what's set here wins), or the style tray's images; the target region
@@ -53,7 +53,9 @@ import {
 } from '../../state/renderQueue';
 import { regionName } from '../../state/scene';
 import { useStore } from '../../state/store';
-import { itemByPath, short, useStudio } from '../../state/studio';
+import { addStyles, itemByPath, short, useStudio } from '../../state/studio';
+import { usePathDrop } from '../../ui/media/pathDrag';
+import { isImagePath } from '../../ui/media/types';
 import { Btn, Dot, Seg } from '../../ui/primitives';
 import type { TfBackend } from '../../api/hub';
 import { Fader } from '../../ui/Fader';
@@ -273,10 +275,12 @@ export function RenderPanel() {
           {kind === 'video' ? (
             <span className="text-fg2 truncate block">{startFrame ? short(startFrame) : '— select a still in the grid —'}</span>
           ) : (
-            <span className="text-fg2">
-              {styles.length ? `${styles.length} from the tray${styles.length > (kind === 'flow' ? 6 : 10) ? ' (first ones used)' : ''}` : 'none in the tray'}
-              {kind === 'flow' && recipe && styles.length ? ' — override the recipe’s' : ''}
-            </span>
+            <DropSlot onPaths={addStyles} accept={images}>
+              <span className="text-fg2">
+                {styles.length ? `${styles.length} from the tray${styles.length > (kind === 'flow' ? 6 : 10) ? ' (first ones used)' : ''}` : 'none in the tray — drag images here'}
+                {kind === 'flow' && recipe && styles.length ? ' — override the recipe’s' : ''}
+              </span>
+            </DropSlot>
           )}
         </Field>
         <Field label="Made for">
@@ -326,14 +330,16 @@ export function RenderPanel() {
             {show && (
               <>
                 <Group label="Shape input">
-                  <AssetPicker
-                    project={show}
-                    value={controlInput}
-                    onChange={setControlInput}
-                    suggest={['surface_lit', 'surface']}
-                    placeholder="— none —"
-                    compact
-                  />
+                  <DropSlot onPaths={(p) => setControlInput(p[0])} accept={images}>
+                    <AssetPicker
+                      project={show}
+                      value={controlInput}
+                      onChange={setControlInput}
+                      suggest={['surface_lit', 'surface']}
+                      placeholder="— none —"
+                      compact
+                    />
+                  </DropSlot>
                   {controlInput && (
                     <div className="flex items-center gap-2 mt-0.5">
                       <label className="flex items-center gap-1.5 text-[11px] text-fg2 shrink-0 cursor-pointer" title="ControlNet: the render follows this image's shapes / edges. Off = it only shows through black mask areas (and seeds img2img when denoise < 1)">
@@ -359,13 +365,15 @@ export function RenderPanel() {
                   )}
                 </Group>
                 <Group label="Mask (white = animated)">
-                  <AssetPicker
-                    project={show}
-                    value={diffusionMask}
-                    onChange={setDiffusionMask}
-                    placeholder="— none —"
-                    compact
-                  />
+                  <DropSlot onPaths={(p) => setDiffusionMask(p[0])} accept={images}>
+                    <AssetPicker
+                      project={show}
+                      value={diffusionMask}
+                      onChange={setDiffusionMask}
+                      placeholder="— none —"
+                      compact
+                    />
+                  </DropSlot>
                 </Group>
               </>
             )}
@@ -429,7 +437,7 @@ export function RenderPanel() {
             tone="deck"
             disabled={!args || busy || !!missing}
             onClick={() => (wouldExceed ? setOverCap(true) : go(false))}
-            title="Start the jobs; they land in the open folder"
+            title="Start the jobs; they land in the folder on the “Renders land in” card"
           >
             {busy ? 'Starting…' : `Render ${count}`}
           </Btn>
@@ -498,6 +506,19 @@ function BackendPick({ value, onChange }: { value: TfBackend; onChange: (b: TfBa
       </div>
       {value === 'modal' && <ModalSlots />}
     </Group>
+  );
+}
+
+const images = (paths: string[]) => paths.filter(isImagePath);
+
+/** A Render panel slot that takes library images dragged from the grid
+ *  (pointer drag, `ui/media/pathDrag.ts`); it lights up while one hovers. */
+function DropSlot({ onPaths, accept, children }: { onPaths: (p: string[]) => void; accept: (p: string[]) => string[]; children: React.ReactNode }) {
+  const { dropProps, hovering } = usePathDrop(onPaths, accept);
+  return (
+    <div {...dropProps} className={'rounded ' + (hovering ? 'ring-1 ring-deck bg-deck/10' : '')}>
+      {children}
+    </div>
   );
 }
 
