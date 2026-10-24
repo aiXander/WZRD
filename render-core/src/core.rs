@@ -2230,8 +2230,10 @@ impl Core {
     /// to a log line — the preview must never take the projector down.
     /// What it shows comes from the host's `PreviewParams` (D3): the program
     /// view runs the projector's exact uniforms (mix, live masters, warp,
-    /// test pattern); otherwise one leg — LIVE with the real masters, DESIGN
-    /// un-mastered (§5.4 convention) — then dim / photo / light weights.
+    /// test pattern); otherwise one leg with that leg's own brightness /
+    /// saturation masters (DESIGN was un-mastered until 2026-10-25 — the
+    /// Master/Sat faders then did nothing visible while authoring) — then
+    /// dim / photo / light weights.
     fn present_preview(&mut self) {
         if !self.preview_visible {
             return;
@@ -2271,7 +2273,14 @@ impl Core {
                 self.masters.saturation(),
                 self.mix,
             ),
-            Leg::Design => FinalPassUniforms::identity(),
+            // The design leg's own brightness/saturation (the Masters panel
+            // writes both legs), no mix — so the faders read on the monitor
+            // while authoring, not only on the projector.
+            Leg::Design => FinalPassUniforms::new(
+                self.design_masters.brightness(),
+                self.design_masters.saturation(),
+                0.0,
+            ),
         };
         (PreviewInput::Leg(leg), uniforms)
     }

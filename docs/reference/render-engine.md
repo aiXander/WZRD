@@ -106,7 +106,7 @@ agents.
   forwards physical size + `PreviewParams` to the render thread, which
   caps the drawable at composite resolution (the layer's resize gravity
   scales it). Rooms differ only in `PreviewParams` (`core.rs`): Perform =
-  the deck-toggle leg (DESIGN un-mastered, LIVE with real masters);
+  the deck-toggle leg, each with its own leg's brightness/saturation masters (DESIGN was un-mastered until 2026-10-25, so Master/Sat looked dead while authoring);
   Prepare = design + the pack's surface photo (`photo_weight` /
   `light_weight`, additive in linear light); Align = `program: true`, the
   exact projector final pass incl. the real §2.8 warp (LUT indexed by
@@ -789,8 +789,8 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   design leg (probe-gated like any apply). A crash mid-design can't eat
   the draft.
 - **Preview topology: one view, source toggle.** The single native
-  `PreviewTarget` samples either composite — LIVE with the real
-  brightness/saturation masters, DESIGN un-mastered — and no §2.8 warp,
+  `PreviewTarget` samples either composite, each with its own leg's
+  brightness/saturation masters — and no §2.8 warp,
   except in Align's program view (§1b). `preview.setSource` flips the leg
   when the slot doesn't pin one; the UI toggle lives in Perform's deck bar.
 - **The deck toggle is a full control switch (decision revised 2026-07-12,
