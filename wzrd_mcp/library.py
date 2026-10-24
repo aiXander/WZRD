@@ -334,9 +334,18 @@ def root_of(path: str | Path) -> Optional[str]:
 EMPTY_SELECTION = {"styles": [], "items": [], "target": None, "project": None}
 
 
+def _exists(p: Any) -> bool:
+    return isinstance(p, str) and (p.startswith(("http://", "https://")) or Path(p).exists())
+
+
 def selection() -> dict:
+    """The selection, minus tray/items entries whose file is gone (deleted, or a
+    temp folder cleaned up): a dead style path would otherwise refuse every render."""
     row = query_one("SELECT data FROM selection WHERE id=1")
-    return {**EMPTY_SELECTION, **(_loads(row["data"], {}) if row else {})}
+    data = {**EMPTY_SELECTION, **(_loads(row["data"], {}) if row else {})}
+    for k in ("styles", "items"):
+        data[k] = [p for p in data[k] or [] if _exists(p)]
+    return data
 
 
 def set_selection(patch: dict) -> dict:
