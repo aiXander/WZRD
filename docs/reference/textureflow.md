@@ -55,7 +55,7 @@ a model `summary` and a semver `version`; the deployed `textureflow` serves it f
   the tool gains them on the first hub start after the lab deploys it.
 - **Studio:** `GET /api/textureflow/spec` (= `tf_spec.public()`: the loaded spec + `source`, `app`,
   `target`). `RenderPanel.tsx` reads its knobs' ranges, steps and defaults from it (length, motion, shape
-  strength inside the curated 0.35–0.65 sweet spot, region size snap, whether Draft can send `draft`);
+  strength over its full range, region size snap, whether Draft can send `draft`);
   until it loads, TextureFlow can't be started.
 - Test: `python test.py textureflow` §9 + `spec_sources` (schema = spec + WZRD args, recipe arg dropped
   with a warning, cache vs snapshot, refresh, fallback app).

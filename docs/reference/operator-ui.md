@@ -288,17 +288,28 @@ the hub's own side (routes, `library.db` schema, jobs) is
   (`RenderPanel.tsx`, tab remembered in `localStorage wzrd.studio.side`):
   TextureFlow (recipe from `/api/recipes`; the tray's styles override the
   recipe's), Image (`nano_banana`) and Video (`kling_v25_image_to_video`,
-  5/10 s). "Made for" region → size = the region's aspect, long side = the
-  spec's default (`output_width`/`output_height` since spec 2.0; `width`/`height`
-  on older specs) and `region` in the args; TextureFlow's **Shape input**
-  (`AssetPicker` over the open show's assets, `surface_lit` / `surface`
-  first → `control_input`) with "Use as shape (ControlNet)" (→
-  `use_controlnet1` + `controlnet_strength1`, fader 0.35–0.65, default
-  0.45) and **Mask** (→ `diffusion_mask`), each sent only when set (those
-  two rows use a `<div>` group, not `Field`'s `<label>` — a label forwards
-  every click inside it to its first button); Draft = the final's settings +
+  5/10 s). "Made for" region → size = the aspect of the region's padded
+  `source_box` (the box the engine fits its clips into; `bbox` without one), long
+  side = the spec's default (`output_width`/`output_height` since spec 2.0;
+  `width`/`height` on older specs) and `region` in the args. It also **auto-fills
+  Shape input + Mask** with the region's crops (`GET /api/project/region_inputs` →
+  `provenance.region_inputs`: the pack mask + the show's `surface_lit` > `surface` >
+  pack surface, cut to `source_box`, cached in `<show>/regions/auto/`); a slot still
+  holding the auto crop follows the next region pick, a hand-picked one stays
+  ("auto · <region>" / "use <region>'s crop" under each). Why: the engine places
+  and masks a region's clip at playback, so the render only needs the crop, never
+  a full-canvas video. TextureFlow's **Shape input** (`AssetPicker` over the open
+  show's assets, `surface_lit` / `surface` first → `control_input`) with a
+  **shape strength** fader over the spec's full range (> 0 → `use_controlnet1` +
+  `controlnet_strength1`; 0 = off, the image then only shows through the mask's
+  black areas) and **Mask** (→ `diffusion_mask`), each sent only when set, each
+  with a × to clear (`Clearable`) (those two rows use a `<div>` group, not
+  `Field`'s `<label>` — a label forwards every click inside it to its first
+  button); Draft = the final's settings +
   `draft: true` when the spec has `draft` (≥ 2.2.0: the final's own first pass,
-  ≈ half the time), else minimum `n_steps`, no upscale; count 1–12. **Backend
+  ≈ half the time), else minimum `n_steps`, no upscale; how many = the `×N` chip by
+  Render (`CountPick`, a popover grid 1–12, default 1 — not a native `<select>`, whose
+  macOS menu draws light). **Backend
   Modal | Local** (TextureFlow only, `BackendPick`): a lamp + state word each from
   `/api/tf/backends`, one line explaining the chosen backend's state (and **Start**
   while the desktop's service is `service_down`), sent as `args.backend`; the choice
