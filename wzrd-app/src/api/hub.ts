@@ -55,6 +55,18 @@ export type LibraryItem = {
   notes: string | null;
   /** Absolute path of the cached thumbnail, or null. */
   thumb: string | null;
+  /** texture_flow renders: `record.textureflow` in brief (render queue plan,
+   *  "U asks"); absent from older hubs — `state/drafts.ts` reads the record then. */
+  tf?: TfBrief | null;
+};
+
+/** What a texture_flow render is in the draft → finish flow. */
+export type TfBrief = {
+  stage: 'draft' | 'finish' | 'full' | string | null;
+  request_id: string | null;
+  backend: TfBackend | null;
+  /** UTC ISO time the draft's bundle expires on its backend (drafts only). */
+  expires_at: string | null;
 };
 
 export type FolderListing = {
@@ -98,10 +110,29 @@ export type Selection = {
   project: string | null;
 };
 
+/** A TextureFlow backend: WZRD's Modal app or Xander's desktop GPU. */
+export type TfBackend = 'modal' | 'local';
+
+/** Live progress of a texture_flow job (render queue plan, hub contract). */
+export type JobProgress = {
+  phase: 'queued' | 'waiting_backend' | 'starting' | 'rendering' | 'downloading' | 'saving';
+  /** The server's stage name (`sample`, `upscale`, …) or null. */
+  stage: string | null;
+  step: number | null;
+  total: number | null;
+  /** 0..1, null when unknown. */
+  pct: number | null;
+  /** Seconds to done (queued: incl. the wait ahead), null when unknown. */
+  eta_s: number | null;
+  /** live = the backend reported a stage; estimate = the hub's time model only. */
+  source: 'live' | 'estimate';
+};
+
 export type Job = {
   job: string;
   tool: string;
-  status: 'running' | 'done' | 'failed' | 'cancelled' | 'lost';
+  /** `queued` = parked in the hub's lane for its backend, not sent yet. */
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'lost';
   by: 'agent' | 'app';
   args: Record<string, any>;
   started: number;
@@ -115,7 +146,55 @@ export type Job = {
   session: string | null;
   elapsed_s?: number;
   eta_s?: number | null;
+  /** texture_flow only: the lane it sits in. */
+  backend?: TfBackend | null;
+  /** 0-based position in its lane while queued, else null. */
+  lane_pos?: number | null;
+  /** A finish: bound to its draft's backend, can't move lanes. */
+  pinned?: boolean;
+  progress?: JobProgress | null;
 };
+
+/** The desktop job server, as the hub sees it: `off` = desktop unreachable,
+ *  `service_down` = SSH answers but the service doesn't, `idle` = server up
+ *  with the GPU released (boots on the next job), `waiting_gpu` = another
+ *  process holds the GPU (`gpu_holder`). */
+export type LocalState =
+  | 'unconfigured'
+  | 'off'
+  | 'service_down'
+  | 'starting'
+  | 'idle'
+  | 'waiting_gpu'
+  | 'ready'
+  | 'busy'
+  | 'down';
+export type ModalState = 'ready' | 'warm' | 'cold' | 'unknown';
+export type ModalLane = { state: ModalState; slots: number; running: number; queued: number };
+export type LocalLane = {
+  state: LocalState;
+  detail: string | null;
+  gpu: string | null;
+  /** Who holds the GPU while `waiting_gpu` (e.g. a lab batch's command). */
+  gpu_holder: string | null;
+  vram_free_gb: number | null;
+  running: number;
+  queued: number;
+};
+export type TfBackends = { modal: ModalLane; local: LocalLane };
+
+/** Another client's job on the desktop GPU (e.g. a lab agent): shown, never touched. */
+export type ForeignJob = {
+  foreign: true;
+  job_id: string;
+  client: string | null;
+  label: string | null;
+  state: string;
+  progress: JobProgress | null;
+};
+export type QueueEntry = Job | ForeignJob;
+/** Both lanes in run order (running first) — `GET /api/tf/queue`. */
+export type TfQueue = Record<TfBackend, QueueEntry[]>;
 
 export type Spend = {
   today_usd: number;
@@ -136,9 +215,29 @@ export const hubRestart = () => call<HubStatus>('hub_restart');
 export const onHubStatus = (h: (s: HubStatus) => void): Promise<UnlistenFn> =>
   listenEvent<HubStatus>('hub:status', h);
 
-/** One `/api` call through the shell. Rejects with the hub's `{error}`. */
-export const hubCall = <T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown) =>
+type Method = 'GET' | 'POST' | 'PUT';
+const shellHubCall = <T>(method: Method, path: string, body?: unknown) =>
   call<T>('hub_call', { method, path, body: body ?? null });
+
+/** Dev-only render-queue mock (`api/hubMock.ts`): opt in with `?hubmock=1`
+ *  (sticky in localStorage, `?hubmock=0` clears). Never in a build. */
+const HUB_MOCK = import.meta.env.DEV && hubMockFlag();
+
+function hubMockFlag(): boolean {
+  try {
+    const q = new URLSearchParams(window.location.search).get('hubmock');
+    if (q != null) localStorage.setItem('wzrd.hubMock', q === '1' ? '1' : '0');
+    return localStorage.getItem('wzrd.hubMock') === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** One `/api` call through the shell. Rejects with the hub's `{error}`. */
+export const hubCall = <T>(method: Method, path: string, body?: unknown): Promise<T> =>
+  HUB_MOCK
+    ? import('./hubMock').then((m) => m.mockHubCall<T>(method, path, body, shellHubCall))
+    : shellHubCall<T>(method, path, body);
 
 const q = (params: Record<string, string | number | undefined>) =>
   Object.entries(params)
@@ -221,6 +320,18 @@ export const startRender = (tool: RenderTool, args: Record<string, unknown>, cou
 export const estimateRender = (tool: RenderTool, args: Record<string, unknown>, count = 1) =>
   hubCall<Estimate>('POST', '/api/estimate', { tool, args, count });
 export const cancelJob = (job: string) => hubCall<unknown>('POST', '/api/jobs/cancel', { job });
+
+// ---------- the TextureFlow render queue (hub lanes per backend) ----------
+
+export const tfBackends = () => hubCall<TfBackends>('GET', '/api/tf/backends');
+export const tfQueue = () => hubCall<TfQueue>('GET', '/api/tf/queue');
+/** Start the desktop's job service (the hub runs `textureflow-ctl start` over SSH). */
+export const tfLocalStart = () => hubCall<LocalLane>('POST', '/api/tf/local', { action: 'start' });
+/** The queued jobs of one lane in their new order. */
+export const reorderJobs = (backend: TfBackend, order: string[]) =>
+  hubCall<{ order: string[] }>('POST', '/api/jobs/reorder', { backend, order });
+/** A queued, unpinned job changes lane (appended at its end). */
+export const moveJob = (job: string, backend: TfBackend) => hubCall<Job>('POST', '/api/jobs/move', { job, backend });
 
 export type Recipe = {
   name: string;

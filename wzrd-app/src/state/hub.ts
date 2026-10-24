@@ -126,9 +126,9 @@ async function feedLoop() {
         continue;
       }
       const st = useHub.getState();
-      const running = st.jobs.some((j) => j.status === 'running');
+      const running = st.jobs.some((j) => j.status === 'running' || j.status === 'queued');
       try {
-        // While something runs, poll briefly so elapsed / ETA tick.
+        // While something runs or waits, poll briefly so elapsed / ETA tick.
         const feed = await jobsFeed(st.jobsVersion ?? undefined, running ? 2 : 20);
         useHub.getState().setFeed(feed.version, feed.jobs, feed.spend);
       } catch {

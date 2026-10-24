@@ -44,8 +44,9 @@ Every scalar now uses the effect descriptor's `min`/`max` (`LayerParams.tsx
 
 `TopBar.tsx` is shared: project menu (`ProjectMenu.tsx`), rooms (Studio | Prepare | Perform as tabs — Align is a once-per-gig room, so it and Debug live in the ⚙ **Setup** menu with the panel-layout controls; while you're in one it shows as an extra active pill; a stored `wzrd.route=align` boots into Perform), compact DESIGN|LIVE + TAKE outside Perform,
 tempo (beat lamps from the `transport` channel, BPM double-click/scroll,
-TAP, `1` = bar line here), the **jobs pill** (running renders · $ today,
-`JobsPill.tsx`) and **hub lamp** (`HubLamp.tsx`) — both "Studio + the hub"
+TAP, `1` = bar line here), the **jobs pill** (running/queued renders per
+TextureFlow backend + a thin aggregate progress bar · $ today; its popover
+holds the render queue, `JobsPill.tsx`) and **hub lamp** (`HubLamp.tsx`) — both "Studio + the hub"
 below — health (Audio / FPS / reload verdict / Engine —
 a restart button while the engine is down), ADOPT for agent edits, help
 overlay (`?`), toasts. While the engine is down a red banner under the bar
@@ -280,7 +281,13 @@ the hub's own side (routes, `library.db` schema, jobs) is
   two rows use a `<div>` group, not `Field`'s `<label>` — a label forwards
   every click inside it to its first button); Draft = the final's settings +
   `draft: true` when the spec has `draft` (≥ 2.2.0: the final's own first pass,
-  ≈ half the time), else minimum `n_steps`, no upscale; count 1–12. `/api/estimate` (debounced) shows ≈ cost vs today's spend;
+  ≈ half the time), else minimum `n_steps`, no upscale; count 1–12. **Backend
+  Modal | Local** (TextureFlow only, `BackendPick`): a lamp + state word each from
+  `/api/tf/backends`, one line explaining the chosen backend's state (and **Start**
+  while the desktop's service is `service_down`), sent as `args.backend`; the choice
+  is remembered per machine (`localStorage wzrd.tf.backend`, try/catch); Local is
+  disabled when `unconfigured`. A render is accepted whatever the state — it waits
+  in that backend's lane. `/api/estimate` (debounced) shows ≈ cost vs today's spend;
   over the cap → confirm → `allow_over_cap`. Go = `POST /api/render`
   (`wait=false` jobs, `by: app`), landing in the open folder — the hub
   pins it at submit. Job tiles carry ✕ = `/api/jobs/cancel`.
@@ -292,10 +299,41 @@ the hub's own side (routes, `library.db` schema, jobs) is
   (`FinishDraft`, on a texture_flow record whose `record.textureflow.stage`
   is `draft`) → `texture_flow({finish_from: request_id})`; past
   `draft.expires_at` it becomes **Draft expired · re-draft** (same args +
-  seed + `draft`). Contract: [textureflow.md](textureflow.md). **Make playable** (record footer, or the
+  seed + `draft`); "Upscaling…" while a finish of it is queued. The logic is
+  `state/drafts.ts::finishDraft`, shared with key **U** / the grid's
+  **Upscale N** (every selected draft; dedupes by render id and skips a draft
+  whose finish is already queued). Grid tiles of drafts carry a **DRAFT** badge
+  (hours its bundle has left, `⌛` expired, `↑` finish queued): `item.tf` when
+  the hub sends it, else each texture_flow item's record read once and cached
+  per render id (`loadBriefs`). Contract: [textureflow.md](textureflow.md). **Make playable** (record footer, or the
   folder's "Make playable (n)" for every video without a HAP sibling)
   queues `to_hap`; the `.mov` lands beside the source. `+ Deck <name>`
   adds to the open show's active deck (see "Clip decks").
+- **Render queue** (render queue plan, 2026-10-24) — `components/studio/RenderQueue.tsx`
+  + `state/renderQueue.ts`, docked under the grid (`Split studio.center`, the grid
+  header's **Queue n** button shows/hides it, `localStorage wzrd.studio.queue`) and
+  compact in the jobs pill's popover. Two lanes, Modal and Local, side by side or
+  one (`Both | Modal | Local`, `wzrd.queue.lanes`). Lanes come from `GET
+  /api/tf/queue` (run order; the local lane can hold `foreign` entries = another
+  client's job on the desktop GPU, drawn dashed and read-only), polled every 2 s
+  and on every `/api/jobs` change while something holds `useRenderQueue`; a hub
+  without that route falls back to deriving lanes from the job feed. Card: label
+  (recipe / prompt / first style image thumb; an Upscale shows its draft, found in
+  the open folder by the request id in its file name), DRAFT/UPSCALE/FULL badge,
+  `phaseText` ("sampling 7/12", "waiting for the desktop"), bar = `progress.pct`
+  (sweeping sliver when null, striped + "≈" ETA when `source: "estimate"`).
+  Queued cards: **pointer-event drag** to reorder (not HTML5 DnD — CDP's synthetic
+  drag can't fire that; insertion line, 4 px threshold) → `/api/jobs/reorder`
+  with the lane's WZRD queued ids, shown optimistically until a newer snapshot;
+  hover ⤒ to top, ⇄ other lane (`/api/jobs/move`, disabled when `pinned`), ✕
+  cancel. Lane header: lamp + state (`backendLook`: local `idle` is fine, `waiting_gpu`
+  names `gpu_holder`), running/queued counts, time to clear (max ETA in the lane),
+  **Start** only when `service_down`. Finished jobs leave the lane; their files
+  appear in the grid as before. **Dev mock:** `api/hubMock.ts`, opt in with
+  `?hubmock=1` (sticky in localStorage, `?hubmock=0` clears; `import.meta.env.DEV`
+  only) — simulates both lanes, a foreign job and the routes above, never sends a
+  texture_flow render to the real hub; `hubCall('POST','/__mock/local',{state})`
+  forces a local state.
 - **Monitor (S10):** HAP → `<NativeSlot id="studio">` + `previewFile(path)`
   (engine `preview.file`, render-engine.md §1b — no leg renders);
   mp4/webm → `<video>`; stills → `<img>`; DXV/other → thumb + "Make
@@ -308,7 +346,8 @@ the hub's own side (routes, `library.db` schema, jobs) is
   items (← → move the cursor with it; HAP/DXV show their thumb — the
   monitor plays them), `0–9` score, `−`
   clears it, `T` tags (autocomplete from every tag in use, Tab completes),
-  `N` notes (⌘Enter), `D` add to the open show's active deck, `M` move (folders the tree knows, or a typed
+  `N` notes (⌘Enter), `D` add to the open show's active deck, `U` upscale the
+  selected TextureFlow drafts (`state/drafts.ts::upscaleDrafts`), `M` move (folders the tree knows, or a typed
   absolute path), `⌫` delete media — **soft** (show-setup G6: the hub
   moves the files to a trash for 30 min; the toast carries **Undo**, the
   grid's Trash button restores later; records kept — S7; a

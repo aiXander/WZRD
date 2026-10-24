@@ -7,7 +7,11 @@
 //   what's set here wins), or the style tray's images; the target region
 //   sets the aspect (long side = the default output width, snapped to its
 //   step; pre-2.0 specs: `width`) and is recorded as "made for"; length /
-//   motion / seed; Draft or Final. With a spec that has `draft` (≥ 2.2.0) a
+//   motion / seed; Draft or Final; the backend — Modal | Local (the desktop
+//   GPU, $0), each with its state lamp from `/api/tf/backends`, the choice
+//   remembered per machine (`state/renderQueue.ts`), sent as `args.backend`.
+//   A render is accepted whatever the backend's state: it waits in that
+//   backend's lane of the render queue (`RenderQueue.tsx`). With a spec that has `draft` (≥ 2.2.0) a
 //   Draft is the Final's own first pass (same settings + `draft: true`),
 //   finished later from its record (Upscale, RecordPanel); older specs: the
 //   fewest steps with the upscales off. Optional shape input
@@ -37,10 +41,21 @@ import {
   type TfSpec,
 } from '../../api/hub';
 import { refreshJobs, useHub } from '../../state/hub';
+import {
+  BACKENDS,
+  BACKEND_LABEL,
+  backendLook,
+  preferredBackend,
+  setPreferredBackend,
+  startLocal,
+  useQueue,
+  useRenderQueue,
+} from '../../state/renderQueue';
 import { regionName } from '../../state/scene';
 import { useStore } from '../../state/store';
 import { itemByPath, short, useStudio } from '../../state/studio';
-import { Btn, Seg } from '../../ui/primitives';
+import { Btn, Dot, Seg } from '../../ui/primitives';
+import type { TfBackend } from '../../api/hub';
 import { Fader } from '../../ui/Fader';
 import { AssetPicker } from '../../ui/media/AssetPicker';
 import { SpendLine, wouldExceedCap } from './SpendLine';
@@ -104,6 +119,12 @@ export function RenderPanel() {
   const [useShape, setUseShape] = useState(true);
   const [cnStrengthSet, setCnStrength] = useState<number | null>(null);
   const [diffusionMask, setDiffusionMask] = useState<string | null>(null);
+  const [backend, setBackendState] = useState<TfBackend>(preferredBackend);
+  const setBackend = (b: TfBackend) => {
+    setBackendState(b);
+    setPreferredBackend(b);
+  };
+  useRenderQueue(kind === 'flow');
   const showDir = useStore((s) => s.project?.dir);
   const show = showDir ? showDir.replace(/\/+$/, '').split('/').pop() ?? null : null;
 
@@ -145,6 +166,7 @@ export function RenderPanel() {
         if (useShape) Object.assign(a, { use_controlnet1: true, controlnet_strength1: Math.round(cnStrength * 100) / 100 });
       }
       if (diffusionMask) a.diffusion_mask = diffusionMask;
+      a.backend = backend;
       return a;
     }
     if (!prompt.trim()) return null;
@@ -153,7 +175,7 @@ export function RenderPanel() {
     }
     if (!startFrame) return null;
     return { ...common, prompt: prompt.trim(), image_url: startFrame, duration: seconds >= 8 ? '10' : '5' };
-  }, [kind, recipe, styles, region, regionLayer, seconds, motion, seed, final, prompt, startFrame, controlInput, useShape, cnStrength, diffusionMask, P, tfSpec]);
+  }, [kind, recipe, styles, region, regionLayer, seconds, motion, seed, final, prompt, startFrame, controlInput, useShape, cnStrength, diffusionMask, backend, P, tfSpec]);
 
   // The estimate follows the form (debounced).
   const argsKey = JSON.stringify([kind, args, count]);
@@ -178,7 +200,8 @@ export function RenderPanel() {
     setBusy(true);
     try {
       const r = await startRender(TOOL[kind], allowOverCap ? { ...args, allow_over_cap: true } : args, count);
-      useStore.getState().toast(`Started ${r.jobs.length} ${kind === 'flow' ? 'TextureFlow' : kind} job${r.jobs.length === 1 ? '' : 's'} → ${short(r.jobs[0]?.dest ?? '')}`, 'ok');
+      const where = kind === 'flow' ? ` on ${BACKEND_LABEL[backend]}` : '';
+      useStore.getState().toast(`Started ${r.jobs.length} ${kind === 'flow' ? 'TextureFlow' : kind} job${r.jobs.length === 1 ? '' : 's'}${where} → ${short(r.jobs[0]?.dest ?? '')}`, 'ok');
       setOverCap(false);
       refreshJobs();
     } catch (e) {
@@ -217,6 +240,7 @@ export function RenderPanel() {
             { id: 'video', label: 'Video' },
           ]}
         />
+        {kind === 'flow' && <BackendPick value={backend} onChange={setBackend} />}
         {kind === 'flow' && (
           <Field label="Recipe">
             <select value={recipe} onChange={(e) => setRecipe(e.target.value)} className="w-full h-7 bg-bg border border-line rounded px-1 text-[12px]">
@@ -411,6 +435,67 @@ export function RenderPanel() {
         )}
       </footer>
     </div>
+  );
+}
+
+/** Modal | Local with a state lamp each; under it one line on the chosen
+ *  backend's state, and Start while the desktop's job service is down. */
+function BackendPick({ value, onChange }: { value: TfBackend; onChange: (b: TfBackend) => void }) {
+  const backends = useQueue((s) => s.backends);
+  const unconfigured = backends?.local.state === 'unconfigured';
+  // A machine without a desktop GPU never sends to Local.
+  useEffect(() => {
+    if (unconfigured && value === 'local') onChange('modal');
+  }, [unconfigured, value]);
+  const look = backendLook(value, backends);
+  const [busy, setBusy] = useState(false);
+  return (
+    <Group label="Backend">
+      <div className="inline-flex self-start rounded-md border border-line bg-panel2 p-[2px]">
+        {BACKENDS.map((b) => {
+          const l = backendLook(b, backends);
+          const off = b === 'local' && unconfigured;
+          return (
+            <button
+              key={b}
+              type="button"
+              disabled={off}
+              onClick={() => onChange(b)}
+              title={`${BACKEND_LABEL[b]} — ${l.line}`}
+              className={
+                'flex items-center gap-1.5 h-[22px] px-2.5 rounded-[4px] text-[11px] font-medium transition-colors ' +
+                (value === b ? 'bg-raised text-fg shadow-inset' : 'text-fg3 hover:text-fg') +
+                (off ? ' opacity-40 pointer-events-none' : '')
+              }
+            >
+              <Dot tone={l.tone} />
+              {BACKEND_LABEL[b]}
+              <span className="text-[10px] text-fg3 font-normal">{l.word}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex items-start gap-2">
+        <span className="text-[10px] text-fg3 leading-snug flex-1">
+          {look.line}
+        </span>
+        {value === 'local' && backends?.local.state === 'service_down' && (
+          <Btn
+            size="xs"
+            tone="deck"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              await startLocal();
+              setBusy(false);
+            }}
+            title="Start the desktop's job service (textureflow-ctl start over SSH)"
+          >
+            Start
+          </Btn>
+        )}
+      </div>
+    </Group>
   );
 }
 

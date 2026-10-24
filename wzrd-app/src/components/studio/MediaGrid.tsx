@@ -4,12 +4,17 @@
 // "show ≤ N" filter and "delete ≤ N in this folder" (to the trash, like
 // every delete — show-setup G6; the header's Trash button restores). Click /
 // ⇧ / ⌘ select; double-click plays in the monitor; hover ⤢ (or F / Enter)
-// opens the full-screen Lightbox. Tiles drag out as library paths (the
+// opens the full-screen Lightbox. TextureFlow drafts carry a DRAFT badge
+// (hours left on their server bundle; "↑" while a finish is queued); with
+// drafts selected the header offers "Upscale N" (= key U, state/drafts.ts).
+// The header's Queue button shows / hides the render queue under the grid. Tiles drag out as library paths (the
 // style tray takes them; D1's deck slots will too).
 
 import { memo, useEffect, useRef, useState } from 'react';
-import { mediaUrl, startRender, type LibraryItem } from '../../api/hub';
+import { mediaUrl, startRender, type LibraryItem, type TfBrief } from '../../api/hub';
 import { refreshJobs, useHub } from '../../state/hub';
+import { briefOf, hoursLeft, isDraft, loadBriefs, upscaleDrafts, useDrafts } from '../../state/drafts';
+import { setQueueOpen, useQueue } from '../../state/renderQueue';
 import { useStore } from '../../state/store';
 import {
   clickItem,
@@ -49,6 +54,15 @@ export function MediaGrid() {
   const sel = new Set(selected);
   const running = jobs.filter((j) => j.status === 'running' && sameDir(j.dest, dir));
   const focusRef = useRef<HTMLDivElement | null>(null);
+  const briefs = useDrafts((s) => s.briefs);
+  // Finishes in flight, by the draft's request id (the tile shows "↑").
+  const finishing = new Set(
+    jobs.filter((j) => (j.status === 'queued' || j.status === 'running') && j.args?.finish_from).map((j) => String(j.args.finish_from))
+  );
+
+  useEffect(() => {
+    if (listing) loadBriefs(listing.items);
+  }, [listing]);
 
   useEffect(() => {
     focusRef.current?.scrollIntoView({ block: 'nearest' });
@@ -66,10 +80,12 @@ export function MediaGrid() {
           {running.length ? ` · rendering ${running.length}` : ''}
         </span>
         <div className="flex-1" />
+        <UpscaleSelected />
         <MakeFolderPlayable />
         <ScoreFilter />
         <DeleteScored />
         <RecentlyDeleted />
+        <QueueToggle />
       </header>
       {deleteArmed > 1 && (
         <div className="px-3 py-1 text-[11px] bg-bad/15 text-bad border-b border-bad/40">
@@ -94,6 +110,7 @@ export function MediaGrid() {
               focused={focus === it.path}
               playing={monitor === it.path}
               innerRef={focus === it.path ? focusRef : undefined}
+              draft={draftBadge(it, briefs, finishing)}
             />
           ))}
           {listing?.pending.map((p) => (
@@ -116,18 +133,33 @@ export function MediaGrid() {
   );
 }
 
+/** A draft's tile badge — `↑` (a finish is queued), `⌛` (bundle expired) or
+ *  the time its bundle has left ("7h") — a string, so the memoised tile
+ *  only re-renders when it changes. Null = not a draft. */
+type DraftBadge = string | null;
+
+function draftBadge(item: LibraryItem, briefs: Record<string, TfBrief | null>, finishing: Set<string>): DraftBadge {
+  const b = briefOf(item, briefs);
+  if (!b || !isDraft(b)) return null;
+  if (b.request_id && finishing.has(b.request_id)) return '↑';
+  const h = hoursLeft(b.expires_at);
+  return h >= 1 ? `${Math.floor(h)}h` : h > 0 ? `${Math.max(1, Math.round(h * 60))}m` : '⌛';
+}
+
 const Tile = memo(function Tile({
   item,
   selected,
   focused,
   playing,
   innerRef,
+  draft,
 }: {
   item: LibraryItem;
   selected: boolean;
   focused: boolean;
   playing: boolean;
   innerRef?: React.Ref<HTMLDivElement>;
+  draft: DraftBadge;
 }) {
   const [broken, setBroken] = useState(false);
   const thumb = item.thumb ?? (item.kind === 'image' ? item.path : null);
@@ -180,6 +212,24 @@ const Tile = memo(function Tile({
       >
         {(item.codec ?? item.kind ?? '?').toUpperCase().slice(0, 5)}
       </span>
+      {draft && (
+        <span
+          className={
+            'absolute top-1 text-[9px] font-bold tracking-wider px-1 py-[1px] rounded border ' +
+            (item.score != null ? 'left-8 ' : 'left-1 ') +
+            (draft === '⌛' ? 'bg-black/75 text-fg3 border-line2' : 'bg-black/75 text-amber border-amber/60')
+          }
+          title={
+            draft === '↑'
+              ? 'Draft — its upscale is in the render queue'
+              : draft === '⌛'
+              ? 'Draft — its server bundle expired; U re-renders it exactly (then upscale that one)'
+              : `Draft — U upscales it (bundle kept ${draft} more)`
+          }
+        >
+          DRAFT {draft}
+        </span>
+      )}
       {playing && <span className="absolute bottom-7 right-1 text-[10px] text-deck">▶</span>}
       <button
         className="absolute top-6 right-1 w-6 h-6 rounded bg-black/75 border border-line2 text-[12px] leading-none text-fg2 hover:text-fg hover:border-fg4 opacity-0 group-hover:opacity-100 transition-opacity"
@@ -208,6 +258,41 @@ const Tile = memo(function Tile({
     </div>
   );
 });
+
+/** "Upscale N": the selected TextureFlow drafts (same as key U). */
+function UpscaleSelected() {
+  const selected = useStudio((s) => s.selected);
+  const listing = useStudio((s) => s.listing);
+  const briefs = useDrafts((s) => s.briefs);
+  const sel = new Set(selected);
+  const ids = new Set(
+    (listing?.items ?? []).filter((i) => sel.has(i.path) && isDraft(briefOf(i, briefs))).map((i) => i.render_id)
+  );
+  if (!ids.size) return null;
+  return (
+    <Btn
+      size="sm"
+      tone="deck"
+      onClick={() => upscaleDrafts((listing?.items ?? []).filter((i) => sel.has(i.path)))}
+      title="Finish the selected drafts (the upscale passes, on the backend that rendered each); expired ones re-render first. Key U"
+    >
+      Upscale {ids.size} <span className="text-fg3">U</span>
+    </Btn>
+  );
+}
+
+/** Show / hide the render queue under the grid (count of jobs in it). */
+function QueueToggle() {
+  const open = useQueue((s) => s.open);
+  const n = useHub((s) =>
+    s.jobs.filter((j) => j.tool === 'texture_flow' && (j.status === 'queued' || j.status === 'running')).length
+  );
+  return (
+    <Btn size="sm" tone="ghost" active={open} onClick={() => setQueueOpen(!open)} title="Show / hide the render queue (Modal + Local lanes)">
+      Queue{n ? <span className="num text-deck">{n}</span> : null}
+    </Btn>
+  );
+}
 
 /** Videos in this folder the engine can't play yet and that have no HAP
  *  beside them (S8) — "Make playable" queues a `to_hap` job for each. */

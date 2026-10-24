@@ -7,10 +7,13 @@
 // an agent reading `studio_selection()`) land in it. Keys (only while no
 // input has focus): arrows move (⇧ extends), space plays in the monitor,
 // 0–9 score (− clears), T tag, N note, M move, D add to the open show’s
-// active deck, F / Enter full-screen (ui/media/Lightbox over the folder),
+// active deck, U upscale the selected TextureFlow drafts (state/drafts.ts),
+// F / Enter full-screen (ui/media/Lightbox over the folder),
 // ⌫ delete media (to the trash for 30 min, Undo in the toast; records are
 // kept; a multi-selection needs a second ⌫ within 2 s), Esc deselects.
 // Every key is off while a modal / lightbox is open (show-setup G11).
+// Under the grid: the render queue (Modal + Local lanes, RenderQueue.tsx),
+// shown / hidden by the grid header's Queue button (remembered per machine).
 // No telemetry subscriptions here — the only engine use is the monitor's
 // `preview.file`.
 
@@ -21,6 +24,9 @@ import { MediaGrid, gridColumns } from '../components/studio/MediaGrid';
 import { Monitor } from '../components/studio/Monitor';
 import { RecordPanel } from '../components/studio/RecordPanel';
 import { RenderPanel } from '../components/studio/RenderPanel';
+import { RenderQueue } from '../components/studio/RenderQueue';
+import { upscaleDrafts } from '../state/drafts';
+import { setQueueOpen, useQueue } from '../state/renderQueue';
 import { StyleTray } from '../components/studio/StyleTray';
 import { KeyPrompt, type PromptKind } from '../components/studio/KeyPrompt';
 import { Lightbox } from '../ui/media/Lightbox';
@@ -93,6 +99,7 @@ export function Studio() {
   const mediaRoot = useHub((s) => s.status?.media_root);
   const dir = useStudio((s) => s.dir);
   const [prompt, setPrompt] = useState<PromptKind | null>(null);
+  const queueOpen = useQueue((s) => s.open);
   const armedDelete = useRef<number>(0);
   useJobsFeed();
 
@@ -165,6 +172,10 @@ export function Studio() {
         case 'M':
           e.preventDefault();
           return setPrompt('move');
+        case 'u':
+        case 'U':
+          e.preventDefault();
+          return void upscaleDrafts(targets());
         case 'f':
         case 'F':
         case 'Enter':
@@ -204,7 +215,16 @@ export function Studio() {
           <FolderTree />
         </Pane>
         <Pane id="grid" fill min={360} label="Folder">
-          <MediaGrid />
+          <Split id="studio.center" dir="col" className="h-full min-h-0" rearrange={false}>
+            <Pane id="media" fill min={160} label="Folder">
+              <MediaGrid />
+            </Pane>
+            {queueOpen && (
+              <Pane id="queue" size="320px" min={120} label="Render queue">
+                <RenderQueue onClose={() => setQueueOpen(false)} />
+              </Pane>
+            )}
+          </Split>
         </Pane>
         <Pane id="side" size="400px" min={300} label="Monitor + record">
           <div className="h-full min-h-0 flex flex-col gap-2">

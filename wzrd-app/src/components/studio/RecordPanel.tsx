@@ -15,7 +15,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { libraryRecord, startRender, type LibraryItem, type RenderRecord, type RenderTool } from '../../api/hub';
 import { activeDeck, addToDeck, useDecks } from '../../state/decks';
-import { refreshJobs } from '../../state/hub';
+import { refreshJobs, useHub } from '../../state/hub';
+import { finishDraft, hoursLeft } from '../../state/drafts';
 import { useStore } from '../../state/store';
 import { addStyles, removeTag, setScore, short, targets, useStudio } from '../../state/studio';
 import { Btn } from '../../ui/primitives';
@@ -237,36 +238,40 @@ function MoreLikeThis({ rec }: { rec: RenderRecord }) {
   );
 }
 
-/** Hours left before a draft bundle expires (negative = expired), from its UTC `expires_at`. */
-function hoursLeft(expiresAt: string | undefined): number {
-  const t = expiresAt ? Date.parse(expiresAt) : NaN;
-  return Number.isFinite(t) ? (t - Date.now()) / 3.6e6 : -1;
-}
-
 /** Draft → pick → finish: finish this draft (the final's first pass) from
- *  the server's bundle, or re-render it exactly once the bundle expired. */
+ *  the server's bundle, or re-render it exactly once the bundle expired
+ *  (`state/drafts.ts`; key U does the same for every selected draft). */
 function FinishDraft({ rec }: { rec: RenderRecord }) {
   const [busy, setBusy] = useState(false);
   const tf = rec.record.textureflow as { request_id?: string; draft?: { expires_at?: string } | null };
   const left = hoursLeft(tf.draft?.expires_at);
   const live = !!tf.request_id && left > 0;
+  const pending = useHub((s) =>
+    s.jobs.some((j) => (j.status === 'queued' || j.status === 'running') && j.args?.finish_from === tf.request_id)
+  );
   const run = async () => {
-    // Expired: the same args + seed as a new draft (the same first pass), finished afterwards.
-    const { model: _model, ...again } = (rec.job_args ?? rec.record.args ?? {}) as Record<string, unknown>;
-    const args = live ? { finish_from: tf.request_id } : { ...again, seed: rec.record.args?.seed, draft: true };
     setBusy(true);
     try {
-      await startRender('texture_flow', args);
-      useStore.getState().toast(live ? 'Upscaling the draft' : 'Re-rendering the expired draft', 'ok');
-      refreshJobs();
+      const r = await finishDraft(rec);
+      if (r !== 'skip') {
+        useStore.getState().toast(r === 'upscale' ? 'Upscaling the draft' : 'Re-rendering the expired draft', 'ok');
+        refreshJobs();
+      }
     } catch (e) {
       useStore.getState().toast(`${live ? 'Upscale' : 'Re-draft'} refused: ${e}`, 'bad');
     } finally {
       setBusy(false);
     }
   };
+  if (live && pending) {
+    return (
+      <Btn size="sm" disabled title="A finish of this draft is already in the render queue">
+        Upscaling…
+      </Btn>
+    );
+  }
   return live ? (
-    <Btn size="sm" tone="deck" disabled={busy} onClick={run} title="Finish this draft: the upscale passes only, from its saved first pass (same seed and composition)">
+    <Btn size="sm" tone="deck" disabled={busy} onClick={run} title="Finish this draft: the upscale passes only, from its saved first pass (same seed and composition). Key U">
       Upscale · {left >= 1 ? `${Math.floor(left)} h` : `${Math.max(1, Math.round(left * 60))} min`}
     </Btn>
   ) : (

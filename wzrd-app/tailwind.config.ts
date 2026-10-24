@@ -75,10 +75,13 @@ export default {
         fadeIn: { from: { opacity: '0', transform: 'translateY(4px)' }, to: { opacity: '1', transform: 'none' } },
         // Beat lamp: lit on the beat, decays across it (duration = one beat, set inline).
         beatDecay: { from: { opacity: '1' }, to: { opacity: '0.28' } },
+        // Indeterminate progress (render queue cards): a 40 %-wide sliver sweeping across.
+        sweep: { from: { transform: 'translateX(-100%)' }, to: { transform: 'translateX(250%)' } },
       },
       animation: {
         in: 'fadeIn 160ms ease-out',
         beat: 'beatDecay 500ms linear forwards',
+        sweep: 'sweep 1.4s ease-in-out infinite',
       },
     },
   },
