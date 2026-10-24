@@ -128,8 +128,12 @@ def fmt(v, unit: str = "ms") -> str:
 # ------------------------------------------------------------------------------------------------- prepare
 
 def build() -> None:
-    print("· cargo build --release (render-core)", flush=True)
-    sh(["cargo", "build", "--release", "--quiet"], cwd=RC)
+    # rustup's cargo honours the repo's rust-toolchain.toml; a non-rustup cargo earlier on PATH (Homebrew) would
+    # build with another compiler and invalidate every dependency in the shared target/.
+    rustup_cargo = Path.home() / ".cargo" / "bin" / "cargo"
+    cargo = str(rustup_cargo) if rustup_cargo.exists() else "cargo"
+    print(f"· cargo build --release (render-core, {cargo})", flush=True)
+    sh([cargo, "build", "--release", "--quiet"], cwd=RC)
 
 
 def ensure_pack() -> None:
@@ -404,9 +408,21 @@ def capacity(sc_path: Path, sc: dict, runs_tag: str) -> tuple[int, str]:
 
 # ------------------------------------------------------------------------------------------------- baseline
 
+def host_name() -> str:
+    # macOS: gethostname() follows the network (a DHCP/reverse-DNS name like 78-23-35-112.access.telenet.be),
+    # which would silently orphan the baseline; LocalHostName is the stable one set in System Settings.
+    if sys.platform == "darwin":
+        try:
+            return subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True,
+                                  check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    return socket.gethostname().split(".")[0]
+
+
 def machine_key(report: dict) -> str:
     adapter = get(report, "machine/adapter") or "unknown-gpu"
-    return f"{slug(adapter)}__{slug(socket.gethostname().split('.')[0])}"
+    return f"{slug(adapter)}__{slug(host_name())}"
 
 
 def load_baseline(key: str) -> dict | None:

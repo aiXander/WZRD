@@ -23,7 +23,7 @@ uv sync --extra islands --extra mcp --extra engine   # everything
 uv run python test.py layerpack   # builds test_results/layerpack/pack/ — the pack the sample scene points at
 ```
 
-Also needed: **Rust 1.85+** ([rustup.rs](https://rustup.rs)) for the engine, **pnpm** for the shell, **FFmpeg** for video I/O. Python 3.10+.
+Also needed: **Rust via [rustup](https://rustup.rs)** for the engine (`rust-toolchain.toml` pins the version; rustup installs it on first build), **pnpm** for the shell, **FFmpeg** for video I/O. Python 3.10+.
 
 ## 1. Run the visuals
 

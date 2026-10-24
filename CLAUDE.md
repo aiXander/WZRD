@@ -66,6 +66,8 @@ python -m wzrd_mcp --stdio    # stdio transport (Claude Desktop spawns this itse
 # From WZRD, show-day warmth is the MCP tool textureflow_warm(minutes) (0 = cool down).
 
 # Realtime engine (headless agent path — no UI process)
+# Toolchain: rust-toolchain.toml pins rustup 1.99.1 for both crates (Homebrew cargo ignores it and would
+# rebuild the whole shared target/). In a shell that predates rustup: export PATH=$HOME/.cargo/bin:$PATH
 # NOTE: there is NO `render-core` on PATH. `cargo build` only writes the binary
 # into render-core/target/. Launch via `cargo run --` or ./target/release/render-core.
 cd render-core
