@@ -24,6 +24,21 @@
 //!   at their descriptor `max` where one exists (current value otherwise) —
 //!   the probe answers "worst case at this venue", not "cost right now".
 //!
+//! Two more (2026-10-25, after the probe refused cheap library effects at
+//! random — `kaleido` measured *below* the empty calibration shader while
+//! `waveWarp` read red): a probe frame is timed on the wall clock, so
+//!
+//! - **Drain before timing.** The live leg's frame is usually still on the
+//!   GPU queue when a probe frame is submitted; without a drain, its cost
+//!   lands in the probe sample and is then multiplied by the pixel ratio.
+//! - **Batched draws.** A cheap shader's real cost at half res is a few µs,
+//!   far below the ~1 ms granularity of submit → wait wall time. Warmup
+//!   doubles the draws per measured frame (up to `MAX_DRAWS`) while a frame
+//!   stays under `BATCH_TARGET`, and finalize divides by that count, so
+//!   timer noise shrinks by the same factor. Heavy shaders stay at 1–2
+//!   draws, so a probe frame never costs the live output more than about
+//!   twice the target.
+//!
 //! Verdict: three bands against two operator thresholds A < B (predicted
 //! full-res p95, ms). Green (< A) passes clean; yellow (A..=B) still swaps
 //! into design but is flagged; red (> B) is refused entry entirely — the
@@ -61,6 +76,12 @@ pub const PROBE_NULL_WGSL: &str =
 const PROBE_FRAMES: u32 = 60;
 const PROBE_WARMUP: u32 = 8;
 const CALIBRATION_FRAMES: u32 = 40;
+
+/// Draw batching (see the module doc): warmup doubles a probed item's
+/// draws per frame while a frame's wall time stays under `BATCH_TARGET`.
+/// Calibration always draws once — it measures the per-frame floor.
+const MAX_DRAWS: u32 = 32;
+const BATCH_TARGET: Duration = Duration::from_micros(2000);
 
 /// Per-iteration probe budget — how much render-loop time a `step` call may
 /// consume before yielding back to the live frame.
@@ -209,6 +230,8 @@ struct ProbeItem {
     calibration: bool,
     frames_total: u32,
     frames_done: u32,
+    /// Draws per measured frame — grown during warmup, then fixed.
+    draws: u32,
     samples: Vec<f32>,
     bind_group: wgpu::BindGroup,
     /// Kept alive for the bind group.
@@ -339,6 +362,7 @@ impl ProbeSession {
                 PROBE_FRAMES
             },
             frames_done: 0,
+            draws: 1,
             samples: Vec::with_capacity(PROBE_FRAMES as usize),
             bind_group,
             _layer_buffer: layer_buffer,
@@ -369,6 +393,13 @@ impl ProbeSession {
             if item.frames_done >= item.frames_total {
                 item.p95_ms = Some(p95(&item.samples));
                 if !item.calibration {
+                    // The pipeline blends additively, so a batched frame is
+                    // `draws`× too bright: re-render one draw for the picture.
+                    if item.draws > 1 {
+                        if let Some(pipeline) = gpu.pipeline_cache.get(&item.key) {
+                            draw_frame(gpu, &self.target_view, pipeline, &item.bind_group, 1, None);
+                        }
+                    }
                     item.thumbnail_b64 = read_thumbnail(
                         gpu,
                         &self.target_texture,
@@ -388,9 +419,11 @@ impl ProbeSession {
             };
 
             // One measured probe frame: write the (animated) pessimistic
-            // frame state, render, then block until the GPU drains. The
-            // blocking wait is the measurement — it's bounded by the very
-            // frame cost we're probing, and `step` yields between frames.
+            // frame state, drain whatever the live leg left on the queue (or
+            // its cost lands in this sample), render, then block until the
+            // GPU drains. The blocking wait is the measurement — it's
+            // bounded by the very frame cost we're probing, and `step`
+            // yields between frames.
             gpu.queue.write_buffer(
                 &self.frame_buf,
                 0,
@@ -400,38 +433,17 @@ impl ProbeSession {
                     self.probe_h,
                 )),
             );
-            let t0 = Instant::now();
-            let mut encoder = gpu
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("probe frame encoder"),
-                });
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("probe pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.target_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: timer
-                        .as_deref_mut()
-                        .and_then(|t| t.writes(crate::perf::GpuPass::Probe)),
-                });
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &item.bind_group, &[]);
-                pass.draw(0..3, 0..1);
-            }
-            gpu.queue.submit(std::iter::once(encoder.finish()));
             gpu.device.poll(wgpu::Maintain::Wait);
-            let elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0;
+            let t0 = Instant::now();
+            let writes = timer
+                .as_deref_mut()
+                .and_then(|t| t.writes(crate::perf::GpuPass::Probe));
+            draw_frame(gpu, &self.target_view, pipeline, &item.bind_group, item.draws, writes);
+            let elapsed = t0.elapsed();
             if item.frames_done >= PROBE_WARMUP {
-                item.samples.push(elapsed_ms);
+                item.samples.push(elapsed.as_secs_f32() * 1000.0);
+            } else if !item.calibration && item.draws < MAX_DRAWS && elapsed < BATCH_TARGET {
+                item.draws *= 2;
             }
             item.frames_done += 1;
         }
@@ -453,14 +465,15 @@ impl ProbeSession {
         let mut worst_predicted = 0.0f32;
         for item in self.items.into_iter().filter(|i| !i.calibration) {
             let measured = item.p95_ms.unwrap_or(0.0);
-            let predicted = overhead + (measured - overhead).max(0.0) * self.ratio;
+            let predicted = predict(overhead, measured, item.draws, self.ratio);
             let band = Band::classify(predicted, a_ms, b_ms);
             worst_band = worst_band.max(band);
             worst_predicted = worst_predicted.max(predicted);
             log::info!(
-                "probe [{}]: measured p95 {:.2} ms @ half res → predicted {:.2} ms full res ({})",
+                "probe [{}]: measured p95 {:.2} ms for {} draw(s) @ half res → predicted {:.2} ms full res ({})",
                 item.label,
                 measured,
+                item.draws,
                 predicted,
                 band.as_str()
             );
@@ -532,6 +545,51 @@ pub fn pessimistic_scalar(
             DriverSpec::UiSlider { name, default } => sliders.get(name).unwrap_or(*default),
         },
     }
+}
+
+/// Full-res frame prediction: the per-frame floor plus one draw's cost above
+/// it, scaled by the pixel ratio. `measured` timed `draws` draws in one frame.
+fn predict(overhead_ms: f32, measured_ms: f32, draws: u32, ratio: f32) -> f32 {
+    overhead_ms + (measured_ms - overhead_ms).max(0.0) / draws.max(1) as f32 * ratio
+}
+
+/// Submit one probe frame of `draws` fullscreen draws (cleared first).
+fn draw_frame(
+    gpu: &GpuContext,
+    target: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    bind_group: &wgpu::BindGroup,
+    draws: u32,
+    timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+) {
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("probe frame encoder"),
+        });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("probe pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        for _ in 0..draws {
+            pass.draw(0..3, 0..1);
+        }
+    }
+    gpu.queue.submit(std::iter::once(encoder.finish()));
+    gpu.device.poll(wgpu::Maintain::Wait);
 }
 
 fn p95(samples: &[f32]) -> f32 {
@@ -670,6 +728,16 @@ mod tests {
             ),
             0.4
         );
+    }
+
+    #[test]
+    fn prediction_divides_batched_draws() {
+        // One draw: the old formula.
+        assert_eq!(predict(1.0, 3.0, 1, 4.0), 9.0);
+        // 32 draws of 0.25 ms above a 1 ms floor = one 0.25 ms draw.
+        assert_eq!(predict(1.0, 9.0, 32, 4.0), 2.0);
+        // Below the floor (timer noise) never predicts under it.
+        assert_eq!(predict(1.3, 1.2, 8, 4.0), 1.3);
     }
 
     #[test]

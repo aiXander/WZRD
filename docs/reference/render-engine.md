@@ -777,7 +777,16 @@ a control surface exists (`--ws-addr` — the Tauri host always sets it);
   stall). Predicted full-res p95 = `overhead + (measured − overhead) × 4`,
   where `overhead` is a once-per-boot calibration run of a trivial shader
   (naive scaling multiplies fixed per-frame cost by the pixel ratio and
-  flags fine shaders red). Probe uniforms are **pessimistic**: `audio.*`
+  flags fine shaders red). Each probe frame is timed on the wall clock, so
+  it first **drains the queue** (else the live frame still on the GPU lands
+  in the sample, ×4) and **batches draws**: warmup doubles draws per frame
+  (≤ 32) while a frame stays under 2 ms, and the delta above `overhead` is
+  divided by the draw count. Before both (fixed 2026-10-25) a cheap shader's
+  real cost (µs) drowned in ~1 ms timer steps × 4, and the probe refused
+  library effects at random (`kaleido` measured below the empty shader,
+  `waveWarp`/`hueShift` read red); now they reproduce at 1.4–2.1 ms green
+  run to run, and only genuinely heavy noise shaders (`silk` ≈ 6.4 ms) rank
+  high. Probe uniforms are **pessimistic**: `audio.*`
   pinned to 1.0, scalars at descriptor `max` where declared — "worst case
   at this venue", not "cost right now". Verdict vs sidecar thresholds
   A < B: green passes; **yellow still enters design, flagged** (the §5.11

@@ -102,8 +102,8 @@ project with a pack and `generated/*.mov`; it gets one binding per layer
 
 - **`probe`** — `effect.upsert` → `scene.load` binding it on the design
   leg → `effect.upsert` again; the second reply carries the §2.6 probe
-  verdict. Probe predictions jitter with machine load (a one-off yellow at
-  11 ms re-probed green at 2.5 ms). **The probe thumbnail is always black
+  verdict. All 15 green at 1.4–2.1 ms (2026-10-25, after the probe stopped
+  timing the live frame and timer noise — render-engine.md §2.6). **The probe thumbnail is always black
   for clip effects**: the probe binds no image (render-engine.md §4 #11).
 - **`run`** — per effect a cold boot; `perf` frame-interval p95 over 10 s
   (live only, then with the design leg awake via a `preview`
