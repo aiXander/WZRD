@@ -5,7 +5,7 @@
 // a pin from one shows in the others at once.
 //
 // Polled every 3 s per show while anything holds it (refcounted
-// `useProjectInfo`), so an agent's `pin_asset` shows up live. The hub is the
+// `useProjectInfo`), so a pin from another seat or the wizard shows up live. The hub is the
 // only writer of assets.json; after an app-side pin call `refreshProjectInfo`.
 
 import { useEffect } from 'react';

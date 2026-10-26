@@ -252,7 +252,7 @@ async def submit(args: dict, files: dict[str, bytes], meta: Optional[dict] = Non
 
 async def collect(job_id: str, ctx: Optional[Context], job: Optional[str] = None) -> dict:
     """Follow server job *job_id* to its end and download it: Modal's `render` dict. Registers the remote
-    for `cancel_job`; raises `tf_queue.Moved` when the operator moved the job to Modal meanwhile."""
+    for a cancel; raises `tf_queue.Moved` when the operator moved the job to Modal meanwhile."""
     url, token = config()
     hooks = _Hooks(job)
     ours = {"cancelled": False}
@@ -270,7 +270,7 @@ async def collect(job_id: str, ctx: Optional[Context], job: Optional[str] = None
 
                 raise Moved(job)
             if ours["cancelled"]:
-                raise asyncio.CancelledError  # cancel_job is tearing this call down
+                raise asyncio.CancelledError  # a cancel is tearing this call down
             raise ToolError(f"local TextureFlow job {job_id} was cancelled on the server")
         if st["state"] == "error":
             raise ToolError(f"local TextureFlow job {job_id} failed: {st.get('error')}")

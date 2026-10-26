@@ -276,7 +276,7 @@ def check_spend(est_usd: float, allow_over_cap: bool) -> None:
         raise ToolError(
             f"daily spend cap: ${total:.2f} of today's ${cap:.2f} is spent and this call costs "
             f"~${est_usd:.2f}. Ask Xander first; then call again with allow_over_cap=true, or he "
-            f"raises the cap (Studio, or set_project(daily_cap_usd=…) on his word)."
+            f"raises the cap in Studio."
         )
     if job:
         update(job, est_usd=round(float(est_usd), 4))
@@ -326,7 +326,7 @@ async def detach(job: str, body: Callable[[], Awaitable[Any]], dest: Optional[st
     cur = get(job)
     return {"job": job, "status": cur["status"], "dest": cur["dest"] or dest, "eta_s": cur.get("eta_s"),
             **({k: cur[k] for k in ("backend", "lane_pos", "pinned", "progress")} if cur["tool"] == "texture_flow" else {}),
-            "note": "rendering in the hub; jobs(job) for status, cancel_job(job) to stop it"}
+            "note": "rendering in the hub; jobs(job) for status"}
 
 
 def forget(job: str) -> None:

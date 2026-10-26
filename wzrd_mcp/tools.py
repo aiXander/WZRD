@@ -53,60 +53,13 @@ def _check_canvas_image(path: str, size: tuple[int, int], what: str) -> None:
     if got != tuple(size):
         raise ToolError(
             f"{what} is {got[0]}x{got[1]}, not the project canvas {size[0]}x{size[1]} — "
-            f"make it in this project (prepare_surface / darken_surface conform to the canvas)"
+            f"make it in this project (rectify_surface conforms to the canvas)"
         )
-
-
-def _conform_saved(image: Any, size: Optional[tuple[int, int]]) -> Any:
-    """Belt and braces: a surface tool's PIL output, cover-cropped to the canvas if it isn't."""
-    if size and image.size != tuple(size):
-        from wzrd.utils import conform_to_size
-
-        return conform_to_size(image, size)
-    return image
 
 
 # ---------------------------------------------------------------------------
 # Background subtraction
 # ---------------------------------------------------------------------------
-@tool(title="Subtract background (image)", tags={"content"}, project_arg=True)
-async def subtract_background_frame(
-    generated_image: str,
-    background_image: str,
-    threshold: int = 10,
-    ramp: int = 20,
-    gamma: float = 0.85,
-    blur_radius: float = 0.004,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Keep only what a generated image ADDED on top of the static surface photo, on black — the projector-ready still.
-
-    Args:
-        generated_image: Path or URL of the generated image (surface + subject).
-        background_image: Path or URL of the bare surface it was generated on.
-        threshold: Luminance difference cutoff (0-255, useful 5-30). Higher = less sensitive.
-        ramp: Soft transition width above threshold. Higher = softer edges.
-        gamma: Gamma correction. Values < 1.0 brighten the output.
-        blur_radius: Mask feathering as fraction of image size.
-    """
-    from wzrd.subtract_frame import subtract_background_file
-
-    gen_path, bg_path = await asyncio.gather(
-        resolve_input_async(generated_image, suffix=".png"),
-        resolve_input_async(background_image, suffix=".png"),
-    )
-    out_path = project.output_path("subtract_background_frame", ".webp", kind=project.GENERATED)
-    _img, info = await asyncio.to_thread(
-        subtract_background_file,
-        generated_path=gen_path, background_path=bg_path, output_path=out_path,
-        threshold=threshold, ramp=ramp, gamma=gamma, blur_radius=blur_radius,
-    )
-    return {
-        "creature_image": out_path,
-        "info": {k: info.get(k) for k in ("mask_coverage", "creature_max_brightness", "creature_mean_brightness")},
-    }
-
-
 @tool(title="Subtract background (video)", tags={"content"}, project_arg=True)
 async def subtract_background_video(
     video: str,
@@ -157,169 +110,6 @@ async def subtract_background_video(
 # ---------------------------------------------------------------------------
 # Surface preparation
 # ---------------------------------------------------------------------------
-@tool(title="Detect projection surface", tags={"surface"}, project_arg=True)
-async def detect_projection_surface(
-    image: str,
-    margin: float = 0.01,
-    target_aspect_ratio: Optional[str] = None,
-    output_resolution: Optional[int] = None,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Find the lit quadrilateral in a night photo of projector light on a surface and return a perspective-corrected crop.
-
-    In a project with a canvas the whole lit quad is rectified to exactly the
-    canvas (it is the projector raster) — leave the two sizing args unset.
-
-    Args:
-        image: Path or URL of the photo containing the projection surface.
-        margin: Inward shrinkage fraction (0.0-0.1) to avoid edge artifacts.
-        target_aspect_ratio: Projects without a canvas only: force output aspect ratio (default "16:9").
-        output_resolution: Projects without a canvas only: output width in pixels (default 1920).
-    """
-    from wzrd.detect import detect_projection_area
-
-    size = _canvas(target_aspect_ratio=target_aspect_ratio, output_resolution=output_resolution)
-    sizing = {"output_size": size} if size else {
-        "target_aspect_ratio": target_aspect_ratio or "16:9",
-        "output_resolution": output_resolution or 1920,
-    }
-    img_path = await resolve_input_async(image, suffix=".png")
-    out_path = project.output_path("detect_projection_surface", ".webp", kind=project.SURFACES)
-    _cropped, info = await asyncio.to_thread(
-        detect_projection_area,
-        image_path=img_path, output_path=out_path, margin=margin, **sizing,
-    )
-    return {
-        "cropped_image": out_path,
-        "info": {k: info.get(k) for k in ("corners", "original_size", "cropped_size", "margin", "target_aspect_ratio")},
-    }
-
-
-@tool(title="Align images", tags={"surface"}, project_arg=True)
-async def align_images(
-    source_image: str,
-    target_image: str,
-    max_features: int = 2500,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Warp a source image onto a target image's perspective (SIFT/AKAZE + RANSAC, template-matching fallback, ECC refinement).
-
-    Args:
-        source_image: Path or URL of the image to warp.
-        target_image: Path or URL of the reference image to align to.
-        max_features: SIFT feature detection limit.
-    """
-    from wzrd.align import align_images_file
-
-    src_path, tgt_path = await asyncio.gather(
-        resolve_input_async(source_image, suffix=".png"),
-        resolve_input_async(target_image, suffix=".png"),
-    )
-    out_path = project.output_path("align_images", ".webp", kind=project.SURFACES)
-    _warped, info = await asyncio.to_thread(
-        align_images_file,
-        source_path=src_path, target_path=tgt_path, output_path=out_path, max_features=max_features,
-    )
-    return {
-        "aligned_image": out_path,
-        "info": {k: info.get(k) for k in ("confidence", "method", "num_inliers", "num_matches")},
-    }
-
-
-@tool(title="Darken surface", tags={"surface"}, project_arg=True)
-async def darken_surface(
-    image: str,
-    max_brightness: float = 0.25,
-    detail_boost: float = 1.15,
-    target_aspect: Optional[str] = None,
-    base_resolution: Optional[int] = None,
-    alignment_aids: bool = False,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Darken a surface photo (gradient-weighted histogram equalization in CIELAB) so it looks like the surface at night, detail kept — the base every generation is drawn on.
-
-    In a project with a canvas the photo is cover-cropped and sized to exactly
-    the canvas — leave the two sizing args unset.
-
-    Args:
-        image: Path or URL of the surface image.
-        max_brightness: Luminance ceiling (0.0-1.0). Lower = darker output.
-        detail_boost: Detail amplification factor.
-        target_aspect: Projects without a canvas only: output aspect ratio (default "16:9").
-        base_resolution: Projects without a canvas only: output width in pixels (default 1920).
-        alignment_aids: Also render an alignment-aid video for lining the projector up with the surface (once per session).
-    """
-    from wzrd.darken import darken_image_file
-
-    size = _canvas(target_aspect=target_aspect, base_resolution=base_resolution)
-    img_path = await resolve_input_async(image, suffix=".png")
-    # Alignment aids are written next to `out_path` by the library.
-    out_path = project.output_path("darken_surface", ".webp", kind=project.SURFACES)
-    result = await asyncio.to_thread(
-        darken_image_file,
-        input_path=img_path, output_path=out_path, max_brightness=max_brightness,
-        detail_boost=detail_boost,
-        target_aspect=f"{size[0]}x{size[1]}" if size else target_aspect or "16:9",
-        base_resolution=max(size) if size else base_resolution or 1920,
-        alignment_aids=alignment_aids,
-    )
-    await asyncio.to_thread(_conform_saved(result["image"], size).save, out_path, quality=90)
-    response: dict = {"darkened_image": out_path}
-    if result.get("video"):
-        response["alignment_video"] = str(result["video"])
-    return response
-
-
-@tool(title="Prepare surface", tags={"surface"}, project_arg=True)
-async def prepare_surface(
-    night_image: str,
-    day_image: Optional[str] = None,
-    target_aspect: Optional[str] = None,
-    max_brightness: float = 0.20,
-    margin: float = 0.01,
-    alignment_aids: bool = False,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Photos → the dark, projector-aligned surface image every later step builds on.
-
-    With a day photo: detect the lit area in the night photo → align the day
-    photo to it → darken. Night photo only: darken only. In a project with a
-    canvas the output is exactly the canvas — leave target_aspect unset.
-
-    Args:
-        night_image: Path or URL of the night photo with the projector on (white frame).
-        day_image: Path or URL of a daytime photo of the same surface (enables detect + align).
-        target_aspect: Projects without a canvas only: output aspect ratio (default "16:9").
-        max_brightness: Luminance ceiling (0.0-1.0).
-        margin: Detection margin for surface extraction.
-        alignment_aids: Also render an alignment-aid video for lining the projector up with the surface (once per session).
-    """
-    from wzrd.prepare_surface import prepare_surface as _prepare_surface
-
-    size = _canvas(target_aspect=target_aspect)
-    sizing = {
-        "target_aspect": f"{size[0]}x{size[1]}", "base_resolution": max(size),
-        "detect_output_size": size,
-    } if size else {"target_aspect": target_aspect or "16:9"}
-    coros = [resolve_input_async(night_image, suffix=".png")]
-    if day_image:
-        coros.append(resolve_input_async(day_image, suffix=".png"))
-    resolved = await asyncio.gather(*coros)
-    out_path = project.output_path("prepare_surface", ".webp", kind=project.SURFACES)
-    log_progress("prepare_surface", "detect → align → darken" if day_image else "darken only")
-    result = await asyncio.to_thread(
-        _prepare_surface,
-        night_image_path=resolved[0], day_image_path=resolved[1] if day_image else None,
-        output_path=out_path, margin=margin, max_brightness=max_brightness,
-        alignment_aids=alignment_aids, **sizing,
-    )
-    await asyncio.to_thread(_conform_saved(result["image"], size).save, out_path, quality=90)
-    response: dict = {"surface_image": out_path}
-    if result.get("video"):
-        response["alignment_video"] = str(result["video"])
-    return response
-
-
 def _surface_run(folder: Path) -> str:
     """A fresh `YYYYmmdd-HHMMSS[-n]` run id with none of its three files taken."""
     base, n = project.stamp(), 1
@@ -334,7 +124,7 @@ _CORNERS_DOC = ("Manual quad in the lit photo: 4 normalised [x, y] (0-1), TL, TR
                 "as given (no margin). Omit = auto-detect. A result's `corners` round-trip here.")
 
 
-@tool(title="Rectify surface", tags={"surface"}, project_arg=True)
+@tool(title="Rectify surface", tags={"surface"}, project_arg=True, app_only=True)
 async def rectify_surface(
     lit_photo: str,
     ambient_photo: Optional[str] = None,
@@ -357,7 +147,7 @@ async def rectify_surface(
     rectified to exactly the project canvas (legacy project: 1920x1080).
     With an ambient photo (same view, room lit) it is aligned to the lit crop
     and darkened; without one the lit crop is darkened and surface_ambient
-    is null. Pin the keepers with pin_asset (surface_lit, surface,
+    is null. The app pins the keepers (surface_lit, surface,
     surface_ambient); re-run with nudged `corners` when detection is off.
 
     Args:
@@ -431,7 +221,7 @@ async def rectify_surface(
 # ---------------------------------------------------------------------------
 # Regions (islands)
 # ---------------------------------------------------------------------------
-@tool(title="Extract color regions", tags={"regions"}, project_arg=True)
+@tool(title="Extract color regions", tags={"regions"}, project_arg=True, app_only=True)
 async def extract_color_regions(
     image: str,
     max_colors: int = 8,
@@ -508,55 +298,6 @@ async def extract_color_regions(
         "regions": published,
         "regions_dir": str(out),
         "metadata_path": str(metadata_file) if metadata_file.exists() else None,
-    }
-
-
-@tool(title="Reproject region video", tags={"regions"}, project_arg=True)
-async def reproject_video(
-    video: str,
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    target_aspect: Optional[str] = None,
-    base_resolution: Optional[int] = None,
-    codec: str = "libx264",
-    crf: int = 23,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Place a region ("island") video back at its position on the full projection canvas, black elsewhere.
-
-    x, y, width, height are the region's `source_box` from extract_color_regions.
-    A video of another aspect than the box is fit uniformly, centred — never
-    stretched. In a project with a canvas the output is the canvas size.
-
-    Args:
-        video: Path or URL of the island video.
-        x: source_box.x
-        y: source_box.y
-        width: source_box.width
-        height: source_box.height
-        target_aspect: Projects without a canvas only: canvas aspect ratio (default "16:9").
-        base_resolution: Projects without a canvas only: canvas width in pixels (default 1920).
-        codec: ffmpeg video codec.
-        crf: Quality — lower is better (0-51).
-    """
-    from wzrd.reproject import reproject_video_with_aspect
-
-    size = _canvas(target_aspect=target_aspect, base_resolution=base_resolution)
-    vid_path = await resolve_input_async(video, suffix=".mp4")
-    out_path = project.output_path("reproject_video", ".mp4", kind=project.VIDEO)
-    info = await asyncio.to_thread(
-        reproject_video_with_aspect,
-        video_path=vid_path, island_metadata={"x": x, "y": y, "width": width, "height": height},
-        output_path=out_path,
-        target_aspect=f"{size[0]}x{size[1]}" if size else target_aspect or "16:9",
-        base_resolution=max(size) if size else base_resolution or 1920,
-        crf=crf, codec=codec,
-    )
-    return {
-        "output_video": out_path,
-        "info": {k: info.get(k) for k in ("frames_processed", "fps", "canvas_size", "island_position")},
     }
 
 
@@ -676,8 +417,8 @@ Runs on WZRD's own Modal GPU (default) or, with backend="local", on Xander's
 desktop GPU (slower, $0). Load skill `textureflow` for settings. A saved look
 from the library (list_recipes) renders with recipe="<name>".
 
-Omit an argument to get the server default. A cold Modal GPU adds ~1 min
-(textureflow_warm before a show). Media args take a local path or URL.
+Omit an argument to get the server default. A cold Modal GPU adds ~1 min.
+Media args take a local path or URL.
 The mp4 lands in the media library (dest=); the preview videos
 (first_pass_video, control_signal_preview, mapping_motion_preview) are
 scratch under the library's .wzrd/intermediates/."""
@@ -1009,34 +750,6 @@ def _tf_tool():
 texture_flow = _tf_tool()
 
 
-@tool(title="Keep TextureFlow GPU warm", tags={"generate", "textureflow"}, idempotent=True, open_world=True)
-async def textureflow_warm(minutes: float = 60, backend: Optional[str] = None,
-                           ctx: Optional[Context] = None) -> dict:
-    """Keep one TextureFlow GPU container running so renders skip the cold start (normally +15-20 s; the first after a redeploy take 2-3 min).
-
-    Calling again moves the deadline; minutes=0 cools down now. The timer runs
-    on Modal, so it scales back to zero even if this machine goes offline.
-    An idle warm GPU (RTX PRO 6000) costs ~$3/hour — cool down when done.
-    backend="local" only checks that the desktop GPU is reachable (it is
-    always warm while its service runs; minutes is ignored, Modal untouched).
-
-    Args:
-        minutes: How long to stay warm from now (0-720). 0 = scale to zero now.
-        backend: "modal" (default: $TEXTUREFLOW_BACKEND, else "modal") or "local" (the desktop; must be on).
-    """
-    if _tf_backend(backend) == "local":
-        info = await textureflow_local.health()
-        return {"warm": info.get("worker") != "down", "backend": "local",
-                **{k: info.get(k) for k in ("gpu", "worker", "busy", "queue")}}
-    import modal
-
-    app_name, env = _tf_target()
-    fn = modal.Function.from_name(app_name, "set_warm", environment_name=env)
-    out = await fn.remote.aio(minutes)
-    tf_queue.note_warm(minutes)
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Layer pack — the offline ↔ realtime handoff
 # ---------------------------------------------------------------------------
@@ -1068,7 +781,7 @@ _LAYERPACK_TAGS_SCHEMA = {
 }
 
 
-@tool(title="Build layer pack", tags={"regions", "engine"}, project_arg=True)
+@tool(title="Build layer pack", tags={"regions", "engine"}, project_arg=True, app_only=True)
 async def build_layerpack(
     masks: list[str],
     surface_image: Optional[str] = None,
@@ -1210,46 +923,3 @@ def _starter_scene(pack_dir: Path) -> tuple[str, bool]:
         return str(path), False
     return str(path), True
 
-
-# ---------------------------------------------------------------------------
-# Preview
-# ---------------------------------------------------------------------------
-@tool(title="Simulate projected view", tags={"preview"}, project_arg=True)
-async def simulate_view(
-    projector_video: str,
-    surface_image: str,
-    surface_weight: float = 0.35,
-    projection_strength: float = 1.0,
-    ambient: float = 0.0,
-    codec: str = "libx264",
-    crf: int = 18,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Predict what a viewer will see: composite projector output (additive light on black) onto the surface photo, modulated by the surface's reflectivity.
-
-    Args:
-        projector_video: Projector output (a background-subtracted video, or raw TextureFlow output).
-        surface_image: The surface photo, ideally with non-reflective areas (sky…) masked to pure black.
-        surface_weight: How visible the bare surface texture is (0.0-1.0). Lower = more projection contrast.
-        projection_strength: Projected light multiplier (0.5-2.0); >1 simulates a brighter projector.
-        ambient: Reflectivity floor for dark-but-not-black surface pixels (0.0-0.3).
-        codec: ffmpeg video codec.
-        crf: Quality — lower is better (0-51).
-    """
-    from wzrd.simulate_view import simulate_view as _simulate_view
-
-    vid_path, surf_path = await asyncio.gather(
-        resolve_input_async(projector_video, suffix=".mp4"),
-        resolve_input_async(surface_image, suffix=".png"),
-    )
-    out_path = project.output_path("simulate_view", ".mp4", kind=project.VIDEO)
-    info = await asyncio.to_thread(
-        _simulate_view,
-        projector_video_path=vid_path, surface_image_path=surf_path, output_path=out_path,
-        surface_weight=surface_weight, projection_strength=projection_strength,
-        ambient=ambient, codec=codec, crf=crf,
-    )
-    return {
-        "simulated_view_video": out_path,
-        "info": {k: info.get(k) for k in ("frames_processed", "fps", "video_size", "surface_weight", "projection_strength")},
-    }

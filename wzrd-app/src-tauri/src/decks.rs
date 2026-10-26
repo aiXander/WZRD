@@ -10,11 +10,10 @@
 //!
 //! Slots reference library files **in place, by absolute path** — nothing
 //! is copied; `id` (render id) and `fp` (content fingerprint) are what
-//! Relink (D3) matches on when a path goes missing. Two writers: the app
-//! (`decks_write`, compare-and-swap on the file's mtime so a concurrent
-//! agent `add_to_deck` is never overwritten — the webview re-reads and
-//! re-applies its edit) and the hub's `add_to_deck` MCP tool. Both write
-//! atomically (temp + rename).
+//! Relink (D3) matches on when a path goes missing. Only the app writes it
+//! (`decks_write`, atomically: temp + rename), with a compare-and-swap on
+//! the file's mtime so one seat (the webview, the browser seat) never
+//! overwrites another's edit — the loser re-reads and re-applies.
 //!
 //! Migration, once, when a show has no `decks.json`: `clipgrid.json`'s
 //! filing + every `generated/*.mov` (row = the filing, else the legacy
@@ -175,8 +174,8 @@ pub fn read_in(scene_dir: &Path) -> Result<Value, String> {
 }
 
 /// Write the whole doc if the file still has `base_mtime_ms` (else
-/// `Err("changed")`: someone — an agent's `add_to_deck` — wrote since the
-/// caller read; re-read and re-apply).
+/// `Err("changed")`: another seat wrote since the caller read; re-read and
+/// re-apply).
 pub fn write_in(scene_dir: &Path, doc: &Value, base_mtime_ms: Option<u64>) -> Result<Value, String> {
     validate(doc)?;
     let path = scene_dir.join(DECKS_FILE);

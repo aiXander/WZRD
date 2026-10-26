@@ -10,8 +10,8 @@ and bodies see real paths). The UI shows the same names in its pickers.
                   "kind": "image", "note": "", "pinned": "2026-10-16T14:30:12",
                   "by": "app"}}}
 
-One name -> one file. Written only by the hub (`/api/project/assets`, MCP
-`pin_asset`), temp + rename under a lock. Pinning indexes the file, so the
+One name -> one file. Written only by the hub (`/api/project/assets`, the
+app's pins), temp + rename under a lock. Pinning indexes the file, so the
 render id and fingerprint are stored and a moved file is followed:
 resolution = the stored path if it is on disk, else the render id's / the
 fingerprint's current file in `library.db`, else not found. A show copied
@@ -141,7 +141,7 @@ def resolve(asset: str, name: Optional[str] = None) -> str:
     entries = _read(show)["assets"]
     if key not in entries:
         known = ", ".join(sorted(entries)) or "none pinned yet"
-        raise ValueError(f"show {show!r} has no asset {key!r} (its assets: {known}) — pin_asset first")
+        raise ValueError(f"show {show!r} has no asset {key!r} (its assets: {known}) — pin it in the app first (Studio ★ or Show setup)")
     path, exists = _follow(entries[key], project.project_dir(show))
     if not exists:
         raise ValueError(f"asset {key!r} of show {show!r} points at {path}, which is gone "
@@ -180,7 +180,7 @@ def pin(asset: str, path: str, *, note: Optional[str] = None, by: str = "agent",
     show = name or project.active_project()
     show_dir = project.project_dir(show)
     if not show_dir.is_dir():
-        raise ValueError(f"no show {show!r} (set_project creates one)")
+        raise ValueError(f"no show {show!r} (the app's Show setup creates one)")
     if path.startswith(PREFIX):
         path = resolve(path, show)
     p = Path(path).expanduser()

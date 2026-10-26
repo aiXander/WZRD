@@ -78,8 +78,7 @@ export function ClipGrid({ compact = false }: { compact?: boolean }) {
       <div className="flex-1 min-h-0 overflow-auto">
         {inDeck.size === 0 && (
           <div className="px-3 py-2 text-[11px] text-fg3 leading-snug">
-            This deck is empty. Add renders from Studio (“+ Deck”), drag one in from the incoming strip, or let the agent
-            fill it (<span className="num">add_to_deck</span>).
+            This deck is empty. Add renders from Studio (“+ Deck”) or drag one in from the incoming strip.
           </div>
         )}
         {rows.map((row) => {

@@ -1,4 +1,5 @@
-"""MCP tools for choosing where output lands — the project folder."""
+"""Show tools: the app-only setup steps that create a show and bring photos in
+(the wizard runs them; agents never see them), and the agent's view of a show."""
 
 from __future__ import annotations
 
@@ -10,65 +11,36 @@ from typing import Optional
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 
-from . import jobs, library, project
+from . import project
 from .server import tool
 
 
-@tool(title="Set project", tags={"project"}, idempotent=True)
+@tool(title="Set project", tags={"project"}, idempotent=True, app_only=True)
 async def set_project(
     name: Optional[str] = None,
     canvas: Optional[str] = None,
-    daily_cap_usd: Optional[float] = None,
     ctx: Optional[Context] = None,
 ) -> dict:
-    """Create or open a project (a show) and report it; lock a new project's canvas. Then pass project=<name> on every project tool.
+    """Create or open a show (a project folder) and report it; lock a new show's canvas.
 
-    A project is one self-contained folder on this machine holding one venue's
-    set — prepared surfaces, region masks, layer packs, and the engine's
-    scene.json + effects/ — so the realtime engine loads it straight off disk.
-    Generators (nano_banana, texture_flow, kling_*, to_hap, …) write to the
-    media library instead (~/WZRD/media: the Studio target folder, else
-    inbox/), recording the project in each render.
-
-    Nothing is remembered between calls: the hub can't tell parallel chats
-    apart, so each venue/region/generator call names its show with
-    project=<name>. A call without it uses the show open in the app (omit
-    name here to see which one that is).
-
-    A new project should lock its canvas here, once: the pixel frame every
-    surface, segmentation map, mask and pack is authored in. Pick the Nano
-    Banana native size nearest the projector (a 16:9 projector → "16:9" =
-    1376x768); Nano Banana then answers surface edits at exactly the canvas,
-    so nothing is ever cropped or stretched. Surface tools conform photos to it
-    and build_layerpack authors at it. It can never change afterwards.
-
-    Paid tools (nano_banana, kling_*, texture_flow) count against one global
-    daily spend cap (default $20/day): every result reports today's spend,
-    warns at 80 %, and a call past the cap is refused.
+    A show is one self-contained folder holding one venue's set — surfaces,
+    region masks, layer packs, and the engine's scene.json + effects/ — so
+    the realtime engine loads it straight off disk. The canvas is the pixel
+    frame every surface, segmentation map, mask and pack is authored in: a
+    Nano Banana native size, locked once, never changed afterwards.
 
     Args:
-        name: Project name (created if it doesn't exist yet). Omit to report the show open in the app and list the existing ones.
-        daily_cap_usd: Change the global daily spend cap — only when Xander asks for it.
-        canvas: New projects only, set once: an aspect ("16:9", "4:3", "1:1", "9:16", "21:9", "3:2", "2:3", "4:5", "5:4", "3:4" → its 1K size) or an exact native size like "2752x1536" (2K).
+        name: Show name (created if it doesn't exist yet). Omit to report the show open in the app.
+        canvas: New shows only, set once: an aspect ("16:9", "4:3", "1:1", "9:16", "21:9", "3:2", "2:3", "4:5", "5:4", "3:4" → its 1K size) or an exact native size like "2752x1536" (2K).
     """
     if name:
         project.set_project(name)
-    try:
-        if canvas:
+    if canvas:
+        try:
             project.lock_canvas(canvas)
-        if daily_cap_usd is not None:
-            jobs.set_daily_cap(daily_cap_usd)
-    except ValueError as exc:
-        raise ToolError(str(exc))
-    current = project.active_project()
-    return {
-        **project.describe(),
-        "use": f'pass project="{current}" on every project tool call (venue tools, region=, generators)',
-        "spend_today": jobs.spend(),
-        "media_root": str(library.media_root()),
-        "projects_root": str(project.projects_root()),
-        "existing_projects": project.list_projects(),
-    }
+        except ValueError as exc:
+            raise ToolError(str(exc))
+    return {**project.describe(), "existing_projects": project.list_projects()}
 
 
 def _newest_photos(folder: str, count: int) -> list[Path]:
@@ -101,7 +73,7 @@ def _import_one(src: Path, size: Optional[tuple[int, int]]) -> dict:
     return {"path": out, "source": str(src), "shot_size": list(shot), "size": list(img.size)}
 
 
-@tool(title="Import photos", tags={"project", "surface"}, project_arg=True)
+@tool(title="Import photos", tags={"project", "surface"}, project_arg=True, app_only=True)
 async def import_photos(
     paths: Optional[list[str]] = None,
     count: int = 1,
@@ -119,7 +91,7 @@ async def import_photos(
         paths: Photo files to import. Omit to take the newest ones from source_dir.
         count: How many of the newest photos to take when `paths` is omitted.
         source_dir: Folder to take the newest photos from.
-        conform: True: cover-crop + resize to the project canvas — for a photo shot from the projector's position that becomes the surface. False: whole frame, full resolution — for night/day pairs going into prepare_surface(day_image=…), whose detection needs every pixel.
+        conform: True: cover-crop + resize to the project canvas — for a photo shot from the projector's position that becomes the surface. False: whole frame, full resolution — for the lit/ambient pair going into rectify_surface, whose detection needs every pixel.
     """
     size = project.canvas() if conform else None
     sources = [Path(p).expanduser() for p in paths] if paths else _newest_photos(source_dir, max(1, count))
@@ -129,96 +101,25 @@ async def import_photos(
     photos = await asyncio.gather(*(asyncio.to_thread(_import_one, p, size) for p in sources))
     result: dict = {"photos": list(photos), "canvas": list(size) if size else None}
     if conform and not size:
-        result["note"] = "project has no canvas — photos kept their own size (set_project(canvas=…) on a new project)"
+        result["note"] = "project has no canvas — photos kept their own size (lock one in Show setup)"
     result["_provenance"] = {"parent": {os.path.realpath(p["path"]): p["source"] for p in photos}}
     return result
 
 
-# ---------------------------------------------------------------------------
-# Named assets (show-setup A1) and prompt templates (P1)
-# ---------------------------------------------------------------------------
-@tool(title="Pin asset", tags={"project"}, idempotent=True, project_arg=True)
-async def pin_asset(
-    name: str,
-    path: Optional[str] = None,
-    note: Optional[str] = None,
-    unpin: bool = False,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Name one of the show's files (or forget a name) so every tool can take it as "asset:<name>".
+@tool(title="Show info", tags={"project"}, read_only=True, idempotent=True, project_arg=True)
+async def show_info(region: Optional[str] = None, ctx: Optional[Context] = None) -> dict:
+    """The show: its canvas, regions (ids for region=, with the box their clips play in), named assets (pass any as "asset:<name>") and folder map.
 
-    One name → one file; pinning a name again moves it. The file is never
-    moved or deleted — unpin only forgets the name. Well-known names (the
-    show setup pins these): photo_lit, photo_ambient, surface_lit, surface,
-    surface_ambient, segmentation — list_assets says what each is for.
+    The operator sets a show up in the app (photos, surface, regions, pack);
+    this is how you read the result.
 
     Args:
-        name: Asset name: lowercase letters, digits, _ and - (max 48).
-        path: Absolute path of an image or video (or "asset:<other>"). Required unless unpin.
-        note: Optional one-line note shown beside the asset.
-        unpin: True = forget the name (the file stays).
+        region: A region id: also return its render inputs — `mask` (white = the region) and `shape` (the surface, black outside the region), both cut to its box, so a render at that aspect lands back on the region exactly.
     """
-    from . import assets
-
-    try:
-        if unpin:
-            out = await asyncio.to_thread(assets.unpin, name)
-        else:
-            if not path:
-                raise ValueError("path is required (or unpin=true)")
-            out = await asyncio.to_thread(assets.pin, name, path, note=note, by="agent")
-    except ValueError as exc:
-        raise ToolError(str(exc))
-    return {"project": project.active_project(), "assets": out}
-
-
-@tool(title="List assets", tags={"project"}, read_only=True, idempotent=True, project_arg=True)
-async def list_assets(ctx: Optional[Context] = None) -> dict:
-    """The show's named assets (pass any as "asset:<name>"), the well-known roles, and its folder map."""
-    from . import assets
+    from . import assets, provenance
 
     info = await asyncio.to_thread(project.describe)
-    return {**info, "roles": assets.ROLES}
-
-
-@tool(title="List prompt templates", tags={"project", "generate"}, read_only=True, idempotent=True,
-      project_arg=True)
-async def list_prompts(kind: Optional[str] = None, ctx: Optional[Context] = None) -> dict:
-    """Prompt templates for this show (project scope first), then WZRD's global ones. Fill "{n_regions}" with a plain replace before use.
-
-    Args:
-        kind: Template kind, e.g. "segmentation" or "mask". Omit for all.
-    """
-    from . import prompts
-
-    try:
-        found = await asyncio.to_thread(prompts.list_prompts, kind)
-    except ValueError as exc:
-        raise ToolError(str(exc))
-    return {"prompts": found}
-
-
-@tool(title="Save prompt template", tags={"project", "generate"}, project_arg=True)
-async def save_prompt(
-    kind: str,
-    name: str,
-    prompt: str,
-    scope: str = "project",
-    notes: Optional[str] = None,
-    ctx: Optional[Context] = None,
-) -> dict:
-    """Save a prompt template — to this show (scope="project") or to WZRD for every show (scope="wzrd", only on Xander's word). Same kind + name replaces it.
-
-    Args:
-        kind: Template kind slug, e.g. "segmentation", "mask".
-        name: Template name slug (lowercase, digits, _ -). "default" is the one the UI preselects.
-        prompt: The template text; "{n_regions}" is the one placeholder.
-        scope: "project" (this show) or "wzrd" (global, repo library/prompts/).
-        notes: Optional notes: when to use it, what it fixed.
-    """
-    from . import prompts
-
-    try:
-        return await asyncio.to_thread(prompts.save_prompt, kind, name, prompt, scope, None, notes)
-    except ValueError as exc:
-        raise ToolError(str(exc))
+    out = {**info, "regions": await asyncio.to_thread(provenance.regions), "roles": assets.ROLES}
+    if region:
+        out["region_inputs"] = await asyncio.to_thread(provenance.region_inputs, region)
+    return out

@@ -20,9 +20,11 @@ persona, workflow and prompt formulas now live in the skills.
 
 | Level | Where | Cost |
 |---|---|---|
-| 1. Always on | `server.py::_INSTRUCTIONS` — what WZRD is, the projection physics, the local-file contract, the one-line skills index (generated) | ~650 tokens |
+| 1. Always on | `server.py` instructions — what WZRD is, the projection physics, the call contract, and the **job map** (`_JOB_MAP`: each job → its tools + the skill to load first), rendered after the config gate so disabled and app-only tools drop out | ~450 tokens (2026-10-26: 316 words) |
 | 2. On demand | `skills/<name>/SKILL.md` — one workflow or craft guide | loaded per job |
 | 3. Deeper | `skills/<name>/references/*.md` — named by the SKILL.md body | loaded per branch |
+
+Why a job map rather than a skills index: Claude Code defers MCP tool schemas (tool search), so the model sees only the bare tool **names** until it loads one — the map is what tells it which tool and skill a job needs. Every agent-visible tool and every skill must appear in `_JOB_MAP` (boot warns on stderr, `test.py mcp` fails); a skill name it doesn't know is a boot failure.
 
 Tool descriptions carry only the **contract** (args, ranges, traps, cost) and
 point at a skill for craft ("load skill `image-prompting` before writing a
@@ -48,14 +50,13 @@ one source (`skill_catalog.py` scans, `skill_tools.py` serves):
   Claude Code lists them as `/mcp__wzrd__<name>`. They only tell the agent
   to load the skill and start.
 
-Current skills: workflows `run-sheet` (gig S1: venue photos → canvas →
-regions → pack → clip library from recipes → show checklist; the entry
-point for a venue day, delegating to the others), `projection-story` (the
-old Mastra agent's keyframe → video → loop flow), `surface-prep` (photos →
-`rectify_surface` → pinned `surface_lit` / `surface`; `run-sheet` steps 2–4
-chain assets through segmentation and regions),
-`region-animation` (+ "A story on one region": keyframes from a region's
-`region_surface_image` with `aspect_ratio="auto"`, `region=` on every call,
+Current skills: workflows `run-sheet` (gig S1, from a show the operator set
+up in the app's wizard: `show_info` → clip library from recipes per region →
+show checklist; the entry point for a venue day, delegating to the others),
+`projection-story` (the old Mastra agent's keyframe → video → loop flow),
+`region-animation` (per-region TextureFlow on the operator's regions, inputs
+from `show_info(region=)`; + "A story on one region": keyframes from the
+region's `shape` crop with `aspect_ratio="auto"`, `region=` on every call,
 `to_hap(region=)` after stitching), `live-engine` (+ C5 clip bindings and
 the effects library); guides `image-prompting` (+ `references/anti-slop.md`),
 `video-prompting`, `textureflow` (+ style recipes, `region=`,
@@ -92,7 +93,7 @@ idempotent=, open_world=)` — never `@mcp.tool` by hand:
   stripped before the body runs, so bodies never see them.
 - **Annotations** are MCP behaviour hints: `open_world` = paid/remote call
   (nano_banana, kling, texture_flow), `destructive` = deletes or overwrites
-  user-visible state (engine `remove_*`, `set_scene`), `read_only` = no side
+  user-visible state (engine `remove_binding`), `read_only` = no side
   effects.
 - **Structured args must be sayable.** A bare `dict` param publishes an
   object schema with no properties, and a grammar-constrained decoder can only
@@ -120,6 +121,36 @@ register when `websockets` is installed (`.[engine]` extra), so a cloud image
 never carries them. The parked Modal image mounts `tools_config.json` and
 `skills/` explicitly — `add_local_python_source` ships `.py` files only.
 
+## Agent surface vs the app: app-only tools
+
+The app is the operator's hands (show setup, browsing, scoring, curating
+decks, playing, tuning); the agent is the imagination (prompts, shaders,
+batches, learning from scores, naming layers in surface language). So a
+hands-on act the UI already does is not an agent tool (decided with Xander
+2026-10-26; the surface went from 43 to 22 tools).
+
+- **App-only** — `tool(app_only=True)`: `set_project`, `import_photos`,
+  `rectify_surface`, `extract_color_regions`, `build_layerpack`, the
+  wizard's steps (corners, sliders and region ids are tuned by eye). The
+  `app` tag + `mcp.disable(tags={"app"})` hides them from `/mcp` and refuses
+  them there; `hub.run_tool` (`/api/tool`) looks them up on
+  `mcp.local_provider`, which ignores visibility. Not a `tools_config.json`
+  disable: that removes the tool and would break the wizard.
+- **Removed outright** (the app does it through its own `/api` route):
+  `pin_asset`, `list_prompts`/`save_prompt`, `move_render`/`rename_render`,
+  `add_to_deck`, `cancel_job`, `remove_effect`, `set_scene` (escape hatch),
+  `validate_wgsl` (`upsert_effect` validates first anyway). Not needed now:
+  `find_renders` (score-aware search of past renders), `label_render`
+  (agent tags), `textureflow_warm` (a cold start is ~1 min). Removed as
+  obsolete, with their `wzrd/` modules: `prepare_surface` (→
+  `rectify_surface`), `reproject_video` (the engine places region clips),
+  `simulate_view` (→ `get_preview` on the real design leg), and the
+  disabled `subtract_background_frame` / `detect_projection_surface` /
+  `align_images` / `darken_surface` wrappers.
+- **The agent reads a show with `show_info`**: canvas, regions (id, label,
+  tags, `source_box`), named assets, folder map; `region=` adds that
+  region's render inputs.
+
 ## The project folder and its locked canvas
 
 `project.py`: a project (a **show**) is one folder under `projects/` that
@@ -135,7 +166,7 @@ list folders and whoever wrote a file, it shows up in the right place:
 `captures/` raw photos · `surfaces/` rectify runs · `segmentation/` colour
 maps · `regions/<run>/` mask runs · `styles/` · `generated/` · `video/` ·
 `packs/` · `prompts/` · `effects/`. `project.describe(name)` returns it
-(abs path + what) with the show's assets; `set_project`, `list_assets` and
+(abs path + what) with the show's assets; `set_project`, `show_info` and
 `/api/project` all reply with it. `project.set_project` creates every
 folder of the map up front (empty dirs don't count as content for the
 canvas lock), so Finder, Studio and the wizard see the same slots; the
@@ -146,8 +177,8 @@ names its key files once — `ROLES` are the well-known ones the setup wizard
 pins: `photo_lit`, `photo_ambient`, `surface_lit` (rectified lit crop:
 segmentation + ControlNet input), `surface` (dark surface: Nano Banana
 `image_1`, subtraction background), `surface_ambient`, `segmentation`. One
-name → one file; the hub is the only writer (`/api/project/assets`, MCP
-`pin_asset`; temp + rename under a lock). Pinning indexes the file and
+name → one file; the hub is the only writer (`/api/project/assets` — the
+app's pins; agents only read them; temp + rename under a lock). Pinning indexes the file and
 stores its render id + fingerprint, so resolution follows a moved file:
 stored path on disk → the id's / fingerprint's current file in
 `library.db` → `exists: false`. A "Save as" copy keeps the source show's
@@ -167,10 +198,10 @@ show's first, `default` first per scope. Shipped: `segmentation/default`
 (the old `prompts.yaml` text, region count as `{n_regions}`) and
 `mask/default` (skill `image-prompting`'s non-reflective mask). `{n_regions}`
 is the one placeholder and the *caller* fills it with a plain replace —
-prompts may hold other braces. MCP: `list_prompts`, `save_prompt` (scope
-`"wzrd"` only on Xander's word).
+prompts may hold other braces. Only the app reads and saves them
+(`/api/prompts`, the wizard's segmentation step); there is no MCP tool.
 
-**`rectify_surface`** (`tools.py` wrapper → `wzrd/prepare_surface.py::rectify_surface`,
+**`rectify_surface`** (app-only `tools.py` wrapper → `wzrd/prepare_surface.py::rectify_surface`,
 portable): lit photo (projector full white, whole frame) + optional ambient
 photo + optional manual `corners` → one **run** in `surfaces/`:
 `<run>_lit.png` (rectified lit crop), `<run>_surface.png` (darkened ambient
@@ -182,15 +213,16 @@ lit photo — `wzrd/detect.py`'s `corners=` override) skip detection and are
 used as given, no margin; the reply's `corners` is the quad actually
 rectified, so auto → nudge → manual round-trips. Why three files, not one:
 the lit crop and the dark surface are different pins with different jobs.
-`prepare_surface` stays for old callers. `extract_color_regions` entries
+`extract_color_regions` entries
 also carry `color` (the map's hex) and `area_fraction`, so a UI can show a
 swatch per region.
 
 **Which project a call uses — no per-chat memory.** A call's `project=`,
 else the show open in the app (the Studio selection's `project`), else
-`WZRD_PROJECT`, else `"default"`. `set_project(name)` creates/opens a show
-and locks its canvas but sets nothing sticky; its reply says to pass
-`project=` from then on. Why: Claude Code speaks MCP 2026-07-28, which is
+`WZRD_PROJECT`, else `"default"`. `set_project(name)` (app-only: the
+wizard's Show step) creates/opens a show and locks its canvas but sets
+nothing sticky; an agent reads the open show from `studio_selection` /
+`show_info` and passes `project=` on every call. Why: Claude Code speaks MCP 2026-07-28, which is
 sessionless — no `Mcp-Session-Id`, no per-chat marker in headers or
 `_meta` (captured 2026-10-15) — so the hub can't tell two chats apart, and
 a shared sticky value would let one chat redirect another's output. Decided
@@ -209,9 +241,7 @@ with Xander 2026-10-15 (amends the Studio plan's S14).
   exactly the canvas, so nothing is ever cropped or rescaled ("no drift by
   construction"). The engine scales canvas → projector raster and the
   4-corner alignment absorbs the residual (1.792 vs 1.778 for 16:9).
-- **With a canvas**, the sizing args of `detect_projection_surface`,
-  `darken_surface`, `prepare_surface`, `reproject_video` and
-  `build_layerpack` are refused (`_canvas()` in `tools.py` names the
+- **With a canvas**, the sizing args of `build_layerpack` are refused (`_canvas()` in `tools.py` names the
   offending args); outputs are the canvas exactly. Detection rectifies the
   whole lit quad to the canvas (`detect(output_size=…)`, corners untouched —
   the quad *is* the projector raster). `extract_color_regions` /
@@ -222,8 +252,7 @@ with Xander 2026-10-15 (amends the Studio plan's S14).
   model's crop** — `wzrd.utils.uncrop_to_size` / `uncrop_array_to_size` /
   `uncrop_box`: uniform scale to fit, centred, bands filled from the
   reference or black. Used by `align_to_reference` (subtraction), islands
-  (seg map → surface/canvas), layerpack (masks → surface frame), reproject
-  (clip → its region box). Photos *into* a canvas are the other direction:
+  (seg map → surface/canvas), layerpack (masks → surface frame). Photos *into* a canvas are the other direction:
   `conform_to_size` (cover-crop + resize). Plain resizes remain only where
   the mapping really is a raster scale (surface/canvas → pack/projector
   resolution). Measured on real keyframes: residual 4.1 px → 0.12–0.19 px.
@@ -232,6 +261,9 @@ with Xander 2026-10-15 (amends the Studio plan's S14).
   `NANO_BANANA_SIZES`), and the `region_surface_image` crop has the box's
   aspect. A story or texture for one region (a tall pillar) is rendered from
   that crop with `aspect_ratio="auto"` → it fits its box back within ~1 px.
+  An agent gets a region's crop + mask from `show_info(region=<id>)`
+  (`provenance.region_inputs`, the Render panel's auto-fill: cut to the
+  padded `source_box`, black outside the region).
 - **Photos arrive upright.** `file_io.resolve_input` — the input side of
   every tool — swaps a HEIC, or any photo with an EXIF rotation tag, for a
   decoded, rotated temp copy (`wzrd.utils.upright_copy`; `pillow-heif` is a
@@ -241,7 +273,7 @@ with Xander 2026-10-15 (amends the Studio plan's S14).
   directly). `import_photos` brings photos into `captures/`: the newest in
   `~/Downloads` (AirDrop; arrival = birthtime) or given paths, upright, and
   `conform=True` cover-crops them to the canvas — `conform=False` for
-  night/day detection pairs, which need the whole frame.
+  the lit/ambient pair going into `rectify_surface`, which needs the whole frame.
 - **Fresh projects boot.** The engine refuses to start without a scene +
   pack, so `build_layerpack` writes a starter `<project>/scene.json`
   (`pack` → this pack, bpm 120, no bindings) when none exists — opened with
@@ -368,7 +400,7 @@ record outlives a deleted file.
   elsewhere follows the file. Vanished files get `missing = 1`; a trash
   flush sets `purged` once a render has no file left.
 
-**Jobs** (`jobs.py`, MCP tools `jobs` / `cancel_job` in `studio_tools.py`):
+**Jobs** (`jobs.py`, MCP tool `jobs` in `studio_tools.py`; cancelling is the app's, `/api/jobs/cancel`):
 every render-tool call is a `jobs` row. `wait=false` runs the body as an
 asyncio task in the hub (`jobs.detach`) and replies `{job, status:
 "running", dest, eta_s}` once the call is *submitted* — it passed its
@@ -391,24 +423,16 @@ the folder its outputs land in — `to_hap` records its source's folder.
 
 **The agent's Studio tools** (`studio_tools.py`, S18 permissions): it may
 read the selection (`studio_selection` — "these styles" = its `styles`,
-renders land in its `target`), search the render database
-(`find_renders`: filters tool / min_score / tag / style — a path matches by
-fingerprint wherever the image moved, a word by file name — / recipe /
-project / text; best-scored first; `args` shows only what differs from the
-tool's published defaults; purged records stay as evidence), tag
-(`label_render` → `agent_tags`, notes appended `[agent] …`; the score is
-Xander's alone — `library.label(agent=True)` refuses one), and move/rename
-(`move_render` / `rename_render`, a render's mp4 + HAP together), and fill
-a show's decks (`add_to_deck` writes `<project>/decks.json`, contract L6 in
-the Studio plan; the app is the other writer and compare-and-swaps on the
-file's mtime, so both write temp + rename). It cannot delete: deletion
-exists only on `/api`. Skills `textureflow` and
-`run-sheet` teach the loop: selection → `find_renders` before a batch →
-`wait=false` + `jobs` → `check_frames`.
+renders land in its `target`) and watch jobs (`jobs`), nothing else.
+Scores, labels, moving, renaming, deleting, cancelling and filing clips into
+decks are the operator's, on `/api` only (2026-10-26: the agent tools for
+them — and `find_renders`, the score-aware render search — were removed;
+`agent_tags` keeps what agents wrote before, shown read-only ✦). Skills
+`textureflow` and `run-sheet` teach the loop: selection → `wait=false` +
+`jobs` → `check_frames`.
 
 **Spend cap** (`jobs.py`): daily and global, default $20/day
-(`settings.daily_cap_usd`; `/api/spend` or `set_project(daily_cap_usd=…)`
-on Xander's word). Today = local midnight on, the sum of `est_usd` over
+(`settings.daily_cap_usd`; set in the app through `/api/spend`). Today = local midnight on, the sum of `est_usd` over
 `jobs` — a running job counts with its pre-estimate (`check_spend` writes
 it onto the job), so a parallel batch can't overshoot. Paid tools call
 `provenance.check_spend(<pre-estimate>, allow_over_cap)` before the remote
@@ -492,20 +516,20 @@ D16: the default is what a Finder-launched app sees). Code:
 
 | File | Role |
 |---|---|
-| `server.py` | FastMCP instance + instructions, `tool()` stack, config gate, module imports |
+| `server.py` | FastMCP instance, `tool()` stack, config gate, module imports, instructions (preamble + `_JOB_MAP`) |
 | `skill_catalog.py` / `skill_tools.py` | skills scan + index / `load_skill`, resources provider, prompts |
-| `tools.py` | wzrd wrappers: subtraction, surface prep (`rectify_surface`, `prepare_surface`), regions, `texture_flow`/`textureflow_warm`, `build_layerpack`, `simulate_view` |
+| `tools.py` | wzrd wrappers: `subtract_background_video`, the app-only setup steps (`rectify_surface`, `extract_color_regions`, `build_layerpack`), `texture_flow` |
 | `media_tools.py` | `view_media` (downscaled images; one contact sheet per video), `concat_videos` (→ `wzrd/concat.py`), `to_hap` / `extract_frames` + the C3 clip helpers (→ `wzrd/clips.py`), `check_frames` (→ `wzrd/check_frames.py`: numeric clip QC — flash rate, loop seam, haze, lit share, still-vs-surface shift; thresholds and their reasons in the module docstring) |
 | `google_tools.py`, `fal_tools.py` | hosted models — [hosted-models.md](hosted-models.md) |
 | `engine_tools.py` | engine authoring slice — [render-engine.md](render-engine.md) §2.7 |
-| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `LAYOUT`, `project.json` + canvas, which project a call uses; tools `set_project`, `import_photos`, `pin_asset`, `list_assets`, `list_prompts`, `save_prompt` |
+| `project.py`, `project_tools.py` | the local project folder (a render-core scene dir), `LAYOUT`, `project.json` + canvas, which project a call uses; tools `set_project`, `import_photos` (app-only), `show_info` (the agent's read of a show: canvas, regions, assets, a region's inputs) |
 | `assets.py`, `prompts.py` | named project assets (`assets.json`, `asset:` expansion, resolution); prompt templates (WZRD + show scope) |
 | `_text_result.py`, `_log.py`, `_keepalive.py` | result encoding; logging/errors/timing + call scope, injected params, job rows, record hook; 15 s progress pings during remote calls (all paid tools, TextureFlow included) |
 | `hub.py` | the hub: `hub.lock`, idle exit, trash flusher, `/api/*` routes |
 | `library.py` | media root + roots + selection, `library.db` schema/migrations, indexing, labels, move/rename, soft delete + trash, generator output routing (`dest`) |
 | `identity.py` | fingerprint, the embedded `wzrd` tag (read/write), probe, thumbnails, ULIDs |
 | `jobs.py` | job rows, status (lost = no `ended` + dead pid), ETA, estimators, `wait=false` detach + cancel, the daily spend cap |
-| `studio_tools.py` | the agent's view of the Studio: `jobs`, `cancel_job`, `studio_selection`, `find_renders`, `label_render`, `move_render`, `rename_render` |
+| `studio_tools.py` | the agent's view of the Studio: `jobs`, `studio_selection` |
 | `provenance.py` | render records for every output (`record_outputs`), legacy sidecar reads, `region=` → pack layer box |
 | `recipe_tools.py` | style recipe library: `list_recipes`, `save_recipe`, `apply_recipe` (the `texture_flow(recipe=)` merge) |
 | `tf_spec.py`, `textureflow_spec.json` | TextureFlow's published arg spec: cache → committed snapshot, background refresh from the app's `spec()`, the generated `texture_flow` params/docs, unknown-arg checks — [textureflow.md](textureflow.md) |
@@ -516,11 +540,12 @@ D16: the default is what a Finder-launched app sees). Code:
 ## Adding things
 
 - **A tool**: write the async body in the fitting module, decorate with
-  `@tool(...)`, add a `tools_config.json` entry, mention it in the skill whose
-  workflow uses it. A new module is imported in `server.py`.
-- **A skill**: a folder with a quoted-description `SKILL.md`; it appears in the
-  index, `load_skill`, resources and (if `kind: workflow`) prompts with no code
-  change. Restart the server; clients re-read instructions on connect.
+  `@tool(...)`, add a `tools_config.json` entry, add it to its job row in
+  `server.py::_JOB_MAP`, mention it in the skill whose workflow uses it. A new module is imported in `server.py`.
+- **A skill**: a folder with a quoted-description `SKILL.md`; it appears in
+  `load_skill`'s index, resources and (if `kind: workflow`) prompts with no code
+  change — name it on its job row in `server.py::_JOB_MAP` so the instructions
+  route to it. Restart the server; clients re-read instructions on connect.
 - Verify: `uv run python test.py mcp` (boot, text-only results, all three skill
   surfaces, prompts match workflows). Point `WZRD_MEDIA_ROOT` at a temp dir in
   tests so they don't write into the real library.

@@ -231,7 +231,7 @@ def _pack_json(name: Optional[str] = None) -> Path:
     if not packs:
         raise ToolError(
             f"region=: project {name or project.active_project()!r} has no layer pack yet — "
-            f"run build_layerpack first (regions are pack layer ids)"
+            f"the operator builds it in the app's Show setup (Regions step) — regions are pack layer ids"
         )
     return packs[-1]
 
@@ -249,6 +249,18 @@ def region_meta(layer_id: str) -> dict:
             return {"region": layer_id, "source_box": layer.get("source_box") or layer.get("bbox")}
     ids = ", ".join(sorted(str(layer.get("id")) for layer in layers))
     raise ToolError(f"region={layer_id!r} is not a layer of {pack.parent.name} (layers: {ids})")
+
+
+def regions(name: Optional[str] = None) -> list[dict]:
+    """Every region of the show's pack: id, label, tags and the box its clips
+    are placed in (`region_meta`'s fallback). Empty without a pack."""
+    try:
+        pack = _pack_json(name)
+    except ToolError:
+        return []
+    return [{"id": layer.get("id"), "label": layer.get("label"), "tags": layer.get("tags") or [],
+             "source_box": layer.get("source_box") or layer.get("bbox")}
+            for layer in json.loads(pack.read_text()).get("layers", [])]
 
 
 # Shape images for a region's render, best first: the named assets (canvas-sized

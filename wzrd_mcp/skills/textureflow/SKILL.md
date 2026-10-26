@@ -15,26 +15,21 @@ logos.
 
 ## Working with the Studio (the operator's selection and history)
 
-The operator browses and scores renders in the app's Studio room; the hub
-remembers every render's settings and their 0-9 score.
+The operator browses, scores and labels renders in the app's Studio room.
 
 - **"These styles" / "these clips" / "put them there"** → `studio_selection()`:
   its `styles` are the style images to pass as `images=`, `items` the
   selected renders, `target` the folder renders land in by default, and
   `project` the open show (pass it as `project=`).
-- **Before a batch, check what worked:** `find_renders(style=<a style
-  path>, tool="texture_flow")` (or `recipe=`, `tag=`, `min_score=7`).
-  Reuse the `args` of the ≥ 7s, vary seeds around them; avoid what scored
-  ≤ 3. Unrated = unjudged, not bad. Say what you're reusing.
 - **Batches run in the background:** `wait=false` on every render of a
   batch returns a job id at once; keep talking, poll `jobs()` until done,
   then `check_frames` + `view_media` the outputs. A render that's clearly
-  wrong mid-way (wrong region, wrong styles) → `cancel_job(job)`.
+  wrong mid-way (wrong region, wrong styles): tell the operator — they
+  cancel it with the ✕ on its job tile.
 - Renders land in the Studio target folder, else the library's `inbox/`;
   `dest=` sends them elsewhere (`"project"` = the show's `generated/`).
-- `label_render(path, tags=[…])` tags what you see (content, motion, mood);
-  the score is the operator's alone. `move_render` / `rename_render` file
-  them when asked. You can't delete media — the operator does that in Studio.
+- Scoring, labelling, moving, renaming, deleting and filing clips into
+  decks are the operator's, in Studio.
 
 ## Style recipes (the look library)
 
@@ -62,7 +57,7 @@ loose images whenever a recipe fits.
 | Free abstract loop | `images` only. Often beautiful out of the box. |
 | Texture that hugs the surface's shapes | `control_input` = the dark surface (non-reflective areas black), `use_controlnet1=true`, `preprocessor1="Scribble_XDoG_Preprocessor"`, `controlnet_strength1` (subtle vs strong: the tool's arg docs). For a steadier texture with the shape showing through more, add some `loop_noise` (Settings) |
 | "AI-skin" the surface itself | `control_input` = surface, `denoise` 0.7-0.9 (keeps its layout and darkness, restyles it) |
-| Fill one region's shape, black elsewhere in its box | `diffusion_mask` = its `region_crop_mask`, `output_width`/`output_height` = its box, **no** `control_input` (with one, its pixels show through the black mask area) |
+| Fill one region's shape, black elsewhere in its box | `diffusion_mask` = its `mask` from `show_info(region=<id>)`, `output_width`/`output_height` = its box, **no** `control_input` (with one, its pixels show through the black mask area) |
 | Whole frame morphs A → B → A | `mapping_mode="crossfade"`, 2+ images: no regions, each style fills the frame in turn and the loop fades back to the first. `style_hold` = how long each stays pure before fading |
 | Each region changes material over the loop | `style_paths` (e.g. `"1>2, 3>4, 5"`: three regions; the first cycles style 1 → 2 → 1, the second 3 → 4 → 3, the third holds 5), with a band `mapping_mode` or `map_shape_input_to_ip_masks`. A creative extra, not a default: add it once a plain render of the same images looks right |
 | Styles scattered as drifting blobs | `mapping_mode="flow_noise"`: organic blobs of every style wander over the whole frame instead of bands. A very different, hit-or-miss look: render a few seeds, offer it as a variation |
@@ -72,15 +67,15 @@ loose images whenever a recipe fits.
 | Follow a dancer's pose | person clip as `control_input`, `preprocessor1="OpenposePreprocessor"` |
 
 Light landing on non-reflective areas (sky, voids) is invisible anyway, so a
-full-frame TextureFlow render can usually be projected as-is: preview it with
-`simulate_view` against the surface instead of background-subtracting it.
+full-frame TextureFlow render can usually be projected as-is, without
+background subtraction.
 
 ## For the live engine
 
 - **`region=<pack layer id>`** (with `project=<show>`) on every render meant
   for one region: its record files it under that region, and the engine
   places it in the region's box. Set `output_width`/`output_height` to the
-  region's `source_box` size (from `extract_color_regions`; scale it up,
+  region's `source_box` size (from `show_info`; scale it up,
   same aspect, if it's below the tool's minimum) — the engine contain-fits,
   so a matching aspect fills the box.
 - Each render also writes the engine-playable HAP clip beside the mp4
@@ -189,6 +184,5 @@ seed. Finals: upscales on.
 
 ## Before a live session
 
-`textureflow_warm(minutes=180)` keeps a GPU hot (costs per idle hour; see
-the tool); `textureflow_warm(minutes=0)` when done. After a redeploy the
-first renders take 2-3 min extra.
+A cold Modal GPU adds ~1 min to the first render; after a redeploy the first
+renders take 2-3 min extra. A draft render before doors primes it.

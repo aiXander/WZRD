@@ -457,10 +457,15 @@ async def _region_inputs(request, body):
 # -- any non-render tool, synchronously (G8) ---------------------------------
 @api("/api/tool", ("POST",))
 async def _tool(request, body):
-    """Run one MCP tool and return its JSON. Render tools go through
-    /api/render (jobs); destructive tools are never run from here."""
-    name, args = body["tool"], dict(body.get("args") or {})
-    t = await mcp.get_tool(name)
+    return await run_tool(body["tool"], dict(body.get("args") or {}))
+
+
+async def run_tool(name: str, args: dict):
+    """Run one tool as the app and return its JSON — agent tools and the
+    app-only ones (`tool(app_only=True)`: the show-setup steps, hidden from
+    /mcp), hence the provider lookup. Render tools go through /api/render
+    (jobs); destructive tools are never run from here."""
+    t = await mcp.local_provider.get_tool(name)
     if t is None:
         raise ValueError(f"no tool {name!r} (or it is disabled)")
     if "render" in (t.tags or set()):

@@ -269,7 +269,6 @@ class _State:
         self.lock: Optional[asyncio.Lock] = None
         self.local = LocalLane()
         self.modal_last_end = 0.0
-        self.modal_warm_until = 0.0
         self.tick_t = 0.0
 
 
@@ -425,10 +424,6 @@ def report(job: Optional[str], *, phase: Optional[str] = None, stage: Optional[s
     elif now - e.last_bump >= TICK_S:
         e.last_bump = now
         jobs.bump()
-
-
-def note_warm(minutes: float) -> None:
-    S.modal_warm_until = time.time() + max(0.0, minutes) * 60
 
 
 # ---------------------------------------------------------------------------
@@ -652,9 +647,9 @@ def _modal_block() -> dict:
     running = len(S.modal_running)
     if running:
         state = "ready"
-    elif now < S.modal_warm_until or now - S.modal_last_end < MODAL_WARM_S:
+    elif now - S.modal_last_end < MODAL_WARM_S:
         state = "warm"
-    elif S.modal_last_end or S.modal_warm_until:
+    elif S.modal_last_end:
         state = "cold"
     else:
         state = "unknown"

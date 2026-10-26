@@ -1,97 +1,55 @@
 ---
 name: run-sheet
-description: "Venue day, photos to show: locked canvas, regions, layer pack, a clip library from style recipes, the pre-show checklist. Use when setting up WZRD at a venue or preparing a show."
+description: "Venue day, once the operator has set the show up in the app: read the show, build a clip library per region from style recipes, run the pre-show checklist. Use when preparing a show."
 metadata:
   kind: workflow
 ---
 
 # On-site run sheet
 
-From a handful of venue photos to a project the operator can play: every
-surface split into named regions, each region with a row of passing clips in
-the app's clip grid, the show checklist ticked. Work through the steps in
-order; each ends on a check you can see.
+From a set-up show to one the operator can play: each region with a row of
+passing clips, the show checklist ticked. Work through the steps in order;
+each ends on a check you can see.
 
-The operator plays the show. You prepare it: you render and file clips, bind
-on the design deck only when asked, and taking anything live is theirs.
+The operator sets the show up and plays it. You prepare the content: you
+render and check clips, bind on the design deck only when asked, and taking
+anything live is theirs.
 
-## 1. Project and canvas
+## 1. The show
 
-`set_project(name="<venue>-<date>", canvas="<projector aspect>")` — the
-canvas is locked once, so ask the projector's aspect if you don't know it
-(most are 16:9 → 1376×768). Check: the reply shows the canvas and today's
-spend against the daily cap (raise it only on the operator's word).
+The operator runs the app's Show setup (project menu → New show…): show +
+canvas, lit/ambient photos, the rectified surface, the segmentation map, the
+regions and the layer pack. Agree the region list with them first — every
+surface the show treats separately (each fabric panel, the ceiling, a wall
+section, a pillar) with a short id they'll say out loud: `fabric_left`,
+`ceiling`, `wall_back`.
 
-**From here on, pass `project="<venue>-<date>"` on every call** that takes
-it (import, surface, regions, pack, every render, `to_hap`). Nothing is
-remembered between calls; a call without it works on whatever show the app
-has open.
+Then `show_info(project="<show>")`: canvas, regions (ids, labels, boxes),
+pinned assets. **From here on, pass `project="<show>"` on every call** that
+takes it. Nothing is remembered between calls; a call without it works on
+whatever show the app has open. Layers the operator will name as a set
+("the fabrics") get a group: `set_groups` (skill `live-engine`).
 
-## 2. Photos → the surface
+Copy the clip effects into the show so the clips can be played with:
+`cp -R library/effects/* <project_dir>/effects/` (repo root; `project_dir`
+is in `show_info`). No shell → ask the operator to run it.
 
-The operator aims the projector, opens zoom/lens to cover as much surface
-as possible, projects full white and photographs it from the projector's
-position (**lit** photo); ideally the same view with the room lit
-(**ambient** photo). The app's Show setup does the same steps — whoever
-runs them, the results land in the same folders and asset names.
+Check: one region per agreed surface, each with its id.
 
-Follow skill `surface-prep`: import both whole-frame, pin `photo_lit` /
-`photo_ambient`, `rectify_surface`, pin `surface_lit` and `surface`.
-Check: `list_assets()` shows both and the operator agrees the surface
-matches the room.
-
-## 3. Regions
-
-Every surface the show treats separately is one region: each fabric panel,
-the ceiling, each wall section, a pillar.
-
-1. Agree the region list with the operator and give each a short semantic
-   id they'll say out loud: `fabric_left`, `fabric_mid`, `ceiling`,
-   `wall_back`.
-2. Segmentation map: `list_prompts("segmentation")` — the show's own
-   template first, else WZRD's `default`; replace `{n_regions}` with the
-   region count (plain text replace), and name the regions in it. Then
-   `nano_banana(prompt, image_urls=["asset:surface_lit"],
-   aspect_ratio="auto", dest="project/segmentation")` — 2–4 at once with
-   `wait=false` is fine. `view_media` each beside the surface: borders on
-   real edges. A prompt change that worked → `save_prompt("segmentation",
-   …)` (scope `"wzrd"` only on the operator's word).
-3. `pin_asset("segmentation", <best map>)`, then
-   `extract_color_regions(image="asset:segmentation",
-   surface_image="asset:surface")`. Match each returned region (its `color`
-   and `area_fraction` help) to its id by looking at its
-   `region_surface_image`.
-
-Check: one region per agreed surface, none missing, no slivers (raise
-`min_area_fraction` if there are).
-
-## 4. Layer pack
-
-`build_layerpack(masks=<region_mask per region>, surface_image="asset:surface",
-mask_ids=<the ids, same order>, tags={layers: {id: {label, tags}}, groups:
-[…]}, source_capture="asset:photo_lit", pack_name="<venue>")`. Group what
-moves together (`fabrics`, `walls`). It writes the starter `scene.json`
-too. Check: the reply lists every id; the operator opens the project from
-the app's project menu and sees the regions on the surface map.
-
-Copy the clip effects into the project so the clips can be played with:
-`cp -R library/effects/* <project_dir>/effects/` (repo root; the project dir
-is in `set_project`'s reply). No shell → ask the operator to run it.
-
-## 5. The clip library
+## 2. The clip library
 
 Load skill `textureflow` (settings, and the style recipe library).
 
 1. `list_recipes()`; `view_media` the previews of the likely ones. If the
    operator has styles in the Studio tray, `studio_selection()` gives them.
-   `find_renders(recipe=<name>)` / `find_renders(style=<path>)` shows what
-   scored well (and badly) with them before. Agree with the operator which
+   Agree with the operator which
    recipes go on which regions — one recipe set across regions reads as one
    show; a contrasting recipe marks a region out.
 2. **Drafts first**, one per region × recipe (a few seeds each):
    `texture_flow(recipe=<name>, region=<id>, project=<show>,
    output_width=…, output_height=…, draft=true, wait=false)` with the
-   output size = the region box's own pixel size (from step 3) and every
+   output size = the region box's own pixel size (`source_box` in
+   `show_info`) and every
    other arg as the final should have it — a draft is the final's first
    pass. If the tool has no `draft` arg yet (production not on it), use
    `use_upscale=false, upscale_esrgan=false` instead. Modal renders 3 at a
@@ -114,24 +72,21 @@ and its region (`project=` + `region=`), so the app files it for this show.
 Watch the `spend` line in each reply (today's spend, all shows) and stop at
 the 80 % warning to ask.
 
-When the operator wants clips ready to play, `add_to_deck(path=<clip>,
-project=<show>, deck=<name>)` files each into a deck (its region's row,
-first empty slot; the HAP beside an mp4 is used). Taking a clip live stays
-theirs.
+The operator files clips into the show's decks in Studio (`D` / "+ Deck")
+and takes them live.
 
-Check: every region's row holds ≥ 3 clips that passed `check_frames`.
+Check: every region has ≥ 3 clips that passed `check_frames`.
 
-## 6. Show checklist
+## 3. Show checklist
 
 Run through it with the operator before doors and report each line:
 
 | | Check |
 |---|---|
 | ☐ | Alignment done in the app's Align room (operator, at the venue) |
-| ☐ | Every clip on the grid passed `check_frames` — no flash fails |
+| ☐ | Every clip in the decks passed `check_frames` — no flash fails |
 | ☐ | Audio server running and the guitar moves `audio.*` (operator) |
-| ☐ | `textureflow_warm(minutes=<set length + 30>)` ~10 min before doors, if clips will be topped up live; `textureflow_warm(minutes=0)` after the show |
-| ☐ | Spend: `set_project()` reports it — headroom for live top-ups |
+| ☐ | Spend: `jobs()` reports today's — headroom for live top-ups |
 | ☐ | A first look prepared on design (skill `live-engine`), if asked |
 
 Done when every row is ticked or the operator has waived it.
@@ -139,5 +94,5 @@ Done when every row is ticked or the operator has waived it.
 ## During the show
 
 Top-ups: `texture_flow(recipe=…, region=…)` at draft-or-final settings the
-operator asks for → `check_frames` → it appears in the grid flagged NEW.
+operator asks for → `check_frames` → it lands in the Studio target folder.
 Binding a clip or an effect follows skill `live-engine`, on design only.

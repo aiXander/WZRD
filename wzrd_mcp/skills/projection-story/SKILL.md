@@ -36,7 +36,8 @@ Proceed to generation only when the user says go (or told you to run unattended)
 ## 2. Surface
 
 You need ONE good dark surface image, aligned to the projector, at the locked
-aspect ratio. If the user only has raw photos, run skill `surface-prep` first.
+aspect ratio: the show's `asset:surface` (`show_info`). No surface yet → the
+operator makes it in the app's Show setup.
 This image is reference `image_1` in every keyframe call and the background for
 subtraction later.
 A story confined to one region of a segmented surface (a pillar, one fabric)
@@ -74,11 +75,10 @@ changing background.
 2. `subtract_background_video(video=<stitched>, background_image=<surface>)` →
    the projector file: only the added light, black elsewhere. Noisy whole-frame
    output means drift in a segment: find it with `view_media`, regenerate it.
-3. `simulate_view(projector_video, surface_image)` → what the audience sees.
-4. Show the user both (paths + a `view_media` sheet).
+3. Show the user the projector file (path + a `view_media` sheet). To see it
+   on the surface, bind it on design (skill `live-engine`) and `get_preview`.
 
-Done when the user has the projector-output video and the simulated view, and
-has approved them. Optional next steps: play it in the live engine (skill
+Done when the user has the projector-output video and has approved it. Optional next steps: play it in the live engine (skill
 `live-engine`), or split the surface into regions (skill `region-animation`).
 
 ## Quick mode: one shot

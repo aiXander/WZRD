@@ -26,7 +26,7 @@ Needs the engine running locally (Tauri shell or headless render-core with
    so the operator's words ("the trunk", "the canopy") resolve to ids.
 3. **Edit one thing at a time**: `upsert_binding(id, binding)` /
    `remove_binding(id)`. A CAS rejection means the design moved — re-read and
-   call again. `set_scene` only for a first scene from empty or a full rewrite.
+   call again.
 4. **Read the verdict** in every write reply: probe band green/yellow/red +
    a thumbnail of the design composite. Red = refused for frame cost:
    simplify. No probe ran (cached shaders) → `get_preview` to look.
@@ -122,7 +122,6 @@ mask box, so light outside the region is cut; an effect that must glow past it
 declares `"bounds": "canvas"` in the descriptor (calling `sample_mask` also
 makes it full-canvas, and slower).
 
-Iterate syntax with `validate_wgsl` (cheap, line-mapped). The probe only runs
-when the design scene binds the effect, so bind it first to see a verdict and
-thumbnail on each iteration. `remove_effect` deletes the files; remove the
-bindings that use it too.
+`upsert_effect` validates first (line-mapped errors, nothing written). The
+probe only runs when the design scene binds the effect, so bind it first to
+see a verdict and thumbnail on each iteration.

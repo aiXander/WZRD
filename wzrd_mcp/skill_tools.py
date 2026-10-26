@@ -53,7 +53,7 @@ def _register_prompt(skill: skill_catalog.Skill) -> None:
         ask = f" The user's goal: {goal}" if goal else ""
         return (
             f"Load the WZRD skill `{skill.name}` with load_skill(name=\"{skill.name}\") and follow it.{ask} "
-            "Start by confirming the active project (set_project) and asking for anything the skill "
+            "Start by confirming the show (show_info) and asking for anything the skill "
             "says must be locked in before generating."
         )
 

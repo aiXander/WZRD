@@ -70,7 +70,7 @@ PROMPTS = "prompts"
 EFFECTS = "effects"
 
 #: The fixed folder map (G4): folder -> what goes there. Returned by
-#: `describe()` (set_project, list_assets, /api/project) so the UI and an
+#: `describe()` (set_project, show_info, /api/project) so the UI and an
 #: agent file things the same way.
 LAYOUT: dict[str, str] = {
     CAPTURES: "raw venue photos — lit (projector white) and ambient (room lit)",
@@ -166,7 +166,7 @@ def layout(name: str | None = None) -> dict[str, dict]:
 
 def describe(name: str | None = None) -> dict:
     """Summary of a project (default: the active one) — what `set_project`,
-    `list_assets` and `/api/project` report: folder map + named assets."""
+    `show_info` and `/api/project` report: folder map + named assets."""
     from . import assets
 
     name = slugify(name) if name else active_project()

@@ -851,11 +851,13 @@ splice + `scene.load`), `effects` (`effect.describe`/`effect.upsert`),
 `drivers` (one-shot `drivers`/`audio` telemetry frames). Tool surface: one
 read (`get_scene_context {scope?, depth, ids?, since_rev?}` — unscoped
 digest is the orient call; `full` requires a scope; single-effect full depth
-includes WGSL via `effect.describe {name}`), five facet-bound writes
-(`upsert_binding`/`remove_binding` as read-splice-CAS, `upsert_effect`/
-`remove_effect`, `set_groups`/`set_labels`, plus the `set_scene` escape
-hatch), two utilities (`validate_wgsl`, `get_preview` — strictly one-shot
-subscribe/frame/unsubscribe so the §2.6 demand gate holds). Every read is
+includes WGSL via `effect.describe {name}`), facet-bound writes
+(`upsert_binding`/`remove_binding` as read-splice-CAS, `upsert_effect` —
+which naga-validates before writing — and `set_groups`/`set_labels`), and
+`get_preview` (strictly one-shot subscribe/frame/unsubscribe so the §2.6
+demand gate holds). `effect.remove`, `wgsl.validate` and whole-scene
+`scene.load` stay engine RPCs for the app; their agent tools were removed
+2026-10-26 ([mcp-server.md](mcp-server.md) "Agent surface vs the app"). Every read is
 **self-contained** (status header incl. "engine unreachable since \<ts\>" +
 recent changes ride along); author replies carry the probe verdict **as an
 image content block** — write → see → fix without touching the projector.

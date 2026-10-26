@@ -13,7 +13,7 @@ Two scopes, one file per template, `<kind>/<name>.json`:
 `{n_regions}` is the one placeholder (plain string replace by the caller —
 prompts may hold other braces). `from` names what a template was forked
 from (e.g. "wzrd:segmentation/default"), when the writer says. Written by
-the hub only (`/api/prompts`, MCP `save_prompt`), temp + rename.
+the hub only (`/api/prompts`, the app's Show setup), temp + rename.
 """
 
 from __future__ import annotations

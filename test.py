@@ -125,17 +125,6 @@ def test_layerpack():
         "towers group not emitted"
 
 
-def test_reproject():
-    from wzrd import reproject
-    _require(TEST_VIDEO)
-    out_dir = _result_dir("reproject")
-    _copy_input(TEST_VIDEO, out_dir)
-    out = os.path.join(out_dir, "output.mp4")
-    metadata = {"x": 0, "y": 0, "width": 320, "height": 240}
-    info = reproject.reproject_video(TEST_VIDEO, metadata, output_path=out)
-    assert os.path.isfile(out), f"output video not created: {out}"
-
-
 def test_detect():
     from wzrd import detect
     _require(TEST_NIGHT_IMAGE)
@@ -167,32 +156,14 @@ def test_align():
     assert warped is not None, "align returned None image"
 
 
-def test_prepare_surface_darken_only():
-    from wzrd.prepare_surface import prepare_surface
-    _require(TEST_DAY_IMAGE)
-    out_dir = _result_dir("prepare_surface_darken_only")
-    _copy_input(TEST_DAY_IMAGE, out_dir)
-    result = prepare_surface(
-        TEST_DAY_IMAGE,
-        output_path=os.path.join(out_dir, "output.jpg"),
-    )
-    assert result['image'] is not None, "prepare_surface returned None"
-    assert os.path.isfile(os.path.join(out_dir, "output.jpg"))
-
-
-def test_prepare_surface_full():
-    from wzrd.prepare_surface import prepare_surface
+def test_rectify():
+    """Lit + ambient photo → the three surface images at the canvas."""
+    from wzrd.prepare_surface import rectify_surface
     _require(TEST_DAY_IMAGE, TEST_NIGHT_IMAGE)
-    out_dir = _result_dir("prepare_surface_full")
-    _copy_input(TEST_DAY_IMAGE, out_dir)
-    _copy_input(TEST_NIGHT_IMAGE, out_dir)
-    result = prepare_surface(
-        TEST_NIGHT_IMAGE,
-        day_image_path=TEST_DAY_IMAGE,
-        output_path=os.path.join(out_dir, "output.jpg"),
-    )
-    assert result['image'] is not None, "prepare_surface returned None"
-    assert os.path.isfile(os.path.join(out_dir, "output.jpg"))
+    res = rectify_surface(TEST_NIGHT_IMAGE, TEST_DAY_IMAGE, output_size=(1376, 768))
+    for key in ("lit", "surface", "ambient"):
+        assert res[key] is not None and res[key].size == (1376, 768), (key, res[key])
+    assert len(res["corners"]) == 4 and res["align"] and not res["manual_corners"]
 
 
 def test_concat():
@@ -248,23 +219,35 @@ def test_mcp():
     """The MCP server boots, serves skills three ways, and ships text-only results."""
     import asyncio
     from fastmcp import Client
-    from wzrd_mcp import skill_catalog
-    from wzrd_mcp.server import mcp
+    from fastmcp.exceptions import ToolError
+    from wzrd_mcp import hub, skill_catalog
+    from wzrd_mcp.server import APP_ONLY, mcp
 
     async def run():
         async with Client(mcp) as c:
             tools = {t.name: t for t in await c.list_tools()}
             assert "load_skill" in tools and "view_media" in tools and "check_frames" in tools
             assert all(t.output_schema is None for t in tools.values()), "a tool advertises an output schema"
+            missing = [n for n in tools if n not in mcp.instructions]
+            assert not missing, f"tools missing from server._JOB_MAP: {missing}"
             for name in skill_catalog.catalog():
-                assert name in mcp.instructions, f"skill {name} missing from the instructions index"
+                assert name in mcp.instructions, f"skill {name} missing from server._JOB_MAP"
                 r = await c.call_tool("load_skill", {"name": name})
                 assert len(r.content) == 1 and r.structured_content is None
                 assert (await c.read_resource(f"skill://{name}/SKILL.md"))[0].text.startswith("---")
             workflows = [s.name for s in skill_catalog.catalog().values() if s.kind == "workflow"]
             prompts = {p.name for p in await c.list_prompts()}
             assert prompts == {w.replace("-", "_") for w in workflows}, prompts
-            r = await c.call_tool("set_project", {})
+            # app-only tools (the show-setup steps): hidden and refused here, run by the app
+            app_only = [t.name for t in await mcp.local_provider.list_tools() if APP_ONLY in (t.tags or set())]
+            assert "set_project" in app_only and not set(app_only) & set(tools), app_only
+            try:
+                await c.call_tool("set_project", {})
+                raise AssertionError("an app-only tool was callable over MCP")
+            except ToolError:
+                pass
+            assert "existing_projects" in await hub.run_tool("set_project", {})
+            r = await c.call_tool("show_info", {})
             assert len(r.content) == 1 and r.content[0].text.startswith("{")
 
     asyncio.run(run())
@@ -275,7 +258,7 @@ def test_textureflow():
     """texture_flow's backend switch: the default Modal path (Modal mocked) and
     backend="local" against a fake job server speaking the local wire contract
     v1 (health, multipart submit, long-poll, result + files, cancel, 400, 401,
-    unreachable, timeout, server-side error), plus textureflow_warm, the
+    unreachable, timeout, server-side error), the
     spec the tool is generated from (tf_spec: cache vs snapshot, background
     refresh, recipe args the spec doesn't know), and draft → finish (spec
     2.2.0's draft / finish_from: request_id in the record + filename, the
@@ -290,7 +273,7 @@ def test_textureflow():
     from aiohttp import web
     from fastmcp import Client
     from fastmcp.exceptions import ToolError
-    from wzrd_mcp import jobs, library, tf_spec
+    from wzrd_mcp import hub, jobs, library, tf_spec
     from wzrd_mcp.server import mcp
     from wzrd_mcp import tools  # after the server (import order)
 
@@ -390,14 +373,6 @@ def test_textureflow():
         def __call__(self):
             self.render = type("R", (), {"spawn": FakeSpawn()})()
             return self
-
-    class FakeWarm:
-        def __init__(self, *a, **kw):
-            modal_calls.append(("fn", a, kw))
-            self.remote = self
-
-        async def aio(self, minutes):
-            return {"warm": True, "minutes": minutes}
 
     # -- the fake local job server (wire contract v1) ----------------------
     TOKEN, GPU = "s3cret", "NVIDIA GeForce RTX 3090"
@@ -562,10 +537,10 @@ def test_textureflow():
         mute_url = f"http://127.0.0.1:{mute.sockets[0].getsockname()[1]}"
         try:
             async with Client(mcp) as c:
-                await call(c, "set_project", {"name": "tf-t"})
+                await hub.run_tool("set_project", {"name": "tf-t"})
 
                 # 1. backend unset → today's Modal call, exactly.
-                modal.Cls.from_name, modal.Function.from_name = FakeCls, FakeWarm
+                modal.Cls.from_name = FakeCls
                 res_m = await call(c, "texture_flow", {"images": [style], **base["draft"], "project": "tf-t"})
                 assert modal_calls[0] == ("cls", ("textureflow", "TextureFlow"), {"environment_name": "wzrd"})
                 _, sent_m, files_m = modal_calls[1]
@@ -588,9 +563,6 @@ def test_textureflow():
                 assert "draft" not in res_m
                 assert library.query_one("SELECT remote FROM jobs WHERE id=?", (res_m["job"],))["remote"] == "modal|fc-test"
                 assert srv["requests"] == 0
-                warm = await call(c, "textureflow_warm", {"minutes": 5})
-                assert warm == {"warm": True, "minutes": 5} and modal_calls[-1] == (
-                    "fn", ("textureflow", "set_warm"), {"environment_name": "wzrd"}), (warm, modal_calls[-1])
                 assert jobs.estimate("texture_flow", base["draft"]) > 0
                 assert jobs.estimate("texture_flow", {"backend": "local"}) == 0
 
@@ -638,7 +610,7 @@ def test_textureflow():
                 await refused(c, "texture_flow", {"images": [style], "seed": 13, "backend": "local"},
                               "CUDA out of memory")
 
-                # 6. cancel_job stops the desktop render; the job reads cancelled.
+                # 6. cancelling (the app's ✕) stops the desktop render; the job reads cancelled.
                 started = await call(c, "texture_flow", {"images": [style], "seed": 666, "backend": "local",
                                                          "wait": False})
                 job = started["job"]
@@ -648,7 +620,7 @@ def test_textureflow():
                         break
                     await asyncio.sleep(0.02)
                 jid = row["remote"].split("|")[1]
-                out = await call(c, "cancel_job", {"job": job})
+                out = await jobs.cancel(job)
                 assert out["status"] == "cancelled" and out["remote_cancel"] == "local", out
                 for _ in range(50):
                     if srv["jobs"][jid]["state"] == "cancelled":
@@ -657,15 +629,10 @@ def test_textureflow():
                 assert srv["cancels"] == [jid] and srv["jobs"][jid]["state"] == "cancelled"
                 assert await jobs._cancel_remote(f"local|{jid}") == "local"  # a lost job's path
 
-                # 7. warm on local: a health check, Modal untouched.
-                warm = await call(c, "textureflow_warm", {"backend": "local", "minutes": 30})
-                assert warm == {"warm": True, "backend": "local", "gpu": GPU, "worker": "ready",
-                                "busy": False, "queue": 0}, warm
-                # worker booting = up (the job queues); down = accepted, failed on the first poll.
+                # 7. worker booting = up (the job queues); down = accepted, failed on the first poll.
                 srv["worker"] = "booting"
                 await call(c, "texture_flow", {"images": [style], **base["draft"], "backend": "local"})
                 srv["worker"] = "down"
-                assert (await call(c, "textureflow_warm", {"backend": "local"}))["warm"] is False
                 await refused(c, "texture_flow", {"images": [style], "backend": "local"}, "render worker is down")
                 srv["worker"] = "ready"
 
@@ -673,11 +640,10 @@ def test_textureflow():
                 n = srv["requests"]
                 for dead in (f"http://127.0.0.1:{_free_port()}", mute_url):
                     os.environ["TEXTUREFLOW_LOCAL_URL"] = dead
-                    for tool, args in (("texture_flow", {"images": [style], "backend": "local"}),
-                                       ("textureflow_warm", {"backend": "local"})):
-                        t0 = time.perf_counter()
-                        await refused(c, tool, args, "unreachable", "desktop on", dead)
-                        assert time.perf_counter() - t0 < 3.0, (dead, time.perf_counter() - t0)
+                    t0 = time.perf_counter()
+                    await refused(c, "texture_flow", {"images": [style], "backend": "local"},
+                                  "unreachable", "desktop on", dead)
+                    assert time.perf_counter() - t0 < 3.0, (dead, time.perf_counter() - t0)
                 assert srv["requests"] == n
 
                 # 9. the spec: the schema is the spec's args + WZRD's own; a recipe arg
@@ -751,7 +717,7 @@ def test_textureflow():
                 # 11. the render queue (docs/TODO/textureflow-render-queue.md), through the hub's /api routes:
                 # the Modal lane (1 slot here), reorder, cancel a queued job, move to local, a pinned finish.
                 import httpx
-                from wzrd_mcp import hub, textureflow_local, tf_queue  # noqa: F401 — hub registers the routes
+                from wzrd_mcp import textureflow_local, tf_queue  # noqa: F401
                 api = httpx.AsyncClient(transport=httpx.ASGITransport(app=mcp.http_app(transport="streamable-http")),
                                         base_url="http://hub")
 
@@ -1060,7 +1026,7 @@ def _show_setup():
     from fastmcp import Client
     from fastmcp.exceptions import ToolError
     from PIL import Image
-    from wzrd_mcp import library, project, prompts
+    from wzrd_mcp import assets, hub, library, project, prompts
     from wzrd_mcp.server import mcp
 
     _require(TEST_NIGHT_IMAGE, TEST_DAY_IMAGE)
@@ -1070,26 +1036,25 @@ def _show_setup():
     os.environ["WZRD_PROJECTS_ROOT"] = str(tmp / "projects")
     show = "setup-t"
 
-    async def call(c, tool, args):
-        r = await c.call_tool(tool, {**args, "project": show} if tool != "set_project" else args)
-        return json.loads(r.content[0].text)
+    async def call(tool, args):  # as the app's wizard does: /api/tool
+        return await hub.run_tool(tool, {**args, "project": show} if tool != "set_project" else args)
 
     async def run():
         async with Client(mcp) as c:
-            info = await call(c, "set_project", {"name": show, "canvas": "16:9"})
+            info = await call("set_project", {"name": show, "canvas": "16:9"})
             assert set(project.LAYOUT) <= set(info["layout"]) and info["assets"] == {}
-            photos = (await call(c, "import_photos", {"paths": [os.path.abspath(TEST_NIGHT_IMAGE),
-                                                               os.path.abspath(TEST_DAY_IMAGE)],
-                                                     "conform": False}))["photos"]
-            await call(c, "pin_asset", {"name": "photo_lit", "path": photos[0]["path"]})
-            assets = (await call(c, "pin_asset", {"name": "photo_ambient", "path": photos[1]["path"]}))["assets"]
-            assert assets["photo_lit"]["exists"] and assets["photo_lit"]["id"]
+            photos = (await call("import_photos", {"paths": [os.path.abspath(TEST_NIGHT_IMAGE),
+                                                            os.path.abspath(TEST_DAY_IMAGE)],
+                                                  "conform": False}))["photos"]
+            assets.pin("photo_lit", photos[0]["path"], by="app", name=show)
+            pinned = assets.pin("photo_ambient", photos[1]["path"], by="app", name=show)
+            assert pinned["photo_lit"]["exists"] and pinned["photo_lit"]["id"]
             try:
-                await c.call_tool("rectify_surface", {"lit_photo": "asset:nope", "project": show})
+                await call("rectify_surface", {"lit_photo": "asset:nope"})
                 raise AssertionError("unknown asset was accepted")
             except ToolError as exc:
                 assert "photo_lit" in str(exc), exc
-            res = await call(c, "rectify_surface", {"lit_photo": "asset:photo_lit",
+            res = await call("rectify_surface", {"lit_photo": "asset:photo_lit",
                                                     "ambient_photo": "asset:photo_ambient"})
             for k in ("surface_lit", "surface", "surface_ambient"):
                 assert Image.open(res[k]).size == (1376, 768), (k, Image.open(res[k]).size)
@@ -1100,15 +1065,18 @@ def _show_setup():
             assert rec["corners"] == res["corners"] == rec["args"]["corners"] and rec["manual_corners"] is False
             assert res["align"] and not res["manual_corners"]
             nudged = [[x + 0.005, y] for x, y in res["corners"]]
-            res2 = await call(c, "rectify_surface", {"lit_photo": "asset:photo_lit", "corners": nudged})
+            res2 = await call("rectify_surface", {"lit_photo": "asset:photo_lit", "corners": nudged})
             assert res2["manual_corners"] and res2["surface_ambient"] is None and res2["run"] != res["run"]
             assert all(abs(a - b) < 1e-5 for p, q in zip(res2["corners"], nudged) for a, b in zip(p, q))
             # prompts: the shipped WZRD default, then a project fork listed first
-            found = (await call(c, "list_prompts", {"kind": "segmentation"}))["prompts"]
+            found = prompts.list_prompts("segmentation", show)
             assert found[0]["scope"] == "wzrd" and prompts.PLACEHOLDER in found[0]["prompt"]
-            await call(c, "save_prompt", {"kind": "segmentation", "name": "default", "prompt": "x {n_regions}"})
-            found = (await call(c, "list_prompts", {"kind": "segmentation"}))["prompts"]
+            prompts.save_prompt("segmentation", "default", "x {n_regions}", "project", show)
+            found = prompts.list_prompts("segmentation", show)
             assert [p["scope"] for p in found] == ["project", "wzrd"], found
+            # what an agent reads of the show: canvas, assets, regions (none before a pack)
+            r = json.loads((await c.call_tool("show_info", {"project": show})).content[0].text)
+            assert r["canvas"] and r["assets"]["photo_lit"]["exists"] and r["regions"] == [], r
 
     try:
         asyncio.run(run())
@@ -1151,12 +1119,10 @@ TESTS = {
     "darken": test_darken,
     "detect": test_detect,
     "align": test_align,
-    "prepare_surface_darken_only": test_prepare_surface_darken_only,
-    "prepare_surface_full": test_prepare_surface_full,
+    "rectify": test_rectify,
     "subtract_video": test_subtract_video,
     "islands": test_islands,
     "layerpack": test_layerpack,
-    "reproject": test_reproject,
     "concat": test_concat,
     "check_frames": test_check_frames,
     "clips": test_clips,

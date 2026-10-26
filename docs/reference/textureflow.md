@@ -89,10 +89,9 @@ a model `summary` and a semver `version`; the deployed `textureflow` serves it f
   fails it on the first poll; `booting` counts as up. Cancel: `jobs.set_remote("local|<job id>")` →
   `POST /v1/jobs/<id>/cancel` (also for lost jobs, `jobs._cancel_remote`). Test: `python test.py textureflow`
   (Modal mocked + a fake aiohttp job server).
-- **`textureflow_warm(minutes)`** — calls the deployed `set_warm`: keeps one GPU container up until a
-  deadline that a Modal-side `cool_down` enforces (so a closed laptop can't leave a GPU on, ≈ $3/h idle);
-  0 = cool down now; capped at 12 h. `backend="local"` only health-checks the desktop (always warm while
-  its service runs): `{"warm": worker != "down", "backend": "local", gpu, worker, busy, queue}`, Modal untouched.
+- **No warm-up tool** (removed 2026-10-26: a cold start is ~1 min, not worth an agent tool). The lab's
+  `set_warm` / `cool_down` stay deployed; WZRD no longer calls them. The Modal lane's warm/cold lamp
+  derives from recent renders only (`tf_queue._modal_block`).
 - **Draft → pick → finish** (lab spec 2.2.0: args `draft` + `finish_from`; server side = the lab's
   `docs/reference/deploy.md` "Draft bundles"). A draft (`draft=true`, the final's args) renders only the
   final's first pass; every 2.2.0 render (draft or full) leaves a bundle on the backend that rendered it for
@@ -185,7 +184,7 @@ saved; the decisions behind it (Q1–Q8) and the hub API contract live in
 ## Show-day traps
 
 - **A redeploy discards the GPU memory snapshot.** For `textureflow` the lab's CI check render retakes it
-  right after each deploy; still, prime the endpoint (a render or `textureflow_warm`) before a show, and
+  right after each deploy; still, prime the endpoint (a draft render) before a show, and
   don't merge to the lab's `main` during one — that ships to production minutes later.
 - **Rollback** of a bad live deploy: either `TEXTUREFLOW_APP=wzrd-textureflow` here (instant, no deploy),
   or `uv run modal app rollback textureflow --env wzrd` from the lab.

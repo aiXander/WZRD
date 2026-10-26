@@ -148,8 +148,8 @@ def _session() -> Optional[str]:
 #: Params `server.tool()` can add to a tool's signature; stripped before the body runs.
 _PROJECT_DOC = ("Project (show) this call works on — its files, and what region= resolves against. "
                 "Pass it on every call; omitted = the show open in the app.")
-_WAIT_DOC = ("false = return at once with a job id (the render runs in the hub); poll jobs(job), "
-             "stop it with cancel_job(job). Use for batches and anything over ~1 min. Default true.")
+_WAIT_DOC = ("false = return at once with a job id (the render runs in the hub); poll jobs(job) "
+             "(the operator can stop it from its job tile). Use for batches and anything over ~1 min. Default true.")
 _DEST_DOC = ('Where outputs land: omit or "library" = the Studio target folder, else the media '
              'library\'s inbox/; "project" = the project\'s generated/; "project/<folder>" = that '
              'project folder (e.g. "project/segmentation"); or an absolute folder path.')

@@ -61,8 +61,8 @@ medium lists.
 
 ## Templates
 
-The saved versions (WZRD defaults + the show's own forks) are
-`list_prompts("mask")` / `list_prompts("segmentation")`; prefer those.
+Segmentation maps are made in the app's Show setup, which keeps the saved
+segmentation templates; the templates below are for your own calls.
 
 **Mask non-reflective areas** (surface prep): `image_urls=[surface]`, prompt:
 "Keep the surface in image_1 exactly as it is, pixel for pixel, and replace

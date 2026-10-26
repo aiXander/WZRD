@@ -715,14 +715,13 @@ def render(ref: str) -> dict:
 
 def label(refs: list[str], *, score: Any = ..., tags: Optional[list[str]] = None,
           add_tags: Optional[list[str]] = None, remove_tags: Optional[list[str]] = None,
-          notes: Any = ..., agent: bool = False) -> list[dict]:
-    """Set labels on renders. The app's tags go to `tags`, an agent's to
-    `agent_tags`; an agent never sets the score (S18). `...` = leave as is."""
-    if agent and score is not ...:
-        raise ValueError("an agent never sets the score")
+          notes: Any = ...) -> list[dict]:
+    """Set the operator's labels on renders (`...` = leave as is). Labels are
+    the app's alone; `agent_tags` only holds what agents wrote before
+    2026-10-26 (shown read-only, ✦)."""
     if score is not ... and score is not None and not (isinstance(score, int) and 0 <= score <= 9):
         raise ValueError("score must be an integer 0-9 (or null to clear)")
-    col = "agent_tags" if agent else "tags"
+    col = "tags"
     out = []
     ids = [resolve_id(r) for r in refs]
     with tx() as c:

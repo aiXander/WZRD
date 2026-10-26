@@ -178,20 +178,20 @@ drawer, Perform's compact Clips tab) + `state/decks.ts` + shell
   shows missing until the job lands); the **INCOMING strip** = the newest
   playable renders whose `project` is this show and that aren't in the
   active deck (`library_incoming`, polled 4 s) — click = add + play on
-  DESIGN, drag = file on a row; the agent's `add_to_deck` MCP tool. Drag a
+  DESIGN, drag = file on a row (agents can't file clips — curation is the
+  operator's). Drag a
   slot to another row / slot to re-file; ✕ on hover removes it (the file
   stays).
-- **Two writers, one file.** The app writes the whole doc with a
-  compare-and-swap on the file's mtime (`decks_write {doc, baseMtimeMs}` →
-  `"changed"` if the hub's `add_to_deck` wrote in between → re-read,
-  re-apply the op, retry once). While a grid is mounted the file is
-  re-read every 2 s (refcounted `useDecksLivePoll`), so an agent's add
-  shows up without a reload. `decks_read` also returns `missing` (slot
+- **One writer, several seats.** Only the app writes it, the whole doc with
+  a compare-and-swap on the file's mtime (`decks_write {doc, baseMtimeMs}` →
+  `"changed"` if another seat — webview, browser seat — wrote in between →
+  re-read, re-apply the op, retry once). While a grid is mounted the file
+  is re-read every 2 s (refcounted `useDecksLivePoll`), so another seat's
+  edit shows up without a reload. `decks_read` also returns `missing` (slot
   paths not on disk) → amber dashed "⚠ missing" tile.
 - **Migration, once:** a show with no `decks.json` gets one deck "Main"
   from the old `clipgrid.json` filing + `generated/*.mov` (region from the
-  embedded tag / old sidecar), absolute paths, written on first read. The
-  hub's `add_to_deck` refuses a show that still needs it. Fingerprints
+  embedded tag / old sidecar), absolute paths, written on first read. Fingerprints
   (`decks.rs::fingerprint`) match the hub's byte-for-byte (`<size>-<sha1
   of first + last MiB>[:20]`, tested).
 - **Signals (S6)** to the hub's `/api/library/signal`: `deck_add` on add;
@@ -430,8 +430,8 @@ same everywhere. Exact props live in each file's header.
 
 Plus `state/projectAssets.ts`: one `ProjectInfo` per show (`GET
 /api/project` — assets, roles, folder map, canvas), polled every 3 s while
-any component holds `useProjectInfo(show)` (refcounted), so an agent's
-`pin_asset` shows up live; after an app-side pin call
+any component holds `useProjectInfo(show)` (refcounted), so a pin from
+another seat or the wizard shows up live; after an app-side pin call
 `refreshProjectInfo(show)`. `pinsByPath(info)` = path → asset names.
 
 - **Why a refcount + layer stack instead of each dialog catching keys:**

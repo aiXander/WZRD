@@ -151,8 +151,8 @@ python -m wzrd.subtract_video animation.mp4 background.png -o output.mp4 --thres
 # Segment into color regions via K-means + connected components (needs the `islands` extra)
 python -m wzrd.islands input.png -o regions/ --max-colors 6 --surface surface.png
 
-# Reproject cropped island videos back onto a full-size canvas
-python -m wzrd.reproject regions_dir/ -o output.mp4 --aspect 16:9
+# Lit (+ ambient) photo → rectified lit crop, dark surface, aligned ambient
+python -m wzrd.prepare_surface lit.jpg ambient.jpg --size 1376x768 -o surfaces/
 
 # Author the layer pack the realtime engine consumes
 python -m wzrd.layerpack masks_dir/ --surface surface.png --tags tags.json -o pack/
@@ -171,13 +171,12 @@ wzrd.subtract_background_video("video.mp4", "background.png",
     output_path="output.mp4", threshold=10, codec="libx264")
 
 from wzrd import darken_image, detect_projection_area, align_images
-from wzrd import extract_color_regions, reproject_videos_batch
+from wzrd import extract_color_regions
 
 darkened = darken_image(image, max_brightness=0.25)
 detect_projection_area("photo.jpg", margin=0.02, target_aspect_ratio=16/9)
 warped, result = align_images(source, target)
 extract_color_regions(image, output_dir="regions/", max_colors=6)
-reproject_videos_batch(video_json_pairs, canvas_width=1920, canvas_height=1080)
 ```
 
 ### Tips
@@ -216,13 +215,14 @@ projects/<name>/
   packs/<pack>/       layer packs (pack.json + masks/ + references/)
   surfaces/           prepared surfaces + alignment aid videos
   generated/          model outputs (FAL, …)
-  video/              subtract / reproject / simulate output
+  video/              background-subtracted video
   regions/            extract_color_regions runs
   captures/           camera snapshots
 ```
 
-Call **`set_project("my_gig")`** first in a session to pick the folder (or set
-`WZRD_PROJECT`; the fallback is `default`). A project folder *is* a scene
+Shows are created in the app (project menu → New show…, the Show setup
+wizard); an agent passes `project="my_gig"` on each call, and without it works
+on the show open in the app (fallback `WZRD_PROJECT`, then `default`). A project folder *is* a scene
 directory, so `build_layerpack` output is loadable by the engine as-is:
 `cargo run -- --scene projects/my_gig/scene.json`.
 
@@ -234,9 +234,9 @@ calls it, `boto3` moved to the optional `s3` extra, and it's there for the day
 it gets pointed at a self-owned bucket.
 
 - **Per-tool toggles** live in `wzrd_mcp/tools_config.json` (enabled flag + timeout).
-- **Skills (progressive disclosure):** the server's always-on instructions stay short; workflows (projection story, surface prep, region animation, live engine) and prompt craft (Nano Banana, image→video, TextureFlow) load on demand — the agent calls `load_skill`, Claude Code also lists them as `skill://` resources and `/mcp__wzrd__<workflow>` prompts. Source: `wzrd_mcp/skills/`; design: `docs/reference/mcp-server.md`.
-- **Engine tools** (`get_scene_context`, `upsert_binding`, `upsert_effect`, `set_groups`/`set_labels`, `validate_wgsl`, `get_preview`, …) need the `engine` extra → `websockets`. They only register when `websockets` is installed (toggles in `tools_config.json`), so the Modal image structurally can't carry them. Usage: [§3 above](#3-ai-scene-authoring-claude-desktop-or-claude-code--running-engine).
-- **Register in Claude Code:** `claude mcp add --transport http wzrd http://localhost:8787/mcp`.
+- **Skills (progressive disclosure):** the server's always-on instructions stay short; workflows (venue run sheet, projection story, region animation, live engine) and prompt craft (Nano Banana, image→video, TextureFlow) load on demand — the agent calls `load_skill`, Claude Code also lists them as `skill://` resources and `/mcp__wzrd__<workflow>` prompts. Source: `wzrd_mcp/skills/`; design: `docs/reference/mcp-server.md`.
+- **Engine tools** (`get_scene_context`, `upsert_binding`, `upsert_effect`, `set_groups`/`set_labels`, `get_preview`, …) need the `engine` extra → `websockets`. They only register when `websockets` is installed (toggles in `tools_config.json`), so the Modal image structurally can't carry them. Usage: [§3 above](#3-ai-scene-authoring-claude-desktop-or-claude-code--running-engine).
+- **Claude Code:** the repo's `.mcp.json` registers it — sessions started here connect when the hub is up (start `wzrd` first, else `/mcp` → reconnect).
 - **Register in Claude Desktop:** stdio, no running server needed — [see below](#connecting-claude-desktop).
 - **Browse/test tools interactively:** `npx @modelcontextprotocol/inspector` → open http://localhost:5173, transport **Streamable HTTP**, URL `http://localhost:8787/mcp`, Connect.
 
@@ -294,12 +294,12 @@ Click the **/** ("Add files, connectors, and more") indicator by the message box
 
 | Ask | Runs | Needs |
 |---|---|---|
-| "prep this surface photo for projection: `/abs/path/surface.jpg`" | `prepare_surface` (detect → align → darken) | nothing |
-| "segment `/abs/path/frame.png` into color regions" | `extract_color_regions` | `islands` extra |
+| "what regions does this show have?" | `show_info` | nothing |
+| "render a slow ember loop for the left tower" | `texture_flow` (skill `textureflow`) | `region=` from `show_info` |
 | "what's on the surface right now?" | `get_scene_context` | engine running ↓ |
 | "make the trunk pulse purple on the bass" | `upsert_binding` / `upsert_effect` | engine running ↓ |
 
-Note the sub-steps (`darken_surface`, `align_images`, `detect_projection_surface`, `subtract_background_frame`) are **disabled** in `tools_config.json` and won't appear — `prepare_surface` covers them. Flip `enabled` there if you want them exposed.
+Show setup (photos → surface → regions → pack) is the app's, not the agent's: those steps run as app-only tools the agent never sees ([mcp-server.md](docs/reference/mcp-server.md) "Agent surface vs the app").
 
 The **engine tools** only work while the engine is up with its control surface on `ws://127.0.0.1:9123` (`pnpm tauri dev`, or `cargo run -- --ws-addr 127.0.0.1:9123`) — otherwise they return one `engine unreachable` line. Everything from [§3](#3-ai-scene-authoring-claude-desktop-or-claude-code--running-engine) applies unchanged in Desktop: the agent authors the **design** leg, you PROMOTE.
 

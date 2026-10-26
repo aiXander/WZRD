@@ -8,10 +8,10 @@
 //   + fingerprint, which Relink matches on). Nothing is copied.
 // - Click a slot = bind it on DESIGN (`clips.ts::bindClip`, through
 //   sceneCommit); T takes it live as always.
-// - Two writers: this app (whole-doc writes with a compare-and-swap on the
-//   file's mtime — a "changed" reply means an agent's `add_to_deck` wrote
-//   in between: re-read, re-apply, retry once) and the hub's `add_to_deck`.
-//   While a deck grid is mounted the file is re-read every 2 s.
+// - Only the app writes it: whole-doc writes with a compare-and-swap on the
+//   file's mtime — a "changed" reply means another seat (webview, browser
+//   seat) wrote in between: re-read, re-apply, retry once. While a deck grid
+//   is mounted the file is re-read every 2 s.
 // - Implicit signals (S6) go to the hub: `deck_add` on add, `played` with
 //   seconds on the wall when a clip leaves LIVE.
 
@@ -120,8 +120,8 @@ export function useDecksLoader() {
 
 let mounted = 0;
 let timer = 0;
-/** Re-read decks.json every 2 s while a deck grid is on screen (an agent's
- *  `add_to_deck` shows up without a reload). */
+/** Re-read decks.json every 2 s while a deck grid is on screen (another
+ *  seat's edit shows up without a reload). */
 export function useDecksLivePoll() {
   useEffect(() => {
     if (mounted++ === 0) {

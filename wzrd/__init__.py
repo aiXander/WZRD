@@ -74,12 +74,6 @@ __all__ = [
     'crop_islands_file',
     'extract_color_regions',
     'reassemble_regions',
-    # Reproject (lazy)
-    'reproject_video',
-    'reproject_videos_batch',
-    'reproject_from_islands_dir',
-    'reproject_video_with_aspect',
-    'load_island_metadata',
     # Projection detection (lazy)
     'detect_projection_area',
     'detect_projection_from_array',
@@ -87,10 +81,6 @@ __all__ = [
     'align_images',
     'align_images_file',
     'AlignmentResult',
-    # Surface preparation (use: from wzrd.prepare_surface import prepare_surface)
-    'prepare_surface',
-    # Simulate view (lazy)
-    'simulate_view',
     # Layer pack (lazy)
     'build_layerpack',
     # Utils
@@ -128,17 +118,9 @@ def __getattr__(name):
                 'iter_video_frames'):
         from . import subtract_video
         return getattr(subtract_video, name)
-    if name in ('reproject_video', 'reproject_videos_batch',
-                'reproject_from_islands_dir', 'reproject_video_with_aspect',
-                'load_island_metadata'):
-        from . import reproject
-        return getattr(reproject, name)
     if name in ('detect_projection_area', 'detect_projection_from_array'):
         from . import detect
         return getattr(detect, name)
-    if name == 'simulate_view':
-        from .simulate_view import simulate_view as _fn
-        return _fn
     if name == 'build_layerpack':
         from .layerpack import build_layerpack as _fn
         return _fn

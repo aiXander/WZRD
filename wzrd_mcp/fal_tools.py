@@ -86,7 +86,7 @@ async def _fal_subscribe(
                 log_progress(tool_name, f"Submitting to FAL ({endpoint})...")
 
             # submit + get (not subscribe): the request id is known up front,
-            # so cancel_job can stop the remote side (H2).
+            # so a cancel can stop the remote side (H2).
             handle = await asyncio.to_thread(fal_client.submit, endpoint, arguments=args)
             jobs.set_remote(f"fal|{endpoint}|{handle.request_id}",
                             lambda: asyncio.to_thread(handle.cancel))

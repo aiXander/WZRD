@@ -2,7 +2,7 @@
 
 Exposes ONLY the authoring facets of the realtime engine to a local Claude
 Code session: scoped reads (`get_scene_context`), facet-bound write verbs
-(bindings / effects / layers), and two utilities. Live operator controls
+(bindings / effects / layers), and a design-preview frame. Live operator controls
 (masters, promote/pull, preview source, probe thresholds) are deliberately
 NOT tools — they are the human's UI knobs, and the human's `promote` is the
 gate to the projector. Every write lands on the **design** leg (the engine's
@@ -425,7 +425,7 @@ def _render_bindings(
             f"{effect_name}({pdesc}){ovdesc}"
         )
     if len(bindings) == 0:
-        lines.append("  (no bindings — scene is empty; use upsert_binding or set_scene)")
+        lines.append("  (no bindings — scene is empty; use upsert_binding)")
     return "\n".join(lines)
 
 
@@ -789,15 +789,6 @@ async def upsert_effect(
     return _apply_reply(result, f"effect '{name}' upserted")
 
 
-@_engine_tool("Remove effect", destructive=True, idempotent=True)
-async def remove_effect(name: str) -> str:
-    """Delete a project-local effect's files from disk (facet: effects).
-    The in-memory definition survives until restart, so bindings that still
-    reference it keep drawing — remove those bindings too."""
-    result = await _client.request("effect.remove", {"name": name}, timeout=15.0)
-    return f"r{result.get('rev')}: effect '{name}' removed from disk."
-
-
 @_engine_tool("Set layer groups", idempotent=True)
 async def set_groups(groups: dict[str, Optional[list[str]]]) -> str:
     """Create/update/remove named layer groups in the pack's identity
@@ -831,42 +822,9 @@ async def set_labels(labels: dict[str, Optional[str]]) -> str:
     return f"r{result.get('rev')}: labels updated. Labelled layers: {ldesc}"
 
 
-@_engine_tool("Replace design scene", destructive=True)
-async def set_scene(scene_json: str) -> list:
-    """Replace the ENTIRE design scene (escape hatch — prefer the granular
-    upsert_binding/remove_binding verbs, which never re-emit the whole scene
-    into context). Use only for initial authoring from empty or a structural
-    rewrite. The scene must carry {"version": 1, "pack": "<relative pack
-    path>", "bindings": [...]}. Reply includes the probe verdict when new
-    shaders are involved."""
-    try:
-        json.loads(scene_json)
-    except ValueError as exc:
-        raise ToolError(f"scene_json is not valid JSON: {exc}")
-    result = await _client.request("scene.load", {"json": scene_json}, timeout=20.0)
-    return _apply_reply(result, "full scene")
-
-
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
-
-
-@_engine_tool("Validate WGSL", read_only=True)
-async def validate_wgsl(source: str) -> str:
-    """Dry-run naga validation of an effect WGSL body (no write, no probe).
-    Diagnostics are remapped to your source's line numbers. Cheap — use it
-    to iterate on syntax before upsert_effect."""
-    result = await _client.request("wgsl.validate", {"source": source})
-    if result.get("ok"):
-        return "WGSL valid (naga). Note: validity ≠ performance — the probe at upsert time has the last word."
-    lines = [
-        f"line {d.get('line')}:{d.get('column')}: {d.get('severity')}: {d.get('message')}"
-        for d in result.get("diagnostics", [])
-    ]
-    return "WGSL invalid:\n" + "\n".join(lines)
-
-
 @_engine_tool("Design preview frame", read_only=True)
 async def get_preview() -> list:
     """One JPEG frame of the DESIGN composite — what your current design leg
