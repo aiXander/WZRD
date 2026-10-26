@@ -355,6 +355,18 @@ export const effectUpsert = (name: string, wgsl: string, descriptor: unknown | n
   invoke<unknown>('effect_upsert', { name, wgsl, descriptor });
 export const effectRemove = (name: string) =>
   invoke<unknown>('effect_remove', { name });
+/** Rename a project effect's folder; bindings naming `from` are the caller's to rewrite. */
+export const effectRename = (from: string, to: string) =>
+  invoke<unknown>('effect_rename', { from, to });
+/** Render one design layer alone and save it as its effect's `preview.jpg`. */
+export const effectThumbnail = (binding: string) =>
+  invoke<{ ok: boolean; effect: string; path: string }>('effect_thumbnail', { binding });
+/** `{effect name: JPEG data URL}` for every project effect with a thumbnail. */
+export const effectThumbs = () => invoke<Record<string, string>>('effect_thumbs');
+/** The effect picker's groups (`<effects>/library.json`), or null. */
+export const effectLibraryRead = () => invoke<unknown>('effect_library_read');
+export const effectLibraryWrite = (scenePath: string, doc: unknown) =>
+  invoke<void>('effect_library_write', { scenePath, doc });
 export const lastPayload = <T>(channel: string) =>
   invoke<T | null>('last_payload', { channel });
 export const listEffects = () => invoke<string[]>('list_effects');

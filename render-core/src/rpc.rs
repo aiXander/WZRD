@@ -134,6 +134,23 @@ pub enum Command {
         actor: Actor,
         reply: Sender<Result<Value, String>>,
     },
+    /// Rename a project-local effect's folder. Scenes still naming `from`
+    /// keep building (the registry keeps the old definition until restart);
+    /// the caller rewrites its bindings.
+    EffectRename {
+        from: String,
+        to: String,
+        actor: Actor,
+        reply: Sender<Result<Value, String>>,
+    },
+    /// Render one design binding alone (current params, no surface photo),
+    /// crop to its regions and save `<effects>/<effect>/preview.jpg` — the
+    /// effect library's thumbnail.
+    EffectThumbnail {
+        binding: String,
+        width: Option<u32>,
+        reply: Sender<Result<Value, String>>,
+    },
     /// §5.13 — merge a delta into the pack's identity sidecar (groups +
     /// labels), write it, refresh `pack.info`, re-resolve selectors.
     IdentitySet {
@@ -206,6 +223,8 @@ impl Command {
             Command::SceneReload { .. } => "scene.reload",
             Command::EffectUpsert { .. } => "effect.upsert",
             Command::EffectRemove { .. } => "effect.remove",
+            Command::EffectRename { .. } => "effect.rename",
+            Command::EffectThumbnail { .. } => "effect.thumbnail",
             Command::IdentitySet { .. } => "identity.setGroups",
             Command::EffectDescribe { .. } => "effect.describe",
             Command::SessionSave { .. } => "session.save",
@@ -1081,6 +1100,52 @@ pub fn dispatch(
                 .map_err(RpcError::message)
         }
 
+        "effect.rename" => {
+            #[derive(Deserialize)]
+            struct Params {
+                from: String,
+                to: String,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::new(Command::EffectRename {
+                    from: p.from,
+                    to: p.to,
+                    actor: *actor,
+                    reply: reply_tx,
+                }))
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
+        "effect.thumbnail" => {
+            #[derive(Deserialize)]
+            struct Params {
+                binding: String,
+                #[serde(default)]
+                width: Option<u32>,
+            }
+            let p: Params = serde_json::from_value(req.params.clone())
+                .map_err(|e| RpcError::message(format!("params: {e}")))?;
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            cmd_tx
+                .send(EngineCommand::new(Command::EffectThumbnail {
+                    binding: p.binding,
+                    width: p.width,
+                    reply: reply_tx,
+                }))
+                .map_err(|_| RpcError::message("engine command channel closed"))?;
+            reply_rx
+                .recv()
+                .map_err(|_| RpcError::message("engine reply channel closed"))?
+                .map_err(RpcError::message)
+        }
+
         other => Err(RpcError {
             code: -32601,
             message: format!("method not found: {other}"),
@@ -1159,6 +1224,17 @@ pub fn handle(core: &mut Core, cmd: EngineCommand) {
                 }
             }
         }
+        Command::EffectRename { from, to, actor, reply } => {
+            match rename_effect(core, &from, &to) {
+                Ok(()) => core.after_effect_rename(&from, &to, actor, reply),
+                Err(e) => {
+                    let _ = reply.send(Err(format!("{e:#}")));
+                }
+            }
+        }
+        Command::EffectThumbnail { binding, width, reply } => {
+            let _ = reply.send(core.cmd_effect_thumbnail(&binding, width).map_err(|e| format!("{e:#}")));
+        }
         Command::IdentitySet {
             groups,
             labels,
@@ -1229,6 +1305,7 @@ fn write_effect(core: &mut Core, name: &str, wgsl: &str, descriptor: Option<&Val
 }
 
 fn remove_effect(core: &mut Core, name: &str) -> Result<()> {
+    check_effect_name(name)?;
     let dir = core
         .effects_dir()
         .ok_or_else(|| anyhow!("no effects directory bound — re-run with --effects"))?
@@ -1237,6 +1314,41 @@ fn remove_effect(core: &mut Core, name: &str) -> Result<()> {
     if effect_dir.exists() {
         std::fs::remove_dir_all(&effect_dir)?;
     }
+    Ok(())
+}
+
+/// A project effect name doubles as its folder name and the identifier a
+/// scene uses: letters, digits, `_` and `-` only, so it can't escape the
+/// effects directory.
+fn check_effect_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid effect name {name:?} — use letters, digits, _ or -"))
+    }
+}
+
+fn rename_effect(core: &mut Core, from: &str, to: &str) -> Result<()> {
+    check_effect_name(from)?;
+    check_effect_name(to)?;
+    let dir = core
+        .effects_dir()
+        .ok_or_else(|| anyhow!("no effects directory bound — re-run with --effects"))?
+        .to_path_buf();
+    let src = dir.join(from);
+    let dst = dir.join(to);
+    if !src.join("shader.wgsl").is_file() {
+        return Err(anyhow!("no project effect {from:?}"));
+    }
+    // Case-only renames are the same folder on a case-insensitive disk.
+    let same_folder = from.eq_ignore_ascii_case(to);
+    if !same_folder && (dst.exists() || core.effect_listed(to)) {
+        return Err(anyhow!("an effect named {to:?} already exists"));
+    }
+    std::fs::rename(&src, &dst)?;
     Ok(())
 }
 

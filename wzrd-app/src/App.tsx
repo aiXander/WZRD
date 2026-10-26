@@ -8,9 +8,9 @@
 // Nothing modal mid-set: errors surface inline or as a toast.
 
 import { useEffect, useRef } from 'react';
-import { useStore, type Catalog, type MastersState } from './state/store';
+import { useStore, type MastersState } from './state/store';
+import { loadCatalog } from './state/effectLibrary';
 import {
-  effectDescribe,
   engineStatus,
   lastPayload,
   listEffects,
@@ -46,17 +46,6 @@ import { Prepare } from './routes/Prepare';
 import { Align } from './routes/Align';
 import { Perform } from './routes/Perform';
 import { DebugRoute } from './routes/Debug';
-
-async function loadCatalog() {
-  try {
-    const res: any = await effectDescribe();
-    const next: Catalog = {};
-    for (const e of res?.effects ?? []) next[e.name] = { kind: e.kind, inputs: e.inputs ?? [] };
-    useStore.getState().setCatalog(next);
-  } catch (e) {
-    console.warn('effect.describe', e);
-  }
-}
 
 /** Run `hydrate` now, or once more after the in-flight one — a re-root
  *  fires both the status edge and `engine:project`. */

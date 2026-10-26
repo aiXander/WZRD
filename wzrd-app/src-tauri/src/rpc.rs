@@ -348,6 +348,76 @@ pub fn effect_remove(state: State<AppState>, name: String) -> Result<Value, Stri
         .map_err(|e| format!("{e:#}"))
 }
 
+/// Rename a project effect's folder (the caller rewrites bindings after).
+#[tauri::command]
+pub fn effect_rename(state: State<AppState>, from: String, to: String) -> Result<Value, String> {
+    state
+        .engine()?
+        .request("effect.rename", json!({ "from": from, "to": to }), LONG_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Render one design layer alone and save it as its effect's `preview.jpg`.
+#[tauri::command]
+pub fn effect_thumbnail(state: State<AppState>, binding: String) -> Result<Value, String> {
+    state
+        .engine()?
+        .request("effect.thumbnail", json!({ "binding": binding }), LONG_TIMEOUT)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Every project effect's thumbnail as `{name: data-URL}` (only effects that
+/// have a `preview.jpg`). A few KB each, so one call serves the whole picker.
+#[tauri::command]
+pub fn effect_thumbs(state: State<AppState>) -> Result<Value, String> {
+    let Some(dir) = state.session().effects_dir.clone() else { return Ok(json!({})) };
+    let mut out = serde_json::Map::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(json!({})) };
+    use base64::Engine;
+    for entry in entries.flatten() {
+        let p = entry.path().join("preview.jpg");
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
+        if let Ok(bytes) = std::fs::read(&p) {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            out.insert(name, json!(format!("data:image/jpeg;base64,{b64}")));
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// The effect picker's groups, `<effects>/library.json`, written only by the
+/// webview (`src/state/effectLibrary.ts`). Null when the project has none.
+#[tauri::command]
+pub fn effect_library_read(state: State<AppState>) -> Result<Value, String> {
+    let Some(dir) = state.session().effects_dir.clone() else { return Ok(Value::Null) };
+    Ok(std::fs::read_to_string(dir.join("library.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(Value::is_object)
+        .unwrap_or(Value::Null))
+}
+
+/// Replace `<effects>/library.json` (atomic: tmp + rename). `scene_path`
+/// names the project it was made in, so a late write after a project switch
+/// is dropped instead of landing in the other show.
+#[tauri::command]
+pub fn effect_library_write(state: State<AppState>, scene_path: String, doc: Value) -> Result<(), String> {
+    if !doc.is_object() {
+        return Err("library doc must be a JSON object".into());
+    }
+    let session = state.session();
+    if session.scene_path.to_string_lossy() != scene_path {
+        return Err("project switched — library write dropped".into());
+    }
+    let dir = session.effects_dir.clone().ok_or("no effects directory bound")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
+    let target = dir.join("library.json");
+    let tmp = dir.join("library.json.tmp");
+    let text = serde_json::to_string_pretty(&doc).map_err(|e| format!("{e}"))?;
+    std::fs::write(&tmp, text).map_err(|e| format!("{e}"))?;
+    std::fs::rename(&tmp, &target).map_err(|e| format!("{e}"))
+}
+
 #[tauri::command]
 pub fn last_payload(state: State<AppState>, channel: String) -> Option<Value> {
     state.engine().ok()?.last_payload(&channel)

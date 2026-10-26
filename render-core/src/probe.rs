@@ -611,6 +611,20 @@ fn read_thumbnail(
     w: u32,
     h: u32,
 ) -> Option<String> {
+    let (jpeg, _, _) = read_jpeg(gpu, texture, [0, 0, w, h], 160)?;
+    use base64::Engine;
+    Some(base64::engine::general_purpose::STANDARD.encode(jpeg))
+}
+
+/// Blocking readback of `rect` (`[x, y, w, h]`) of a composite-format
+/// texture → a JPEG at most `target_w` wide. Returns the bytes and size.
+pub(crate) fn read_jpeg(
+    gpu: &GpuContext,
+    texture: &wgpu::Texture,
+    rect: [u32; 4],
+    target_w: u32,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let [x, y, w, h] = rect;
     let bytes_per_row = ((w * 8 + 255) / 256) * 256;
     let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("probe thumbnail readback"),
@@ -627,7 +641,7 @@ fn read_thumbnail(
         wgpu::ImageCopyTexture {
             texture,
             mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
+            origin: wgpu::Origin3d { x, y, z: 0 },
             aspect: wgpu::TextureAspect::All,
         },
         wgpu::ImageCopyBuffer {
@@ -655,11 +669,10 @@ fn read_thumbnail(
     }
     let jpeg = {
         let data = buffer.slice(..).get_mapped_range();
-        crate::telemetry::encode_jpeg_thumbnail(&data, w, h, bytes_per_row, 160).ok()
+        crate::telemetry::encode_jpeg_thumbnail(&data, w, h, bytes_per_row, target_w).ok()
     };
     buffer.unmap();
-    use base64::Engine;
-    jpeg.map(|(bytes, _, _)| base64::engine::general_purpose::STANDARD.encode(bytes))
+    jpeg
 }
 
 #[cfg(test)]

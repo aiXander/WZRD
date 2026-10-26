@@ -13,7 +13,7 @@
 //! `shaders/effect_template.wgsl`). Built-ins compile into one shared
 //! pipeline with an `effect_id` switch; user effects each get their own.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -514,6 +514,10 @@ pub struct EffectRegistry {
     /// unchanged effects on a directory rescan instead of recompiling every
     /// user pipeline on every save (architecture review v1 #7).
     file_mtimes: HashMap<PathBuf, SystemTime>,
+    /// User effects whose folder left disk (deleted or renamed). They stay
+    /// resolvable until restart so a scene still referencing one keeps
+    /// building, but the catalog no longer lists them.
+    gone: HashSet<String>,
 }
 
 impl EffectRegistry {
@@ -522,6 +526,7 @@ impl EffectRegistry {
             effects: HashMap::new(),
             effects_dir,
             file_mtimes: HashMap::new(),
+            gone: HashSet::new(),
         };
         for d in built_in_defs() {
             r.effects.insert(d.name.clone(), d);
@@ -553,6 +558,9 @@ impl EffectRegistry {
                 return changed;
             }
         };
+        // Folder names as listed — not `Path::exists`, which on a
+        // case-insensitive disk still finds `flow/` after a rename to `Flow/`.
+        let mut seen: HashSet<String> = HashSet::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -562,6 +570,9 @@ impl EffectRegistry {
             let descriptor_path = path.join("descriptor.json");
             if !shader_path.exists() {
                 continue;
+            }
+            if let Some(n) = path.file_name().and_then(|s| s.to_str()) {
+                seen.insert(n.to_string());
             }
 
             // Editor saves often fire 2–3 notify events per atomic write
@@ -604,7 +615,29 @@ impl EffectRegistry {
                 }
             }
         }
+        self.mark_gone(&seen);
         changed
+    }
+
+    /// Recompute [`Self::gone`]: user effects whose folder is no longer on
+    /// disk. Their mtime entry is dropped so a re-created folder (undo of a
+    /// delete) loads again.
+    fn mark_gone(&mut self, seen: &HashSet<String>) {
+        self.gone.clear();
+        for (name, def) in &self.effects {
+            if let EffectKind::User { source_path: Some(p), .. } = &def.kind {
+                if !seen.contains(name) {
+                    self.gone.insert(name.clone());
+                    self.file_mtimes.remove(p);
+                }
+            }
+        }
+    }
+
+    /// The effect exists and is listed in the catalog (not a built-in
+    /// shadowed away, not a project effect whose folder left disk).
+    pub fn is_listed(&self, name: &str) -> bool {
+        self.effects.contains_key(name) && !self.gone.contains(name)
     }
 
     pub fn resolve_named(&self, name: &str) -> Result<EffectDef> {
@@ -629,7 +662,12 @@ impl EffectRegistry {
                 v
             }),
             None => {
-                let mut defs: Vec<&EffectDef> = self.effects.values().collect();
+                let mut defs: Vec<&EffectDef> = self
+                    .effects
+                    .iter()
+                    .filter(|(name, _)| !self.gone.contains(*name))
+                    .map(|(_, d)| d)
+                    .collect();
                 defs.sort_by(|a, b| a.name.cmp(&b.name));
                 Ok(serde_json::json!({
                     "effects": defs.iter().map(|d| describe_def(d)).collect::<Vec<_>>(),
@@ -903,6 +941,41 @@ mod tests {
         let all = r.describe(None).unwrap();
         assert!(all["effects"].as_array().unwrap().len() >= 4);
         assert!(r.describe(Some("nope")).is_err());
+    }
+
+    #[test]
+    fn removed_or_renamed_effect_leaves_catalog_but_stays_resolvable() {
+        let dir = std::env::temp_dir().join(format!("wzrd_fx_gone_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("glow")).unwrap();
+        fs::write(
+            dir.join("glow/shader.wgsl"),
+            "fn effect(uv: vec2<f32>, mask: f32) -> vec4<f32> { return vec4<f32>(mask); }",
+        )
+        .unwrap();
+        let listed = |r: &EffectRegistry| -> Vec<String> {
+            r.describe(None).unwrap()["effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let mut r = EffectRegistry::new(Some(dir.clone()));
+        assert!(listed(&r).contains(&"glow".to_string()));
+
+        fs::rename(dir.join("glow"), dir.join("halo")).unwrap();
+        r.rescan_disk();
+        let names = listed(&r);
+        assert!(!names.contains(&"glow".to_string()) && names.contains(&"halo".to_string()));
+        assert!(r.resolve_named("glow").is_ok(), "a scene still naming it keeps building");
+        assert!(!r.is_listed("glow") && r.is_listed("halo"));
+
+        // Undo: the folder comes back and is listed again.
+        fs::rename(dir.join("halo"), dir.join("glow")).unwrap();
+        r.rescan_disk();
+        assert!(r.is_listed("glow"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -36,6 +36,7 @@ import {
 import { Btn } from '../../ui/primitives';
 import { JobTile } from '../../ui/media/JobTile';
 import { RecentlyDeleted } from '../../ui/media/RecentlyDeleted';
+import { copyPaths } from '../../ui/media/copyPath';
 import { startPathDrag } from '../../ui/media/pathDrag';
 import { sameDir } from '../../ui/media/types';
 
@@ -306,6 +307,19 @@ const Tile = memo(function Tile({
         onDoubleClick={(e) => e.stopPropagation()}
       >
         ⤢
+      </button>
+      <button
+        className="absolute top-[52px] right-1 w-6 h-6 rounded bg-black/75 border border-line2 text-[11px] leading-none text-fg2 hover:text-fg hover:border-fg4 opacity-0 group-hover:opacity-100 transition-opacity"
+        title="Copy the full path (the whole selection, one per line, when this tile is selected)"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const sel = useStudio.getState().selected;
+          copyPaths(sel.includes(item.path) ? sel : [item.path]);
+        }}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        ⧉
       </button>
       <div className="px-1.5 py-1 flex items-center gap-1 min-w-0">
         <span className="text-[10px] text-fg2 truncate flex-1 min-w-0">{item.name}</span>

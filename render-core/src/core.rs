@@ -1526,6 +1526,82 @@ impl Core {
         })));
     }
 
+    /// Post-`effect.rename` bookkeeping: rescan (the old name drops out of
+    /// the catalog but stays resolvable, so a scene still naming it keeps
+    /// building until the caller rewrites its bindings) + change-ring entry.
+    pub fn after_effect_rename(
+        &mut self,
+        from: &str,
+        to: &str,
+        actor: Actor,
+        reply: crossbeam_channel::Sender<Result<serde_json::Value, String>>,
+    ) {
+        let _ = self.registry.rescan_disk();
+        let rev = self.changes.record(
+            &self.bus,
+            actor.as_str(),
+            "effects",
+            format!("effect {from:?} renamed to {to:?}"),
+        );
+        let _ = reply.send(Ok(serde_json::json!({
+            "ok": true,
+            "from": from,
+            "to": to,
+            "epoch": self.changes.epoch(),
+            "rev": rev,
+        })));
+    }
+
+    /// The effect is in the catalog (built-in, or a project effect on disk).
+    pub fn effect_listed(&self, name: &str) -> bool {
+        self.registry.is_listed(name)
+    }
+
+    /// `effect.thumbnail` — render one binding of the design leg (the
+    /// headless single leg otherwise) alone with its current params, crop to
+    /// the regions it lights and save the JPEG as its project effect's
+    /// `preview.jpg`. Raw light only: no surface photo, no masters, no warp.
+    pub fn cmd_effect_thumbnail(&mut self, binding: &str, width: Option<u32>) -> Result<serde_json::Value> {
+        let gpu = self.gpu.as_ref().context("no GPU context")?;
+        let (scene, plan) = match self.design.as_ref() {
+            Some(d) => (&d.scene, d.plan.as_ref()),
+            None => (&self.scene, self.plan.as_ref()),
+        };
+        let spec = scene
+            .bindings
+            .iter()
+            .find(|b| b.id == binding)
+            .with_context(|| format!("no layer {binding:?} in the design scene"))?;
+        let crate::scene::EffectRef::Named(name) = &spec.effect else {
+            anyhow::bail!("layer {binding:?} runs an inline effect — only project effects keep a thumbnail");
+        };
+        let dir = self
+            .effects_dir
+            .as_ref()
+            .context("no effects directory bound")?
+            .join(name);
+        if !dir.join("shader.wgsl").is_file() {
+            anyhow::bail!("{name:?} is not a project effect");
+        }
+        let plan = plan.context("the design leg has no plan yet")?;
+        let (texture, rect) = plan
+            .render_binding_alone(gpu, binding)
+            .with_context(|| format!("layer {binding:?} draws nothing right now (muted, faded out or picked out)"))?;
+        let (jpeg, w, h) = crate::probe::read_jpeg(gpu, &texture, rect, width.unwrap_or(320).clamp(32, 1024))
+            .context("thumbnail readback failed")?;
+        let path = dir.join("preview.jpg");
+        let tmp = dir.join("preview.jpg.tmp");
+        std::fs::write(&tmp, &jpeg)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "effect": name,
+            "path": path.display().to_string(),
+            "width": w,
+            "height": h,
+        }))
+    }
+
     /// §5.13 `identity.setGroups` — merge the delta into the pack's identity
     /// sidecar, persist it, refresh the served `pack.info`, and re-resolve
     /// scene selectors against the new group membership.

@@ -17,6 +17,7 @@ import { SurfaceMap } from '../components/SurfaceMap';
 import { ClipGrid } from '../components/ClipGrid';
 import { LayerList, RegionList } from '../components/LayerList';
 import { DarkRegionInspector, LayerInspector, defaultsFor } from '../components/LayerInspector';
+import { useAutoThumbs } from '../state/effectLibrary';
 import { clearSelection, setDeck } from '../state/actions';
 import { commitSceneMutation } from '../state/sceneCommit';
 import { regionName, selectorCovers, uniqueId, useScene } from '../state/scene';
@@ -27,6 +28,7 @@ import { Pane, Split } from '../ui/layoutSplit';
 const MonacoPanel = lazy(() => import('../components/MonacoPanel').then((m) => ({ default: m.MonacoPanel })));
 
 export function Prepare() {
+  useAutoThumbs();
   const pack = useStore((s) => s.pack);
   const catalog = useStore((s) => s.catalog);
   const selected = useStore((s) => s.selectedBindingId);

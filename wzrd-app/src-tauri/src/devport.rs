@@ -271,6 +271,13 @@ fn dispatch(app: &AppHandle, cmd: &str, a: &Value) -> Result<Value, String> {
         "write_scene_file" => ok(rpc::write_scene_file(st(), s("contents")?)),
         "list_effects" => ok(rpc::list_effects(st())),
         "read_effect" => ok(rpc::read_effect(st(), s("name")?)),
+        "effect_thumbs" => rpc::effect_thumbs(st()),
+        "effect_library_read" => rpc::effect_library_read(st()),
+        "effect_library_write" => ok(rpc::effect_library_write(
+            st(),
+            s("scenePath")?,
+            a.get("doc").cloned().unwrap_or(Value::Null),
+        )),
         "read_mask_png" => ok(rpc::read_mask_png_in(&st(), s("maskPath")?)),
         "looks_list" => ok(rpc::looks_list_in(&st())),
         "look_read" => ok(rpc::look_read(st(), s("name")?)),

@@ -126,7 +126,7 @@ export type Connectivity = {
   ws: { status: string; detail: string | null };
 };
 
-interface Store {
+export interface Store {
   // engine lifecycle
   engineRunning: boolean;
   setEngineRunning: (v: boolean) => void;

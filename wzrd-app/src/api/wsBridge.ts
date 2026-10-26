@@ -61,6 +61,8 @@ const ENGINE: Record<string, (a: any) => [string, Record<string, unknown>]> = {
     { name: a.name, wgsl: a.wgsl, descriptor: a.descriptor ?? null },
   ],
   effect_remove: (a) => ['effect.remove', { name: a.name }],
+  effect_rename: (a) => ['effect.rename', { from: a.from, to: a.to }],
+  effect_thumbnail: (a) => ['effect.thumbnail', { binding: a.binding }],
 };
 
 const SHELL_COMMANDS = new Set([
@@ -74,6 +76,9 @@ const SHELL_COMMANDS = new Set([
   'ui_layout_write',
   'list_effects',
   'read_effect',
+  'effect_thumbs',
+  'effect_library_read',
+  'effect_library_write',
   'read_scene_file',
   'write_scene_file',
   'read_mask_png',

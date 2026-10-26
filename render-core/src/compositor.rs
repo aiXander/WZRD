@@ -734,6 +734,11 @@ impl PassPlan {
             occlusion_query_set: None,
             timestamp_writes,
         });
+        self.draw_passes(gpu, &mut pass, |_| true);
+    }
+
+    /// Draw the passes `keep` admits into an open composite pass.
+    fn draw_passes(&self, gpu: &GpuContext, pass: &mut wgpu::RenderPass<'_>, keep: impl Fn(&LayerPass) -> bool) {
         // Avoid redundant pipeline switches when consecutive layers share one.
         let mut bound: Option<&str> = None;
         // Region passes shade only their mask's box (§2.4 output bounds);
@@ -742,7 +747,7 @@ impl PassPlan {
         let full = [0, 0, cw, ch];
         let mut scissor = full;
         for layer in &self.layer_passes {
-            if !layer.active || layer.opacity <= 0.0 {
+            if !layer.active || layer.opacity <= 0.0 || !keep(layer) {
                 // Picked out this cycle (§5.2) — the pass stays in the plan
                 // so re-picking is a flag flip, but it draws nothing. A
                 // faded-out/muted layer likewise costs no GPU work.
@@ -776,6 +781,81 @@ impl PassPlan {
             pass.set_bind_group(0, &layer.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+
+    /// Render one binding's passes alone (as of the last tick) into a fresh
+    /// composite-sized texture — the effect library's thumbnail. Returns the
+    /// texture and the pixel rect `[x, y, w, h]` its passes cover, or `None`
+    /// when the binding draws nothing right now (muted, faded, picked out,
+    /// or not in this plan).
+    pub fn render_binding_alone(
+        &self,
+        gpu: &GpuContext,
+        binding: &str,
+    ) -> Option<(wgpu::Texture, [u32; 4])> {
+        let (cw, ch) = (gpu.composite_width, gpu.composite_height);
+        let drawn: Vec<&LayerPass> = self
+            .layer_passes
+            .iter()
+            .filter(|p| p.binding_id == binding && p.active && p.opacity > 0.0)
+            .collect();
+        if drawn.is_empty() {
+            return None;
+        }
+        // Union of the passes' scissors; a full-canvas pass covers it all.
+        let mut rect: Option<[u32; 4]> = None;
+        for p in &drawn {
+            let [x, y, w, h] = p.scissor.unwrap_or([0, 0, cw, ch]);
+            let (x, y) = (x.min(cw), y.min(ch));
+            let (x1, y1) = ((x + w).min(cw), (y + h).min(ch));
+            rect = Some(match rect {
+                None => [x, y, x1, y1],
+                Some([a, b, c, d]) => [a.min(x), b.min(y), c.max(x1), d.max(y1)],
+            });
+        }
+        let [x0, y0, x1, y1] = rect?;
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("binding thumbnail target"),
+            size: wgpu::Extent3d {
+                width: cw,
+                height: ch,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: crate::gpu::COMPOSITE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("binding thumbnail encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("binding thumbnail pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            self.draw_passes(gpu, &mut pass, |p| p.binding_id == binding);
+        }
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        Some((texture, [x0, y0, x1 - x0, y1 - y0]))
     }
 
     /// Snapshot the plan's pipeline cache keys — the §5.6 cross-leg eviction

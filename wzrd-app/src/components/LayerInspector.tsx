@@ -1,13 +1,15 @@
 // Prepare's inspector for one design binding: name + Duplicate / Delete /
 // deselect in the header (they used to sit under the dials list, out of
-// sight), target ("Lights up"), effect cards, then the author-mode dials.
+// sight), target ("Lights up"), the grouped effect picker, then the
+// author-mode dials.
 
 import { useMemo } from 'react';
 import { clearSelection, deleteLayer } from '../state/actions';
 import { commitSceneMutation } from '../state/sceneCommit';
-import { prettify, regionName, uniqueId, type Binding } from '../state/scene';
+import { regionName, uniqueId, type Binding } from '../state/scene';
 import { useStore, type EffectInput } from '../state/store';
 import { Btn, InlineEdit, Seg } from '../ui/primitives';
+import { EffectPicker } from './EffectPicker';
 import { LayerParams, toHex } from './LayerParams';
 
 /** Scene params for an effect's inputs, keeping values `prev` already has. */
@@ -95,9 +97,6 @@ export function LayerInspector({ binding, bindings }: { binding: Binding; bindin
     setSelected(id);
   }
 
-  const effects = Object.entries(catalog).sort(([a, x], [b, y]) =>
-    x.kind === y.kind ? a.localeCompare(b) : x.kind === 'user' ? -1 : 1
-  );
   const current = typeof binding.effect === 'string' ? binding.effect : null;
   const pickMode: 'none' | 'random_each' | 'random_static' = sel.pick?.mode ?? 'none';
 
@@ -171,25 +170,8 @@ export function LayerInspector({ binding, bindings }: { binding: Binding; bindin
       </div>
 
       <div className="px-3 pt-2.5 pb-3 border-b border-line">
-        <div className="label mb-2">Effect</div>
-        <div className="grid grid-cols-2 gap-1.5">
-          {effects.map(([name, e]) => (
-            <button
-              key={name}
-              onClick={() => switchEffect(name)}
-              className={
-                'h-11 rounded-md border px-2 text-left flex flex-col justify-center ' +
-                (current === name ? 'border-design bg-design/10' : 'border-line bg-panel2 hover:border-line2')
-              }
-            >
-              <span className="text-[12px] font-medium truncate">{prettify(name)}</span>
-              <span className="text-[9px] text-fg3">
-                {e.kind === 'user' ? 'project' : 'built-in'} · {e.inputs.length} dial{e.inputs.length === 1 ? '' : 's'}
-              </span>
-            </button>
-          ))}
-          {!current && <div className="col-span-2 text-[11px] text-fg3">Inline WGSL effect — edit it under Code.</div>}
-        </div>
+        <EffectPicker current={current} onPick={switchEffect} />
+        {!current && <div className="mt-1.5 text-[11px] text-fg3">Inline WGSL effect — edit it under Code.</div>}
       </div>
 
       <div className="min-h-[200px]">

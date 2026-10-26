@@ -61,6 +61,8 @@ const QUEUED_METHODS: &[&str] = &[
     "scene.reload",
     "effect.upsert",
     "effect.remove",
+    "effect.rename",
+    "effect.thumbnail",
     "effect.describe",
     "session.save",
     "promote",
